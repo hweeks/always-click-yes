@@ -12,8 +12,7 @@ import (
 
 var (
 	mu   sync.Mutex
-	out  io.Writer = io.Discard
-	l              = log.New(io.Discard, "", log.LstdFlags|log.Lmicroseconds)
+	l    = log.New(io.Discard, "", log.LstdFlags|log.Lmicroseconds)
 	file *os.File
 	path string
 )
@@ -28,7 +27,6 @@ func Open(p string) (string, error) {
 	mu.Lock()
 	defer mu.Unlock()
 	file = f
-	out = f
 	path = p
 	l.SetOutput(f)
 	return p, nil
@@ -48,7 +46,6 @@ func Close() {
 	if file != nil {
 		_ = file.Close()
 		file = nil
-		out = io.Discard
 		l.SetOutput(io.Discard)
 	}
 }
