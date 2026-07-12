@@ -1,0 +1,6 @@
+{"type":"system","subtype":"init","cwd":"/tmp/x","session_id":"b2240501-86e1-47a6-9e96-688222d63fff","tools":["Bash"],"model":"claude-sonnet-5","permissionMode":"default","capabilities":["interrupt_receipt_v1","msg_lifecycle_v1"]}
+{"type":"assistant","message":{"model":"claude-sonnet-5","role":"assistant","content":[{"type":"thinking","thinking":"Let me run the command.\nStep two.","signature":"abc"}]}}
+{"type":"assistant","message":{"model":"claude-sonnet-5","role":"assistant","content":[{"type":"tool_use","id":"toolu_01URPAqstoCXFcfhT2Pg5HMY","name":"Bash","input":{"command":"echo probe-ok","description":"Print probe-ok"}}]}}
+{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_01URPAqstoCXFcfhT2Pg5HMY","type":"tool_result","content":"probe-ok","is_error":false}]}}
+{"type":"assistant","message":{"model":"claude-sonnet-5","role":"assistant","content":[{"type":"text","text":"probe-ok"}]}}
+{"type":"result","subtype":"success","is_error":false,"num_turns":2,"result":"probe-ok","stop_reason":"end_turn","session_id":"b2240501-86e1-47a6-9e96-688222d63fff","total_cost_usd":0.0279962,"terminal_reason":"completed","permission_denials":[]}

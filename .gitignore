@@ -1,0 +1,12 @@
+# build output
+/acy
+/dist/
+
+# debug logs
+*.log
+
+# go
+/vendor/
+
+# editor / os
+.DS_Store
