@@ -1,5 +1,7 @@
 # always-click-yes
 
+[![CI](https://github.com/hweeks/always-click-yes/actions/workflows/ci.yml/badge.svg)](https://github.com/hweeks/always-click-yes/actions/workflows/ci.yml)
+
 A terminal supervisor for long-running [Claude Code](https://claude.com/claude-code)
 tasks. You plan a task interactively, **arm** it, and `always-click-yes` approves
 each permission prompt after a short, interruptible countdown — then, when the run
@@ -30,15 +32,33 @@ Two processes back the two phases: planning runs in `--permission-mode plan`
 (nothing executes); arming resumes the **same session** with the hook wired in and
 the default (gated) permission mode.
 
-## Build & run
+## Install
+
+**Prerequisites:** Go 1.26+ and the [Claude Code](https://claude.com/claude-code) CLI
+(`claude`) on your `PATH` and authenticated (`claude auth`).
+
+**With `go install`** (puts `acy` in `$(go env GOPATH)/bin` — add that to your `PATH`):
 
 ```sh
-go build -o acy .
-./acy run                 # in the project directory you want Claude to work in
-./acy run --model opus --countdown 20s
+go install github.com/hweeks/always-click-yes@latest
+mv "$(go env GOPATH)/bin/always-click-yes" "$(go env GOPATH)/bin/acy"  # optional: shorter name
 ```
 
-Requires `claude` (Claude Code CLI) on your `PATH` and authenticated.
+**From source:**
+
+```sh
+git clone https://github.com/hweeks/always-click-yes.git
+cd always-click-yes
+go build -o acy .
+# optionally: sudo mv acy /usr/local/bin/
+```
+
+## Run
+
+```sh
+acy run                    # in the project directory you want Claude to work in
+acy run --model opus --countdown 20s
+```
 
 ## Keys
 

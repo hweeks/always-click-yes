@@ -65,7 +65,7 @@ func runSupervisor(ctx context.Context, f runFlags) error {
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(tmp)
+	defer func() { _ = os.RemoveAll(tmp) }()
 
 	// Start the gate server, then generate settings that point claude's
 	// PreToolUse hook at it.
@@ -73,7 +73,7 @@ func runSupervisor(ctx context.Context, f runFlags) error {
 	if err != nil {
 		return fmt.Errorf("gate listen: %w", err)
 	}
-	defer srv.Close()
+	defer func() { _ = srv.Close() }()
 
 	settingsPath, err := config.WriteHookSettings(tmp, exe, srv.SocketPath())
 	if err != nil {

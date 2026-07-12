@@ -1,0 +1,13 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: standard # errcheck, govet, ineffassign, staticcheck, unused
+  exclusions:
+    rules:
+      # Test helpers routinely ignore cleanup errors (srv.Close, etc.).
+      - path: _test\.go
+        linters:
+          - errcheck

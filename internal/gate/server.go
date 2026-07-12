@@ -84,7 +84,7 @@ func (s *Server) accept() {
 }
 
 func (s *Server) handle(conn net.Conn) {
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	br := bufio.NewReaderSize(conn, 1<<20)
 	line, err := br.ReadBytes('\n')

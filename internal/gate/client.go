@@ -14,7 +14,7 @@ func Ask(socket string, raw []byte) (Decision, error) {
 	if err != nil {
 		return Decision{}, err
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	if _, err := conn.Write(append(trimNL(raw), '\n')); err != nil {
 		return Decision{}, err
