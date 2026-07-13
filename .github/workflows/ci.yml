@@ -9,6 +9,44 @@ permissions:
   contents: read
 
 jobs:
+  # Every human-authored commit must carry the Co-Authored-By: Claude trailer — this
+  # repo's contributions are AI-assisted by policy, and the trailer is the record of it.
+  ai-attribution:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # need full history to walk base..head
+      - name: check Co-Authored-By trailer
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          missing=0
+          # --no-merges: a merge commit carries no authorship of its own.
+          for sha in $(git rev-list --no-merges "$BASE..$HEAD"); do
+            author=$(git log -1 --format='%an <%ae>' "$sha")
+            # Bots can't sign as AI-assisted, and release-please's own
+            # "chore(release):" commits would otherwise deadlock every release.
+            case "$author" in
+              *"[bot]"*|*"noreply@github.com"*) continue ;;
+            esac
+            if git log -1 --format='%B' "$sha" | grep -qiE '^[[:space:]]*Co-Authored-By:[[:space:]]*Claude'; then
+              echo "ok      $(git log -1 --format='%h %s' "$sha")"
+            else
+              echo "::error::$(git log -1 --format='%h %s' "$sha") is missing the 'Co-Authored-By: Claude' trailer"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo
+            echo "Every commit must end with, e.g.:"
+            echo "  Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
+            echo "Fix with: git rebase -i --exec 'git commit --amend --no-edit --trailer \"Co-Authored-By: Claude <noreply@anthropic.com>\"' $BASE"
+            exit 1
+          fi
+
   lint:
     runs-on: ubuntu-latest
     steps:

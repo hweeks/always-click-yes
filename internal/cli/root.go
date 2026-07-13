@@ -3,6 +3,8 @@ package cli
 
 import (
 	"github.com/spf13/cobra"
+
+	"github.com/hweeks/always-click-yes/internal/version"
 )
 
 // Root returns the root command. With no subcommand it runs the supervisor TUI.
@@ -13,9 +15,11 @@ func Root() *cobra.Command {
 		Long: "always-click-yes supervises a Claude Code session: you plan a task,\n" +
 			"arm it, and it auto-approves each permission prompt after a short,\n" +
 			"interruptible countdown — then checks whether the plan is complete.",
+		Version:       version.String(),
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
+	root.SetVersionTemplate("{{.Name}} {{.Version}}\n")
 
 	runCmd := newRunCmd()
 	root.AddCommand(runCmd)

@@ -3,6 +3,26 @@
 Read this first. It captures what took real probing to learn so you don't have to
 rediscover it.
 
+## Use the tool to build the tool
+
+Work on this repo **through `acy` itself**. Plan the change interactively, `Ctrl+G` to arm
+it, and let the countdown approve its own way to the finish:
+
+```sh
+go build -o acy . && ./acy run    # from the repo root
+```
+
+This is not ceremony. It is the only honest test the project has. `acy` exists to be
+trusted unsupervised, and a change that is comfortable to ship only because a human sat
+there approving each step has not actually been tested — it has been chaperoned. Dogfooding
+is also the fastest way these bugs surface: the gate deadlocks, the phantom keystrokes, the
+judge that grades its own homework, the API key that silently bills the wrong account were
+all found by running `acy` on `acy` and watching it misbehave in real time.
+
+So: if you are an agent working here, you are both the author and the subject. Build the
+change with the tool, and when the tool does something stupid to you, that is the bug —
+fix it rather than working around it by hand.
+
 ## What this is
 
 A Go TUI (Cobra + Bubble Tea + Lipgloss) that supervises a **Claude Code** session
@@ -124,4 +144,29 @@ Live tests need the `claude` CLI on PATH and auth. CI skips them.
 - Keep the debug log useful: new subsystems should `alog.Printf`/`alog.Raw` their key events.
 - UI transcript is structured `entry` values rendered in `render.go` — add an `ekind` rather
   than pre-styling strings, so entries re-render correctly on resize.
-- End commit messages with the Co-Authored-By trailer.
+- End commit messages with the Co-Authored-By trailer. **CI enforces this** — the
+  `ai-attribution` job fails a PR if any non-merge, non-bot commit lacks a
+  `Co-Authored-By: Claude ...` line. Contributions here are AI-assisted by policy and the
+  trailer is the record of it.
+
+## Commits and releases
+
+Commit subjects **must** follow [Conventional Commits](https://www.conventionalcommits.org)
+— release-please parses them to decide the next version, and a subject it can't parse
+contributes nothing to the changelog:
+
+```
+feat: add an independent completion judge      -> minor bump (0.2.0)
+fix: strip ANTHROPIC_API_KEY from the child    -> patch bump (0.1.1)
+feat!: rename --countdown to --delay           -> major bump (see below)
+docs|test|chore|refactor|perf: ...             -> no release on its own
+```
+
+A `!` after the type (or a `BREAKING CHANGE:` footer) marks a breaking change. While the
+project is pre-1.0 that bumps the *minor*, not the major.
+
+Releases are automatic: merging to `main` makes release-please open or update a
+`chore(release): x.y.z` PR. Nothing ships until you merge that PR — doing so tags the
+commit, writes `CHANGELOG.md`, and `.github/workflows/release.yml` attaches the
+cross-compiled binaries. Don't tag by hand; `.release-please-manifest.json` tracks the
+current version and hand-tagging desyncs it.
