@@ -11,6 +11,34 @@ the run loops itself to the finish, hands-free.
 It exists to solve one problem: *sitting at the keyboard pressing "yes" for the
 length of a long task.*
 
+## What this actually is
+
+This is an experiment in total trust, and you should read it as one.
+
+The bet: a human makes contact exactly once — at the plan — and after that the machine
+runs unattended to the end. No approvals, no spot-checks, no one reading the diff as it
+lands. The only human judgment in the loop is spent up front, on *what* to build. Every
+decision after that is delegated, including the decision about whether the work is done,
+which is why the completion judge is a **separate Claude session**: the model that did the
+work does not get to grade its own homework. That's not a safety feature so much as an
+acknowledgment that we removed the person who used to do the grading.
+
+Call the output what it is. Unsupervised codegen at volume is slop, and this tool is a
+slop pump with a countdown timer. It is built to find out what happens when you stop
+pretending otherwise and just let the thing run — and to be honest about the failure
+modes when it does, rather than quietly cleaning them up before anyone notices.
+
+It is also a sincere accelerant. It really will hand you back the hours you currently
+spend pressing `y`, and you really can go do something else with them. That is the pitch,
+and it is worth sitting with how good the pitch sounds, because it is the same pitch
+pointed at a future where the only thing software engineering is understood to produce is
+the relentless release of new features — at any human cost. This tool is what that future
+feels like from the inside: pleasant, fast, and entirely hands-off. Whether that reads as
+a promise or a warning is left, deliberately, to the reader.
+
+The countdown is interruptible and the veto key is `s`. It is the most important key on
+the board and you will almost never press it. That is the whole finding.
+
 ## How it works
 
 `always-click-yes` drives `claude` in stream-json mode (the same channel the

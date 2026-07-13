@@ -3,6 +3,26 @@
 Read this first. It captures what took real probing to learn so you don't have to
 rediscover it.
 
+## Use the tool to build the tool
+
+Work on this repo **through `acy` itself**. Plan the change interactively, `Ctrl+G` to arm
+it, and let the countdown approve its own way to the finish:
+
+```sh
+go build -o acy . && ./acy run    # from the repo root
+```
+
+This is not ceremony. It is the only honest test the project has. `acy` exists to be
+trusted unsupervised, and a change that is comfortable to ship only because a human sat
+there approving each step has not actually been tested — it has been chaperoned. Dogfooding
+is also the fastest way these bugs surface: the gate deadlocks, the phantom keystrokes, the
+judge that grades its own homework, the API key that silently bills the wrong account were
+all found by running `acy` on `acy` and watching it misbehave in real time.
+
+So: if you are an agent working here, you are both the author and the subject. Build the
+change with the tool, and when the tool does something stupid to you, that is the bug —
+fix it rather than working around it by hand.
+
 ## What this is
 
 A Go TUI (Cobra + Bubble Tea + Lipgloss) that supervises a **Claude Code** session
