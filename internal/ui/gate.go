@@ -29,8 +29,12 @@ func waitGate(ch <-chan *gate.Pending) tea.Cmd {
 	}
 }
 
+// tickInterval drives both the gate countdown and the working spinner; keep it
+// brisk enough for smooth spinner motion.
+const tickInterval = 120 * time.Millisecond
+
 func tickCmd() tea.Cmd {
-	return tea.Tick(200*time.Millisecond, func(t time.Time) tea.Msg { return tickMsg(t) })
+	return tea.Tick(tickInterval, func(t time.Time) tea.Msg { return tickMsg(t) })
 }
 
 // enqueue records a new pending gate with a fresh countdown deadline.

@@ -4,6 +4,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -11,9 +12,24 @@ import (
 	"github.com/hweeks/always-click-yes/internal/gate"
 )
 
+// transcriptKeyMap restricts the viewport to deliberate scroll keys. The bubbles
+// default binds j/k/d/u/f/b and space to scrolling, which would fire while the
+// user is typing a message (the input box and viewport both receive key events).
+// Keeping only the arrows and PgUp/PgDn frees every letter for typing.
+func transcriptKeyMap() viewport.KeyMap {
+	km := viewport.DefaultKeyMap()
+	km.Up = key.NewBinding(key.WithKeys("up"))
+	km.Down = key.NewBinding(key.WithKeys("down"))
+	km.PageUp = key.NewBinding(key.WithKeys("pgup"))
+	km.PageDown = key.NewBinding(key.WithKeys("pgdown"))
+	km.HalfPageUp = key.NewBinding()
+	km.HalfPageDown = key.NewBinding()
+	return km
+}
+
 const (
 	headerHeight = 1
-	footerHeight = 3 // input/gate panel occupies three lines
+	footerHeight = 4 // framed input/gate panel occupies four lines (top rule, body×2, hint)
 )
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -25,6 +41,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		vpHeight := max(msg.Height-headerHeight-footerHeight, 3)
 		if !m.ready {
 			m.vp = viewport.New(msg.Width, vpHeight)
+			m.vp.KeyMap = transcriptKeyMap()
 			m.ready = true
 		} else {
 			m.vp.Width = msg.Width
@@ -41,6 +58,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.drv.Stop()
 			}
 			return m, tea.Quit
+		}
+		// The help overlay is dismissed by any key.
+		if m.showHelp {
+			m.showHelp = false
+			m.rebuild()
+			return m, nil
+		}
+		// The resume picker captures navigation keys until dismissed.
+		if m.picking {
+			cmd := m.handlePickKey(msg)
+			m.rebuild()
+			return m, cmd
+		}
+		// A pending AskUserQuestion captures navigation keys until answered.
+		if m.ask != nil {
+			cmd := m.handleAskKey(msg)
+			m.rebuild()
+			return m, cmd
 		}
 		// When gates are pending, keys drive the countdown instead of the input.
 		if len(m.pending) > 0 {
@@ -59,12 +94,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.planReady = false
 			m.status = "arming…"
 			m.rebuild()
-			return m, launchCmd(m.ctx, m.launcher, PhaseAutoRun, m.sessionID)
+			return m, launchCmd(m.ctx, m.launcher, LaunchSpec{Phase: PhaseAutoRun, ResumeID: m.sessionID, Model: m.nextModel})
 		}
 		if msg.Type == tea.KeyEnter {
-			m.sendInput()
+			cmd := m.handleEnter()
 			m.rebuild()
-			return m, nil
+			return m, cmd
 		}
 
 	case eventMsg:
@@ -72,9 +107,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil // stale driver
 		}
 		m.ingest(msg.ev)
-		m.onTurnEnd(msg.ev)
+		if c := m.onTurnEnd(msg.ev); c != nil {
+			cmds = append(cmds, c)
+		}
 		m.rebuild()
 		cmds = append(cmds, waitEvent(m.drv.Events(), m.gen))
+
+	case verdictMsg:
+		m.onVerdict(msg)
+		m.rebuild()
+		return m, nil
 
 	case streamClosedMsg:
 		if msg.gen != m.gen {
@@ -106,6 +148,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tickMsg:
 		m.now = time.Time(msg)
+		m.spinFrame++ // animates the footer/header spinner; View() re-renders each tick
 		m.expireDue()
 		if len(m.pending) > 0 {
 			m.rebuild()

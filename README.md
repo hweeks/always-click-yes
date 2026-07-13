@@ -5,7 +5,8 @@
 A terminal supervisor for long-running [Claude Code](https://claude.com/claude-code)
 tasks. You plan a task interactively, **arm** it, and `always-click-yes` approves
 each permission prompt after a short, interruptible countdown — then, when the run
-goes idle, it asks Claude whether the plan is complete and loops until it is.
+goes idle, an **independent Claude session** judges whether the plan is complete and
+the run loops itself to the finish, hands-free.
 
 It exists to solve one problem: *sitting at the keyboard pressing "yes" for the
 length of a long task.*
@@ -23,14 +24,23 @@ PLAN ──▶ (Ctrl+G arms) ──▶ AUTO-RUN ──▶ per-tool 30s countdown
   │  interactive                │  claude works        ▲   │(veto / pause / allow)
   │  chat & plan                │                      └───┘
   └─ session captured           ▼ idle
-                          "are we done?"  (you press Enter to send)
+                    independent judge session
+                    (plan + last message → verdict)
                                 │  STATUS: DONE ──▶ COMPLETE
-                                └▶ STATUS: CONTINUE ──▶ back to AUTO-RUN
+                                └▶ STATUS: CONTINUE ──▶ nudge back to AUTO-RUN
 ```
 
-Two processes back the two phases: planning runs in `--permission-mode plan`
-(nothing executes); arming resumes the **same session** with the hook wired in and
-the default (gated) permission mode.
+When the run goes idle, a separate one-shot `claude` session — not the one that did
+the work, so it can't grade its own homework — reads the approved plan and the
+working session's final message and returns a verdict. `DONE` ends at COMPLETE;
+`CONTINUE` automatically nudges the working session to keep going (up to a round
+cap). If that judge errors, times out, or is unclear, it falls back to a manual
+"are we done?" check you send with `Enter`.
+
+The two main phases are backed by two processes: planning runs in
+`--permission-mode plan` (nothing executes); arming resumes the **same session**
+with the hook wired in and the default (gated) permission mode. Each idle check
+spawns one more short-lived judge process.
 
 ## Install
 
@@ -70,17 +80,41 @@ acy run --model opus --countdown 20s
 | Auto-run (gate pending) | `a` | approve this tool now |
 | Auto-run (gate pending) | `p` | pause / resume the countdown |
 | Auto-run (working) | `Esc` | interject — interrupt the turn, then type to redirect |
-| Idle | `Enter` | send the preloaded "are we done?" check |
+| Idle (judge fell back) | `Enter` | send the preloaded manual "are we done?" check |
+| anywhere | `↑`/`↓`, `PgUp`/`PgDn` | scroll the transcript |
 | anywhere | `Ctrl+C` | quit |
+
+Scrolling is bound to the arrows and page keys only, so typing a message never
+scrolls the transcript out from under you.
 
 When Claude presents a plan (via `ExitPlanMode`) it's shown in a boxed
 **📋 PROPOSED PLAN** with a `▶ Press Ctrl+G to arm` prompt — that keypress is how
 you "accept" the plan and start the auto-run.
 
+When Claude asks a multiple-choice question (via `AskUserQuestion`), an inline
+picker appears — `↑`/`↓` to move, `Space` to toggle (multi-select), `Enter` to
+answer, `Esc` to skip — and the answer is sent straight back into the turn.
+
+## Slash commands
+
+Type these in the message box (they're handled by `acy`, not forwarded to Claude):
+
+| Command | Action |
+|---------|--------|
+| `/help` | show the command + key reference overlay |
+| `/resume [id]` | resume a prior session for this repo — a picker if no id, direct if given; lands back in the chat so you can keep planning, then `Ctrl+G` to arm |
+| `/model <name>` | set the model for the next launched/resumed session |
+| `/clear` | clear the transcript view |
+| `/log` | show the debug-log path |
+| `/quit` | quit (same as `Ctrl+C`) |
+
 ## Flags
 
 - `--model` — model alias/name (default: Claude's default)
+- `--judge-model` — model for the independent completion judge (default: `--model`)
 - `--countdown` — auto-approve delay per gated tool (default `30s`)
+- `--max-lines` — max lines shown per tool call/result/thinking block before a
+  `… +N more lines` footer (default `10`)
 - `--claude-bin` — path to the `claude` binary (default `claude`)
 - `--log` — debug log file (default `acy-debug.log`); captures the full stream —
   every event received (`RX`), every message sent (`TX`), gate decisions, and phase
@@ -93,8 +127,13 @@ you "accept" the plan and start the auto-run.
 - `internal/gate` — the permission bridge: a unix-socket server (supervisor) and
   the `hook` client, with allow/deny decisions.
 - `internal/config` — generates the `--settings` file that registers the hook.
+- `internal/judge` — the independent one-shot completion judge (plan + last
+  message → `STATUS: DONE`/`CONTINUE`).
 - `internal/ui` — the Bubble Tea model: transcript, countdown, phase machine,
-  done-check loop.
+  judge dispatch + manual done-check fallback, slash commands, and the resume /
+  AskUserQuestion pickers.
+- `internal/session` — lists resumable sessions for the `/resume` picker by
+  reading claude's `~/.claude/projects/<slug>/*.jsonl` transcripts.
 - `internal/cli` — Cobra commands (`run`, hidden `hook`).
 
 ## Tests

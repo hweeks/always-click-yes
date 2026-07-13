@@ -13,14 +13,19 @@ import (
 	"github.com/hweeks/always-click-yes/internal/config"
 	"github.com/hweeks/always-click-yes/internal/driver"
 	"github.com/hweeks/always-click-yes/internal/gate"
+	"github.com/hweeks/always-click-yes/internal/judge"
+	"github.com/hweeks/always-click-yes/internal/session"
 	"github.com/hweeks/always-click-yes/internal/ui"
 )
 
 type runFlags struct {
-	model     string
-	bin       string
-	countdown time.Duration
-	logPath   string
+	model      string
+	judgeModel string
+	bin        string
+	countdown  time.Duration
+	logPath    string
+	maxLines   int
+	planTools  []string
 }
 
 func newRunCmd() *cobra.Command {
@@ -33,9 +38,12 @@ func newRunCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&f.model, "model", "", "model to use (e.g. sonnet, opus); default = claude's default")
+	cmd.Flags().StringVar(&f.judgeModel, "judge-model", "", "model for the independent completion judge; default = --model")
 	cmd.Flags().StringVar(&f.bin, "claude-bin", "claude", "path to the claude binary")
 	cmd.Flags().DurationVar(&f.countdown, "countdown", 30*time.Second, "auto-approve delay per gated tool")
 	cmd.Flags().StringVar(&f.logPath, "log", "acy-debug.log", "debug log file (raw event stream, gate decisions, transitions); empty to disable")
+	cmd.Flags().IntVar(&f.maxLines, "max-lines", 10, "max lines shown per tool call/result/thinking block in the transcript")
+	cmd.Flags().StringSliceVar(&f.planTools, "plan-tools", []string{"Monitor"}, "tools pre-approved during plan mode via --allowedTools (exact tool names, e.g. Monitor or mcp__<server>__Monitor)")
 	return cmd
 }
 
@@ -83,16 +91,24 @@ func runSupervisor(ctx context.Context, f runFlags) error {
 	// launcher starts a claude driver appropriate to each phase: PLAN is
 	// interactive and ungated; AUTO-RUN resumes the same session with the
 	// PreToolUse hook wired in and the default (gated) permission mode.
-	launcher := func(ctx context.Context, phase ui.Phase, resumeID string) (*driver.Driver, error) {
-		opts := driver.Options{Bin: f.bin, Model: f.model}
-		switch phase {
+	launcher := func(ctx context.Context, spec ui.LaunchSpec) (*driver.Driver, error) {
+		model := spec.Model
+		if model == "" {
+			model = f.model
+		}
+		opts := driver.Options{Bin: f.bin, Model: model}
+		switch spec.Phase {
 		case ui.PhaseAutoRun:
 			opts.PermissionMode = "default"
 			opts.SettingsPath = settingsPath
 			opts.IncludeHooks = true
-			opts.ResumeID = resumeID
+			opts.ResumeID = spec.ResumeID
 		default: // PhasePlan
 			opts.PermissionMode = "plan"
+			opts.ResumeID = spec.ResumeID // set by /resume to continue a prior session
+			// Plan mode refuses non-read-only tools and has no gate wired in;
+			// pre-approve the configured tools (e.g. Monitor) so they still run.
+			opts.AllowedTools = f.planTools
 		}
 		d := driver.New(opts)
 		if err := d.Start(ctx); err != nil {
@@ -101,12 +117,31 @@ func runSupervisor(ctx context.Context, f runFlags) error {
 		return d, nil
 	}
 
+	// judgeFn runs an independent, one-shot claude session (fresh session, no
+	// hooks, tools disabled) to decide whether the plan is complete.
+	judgeModel := f.judgeModel
+	if judgeModel == "" {
+		judgeModel = f.model
+	}
+	judgeFn := func(ctx context.Context, plan, lastMsg string) (judge.Verdict, string, error) {
+		return judge.Assess(ctx, judge.Options{Bin: f.bin, Model: judgeModel}, plan, lastMsg)
+	}
+
 	model := ui.New(nil, ui.Config{
 		Ctx:       ctx,
 		Launcher:  launcher,
+		Judge:     judgeFn,
 		GateReqs:  srv.Requests(),
 		Countdown: f.countdown,
 		LogPath:   logPath,
+		MaxLines:  f.maxLines,
+		Sessions: func() ([]session.Info, error) {
+			cwd, err := os.Getwd()
+			if err != nil {
+				return nil, err
+			}
+			return session.List(cwd)
+		},
 	})
 
 	// Alt-screen by default; ACY_NO_ALTSCREEN=1 keeps output inline (useful for

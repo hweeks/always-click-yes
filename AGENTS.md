@@ -13,8 +13,12 @@ for long-running tasks. Flow:
    PreToolUse hook wired in and `--permission-mode default`, and gets a kickoff message.
 3. **AUTO-RUN** — every gated tool triggers a countdown; it auto-approves after N seconds
    unless you veto (`s`), approve now (`a`), or pause (`p`). `Esc` interrupts a running turn.
-4. **Idle** → the "are we done?" check is preloaded; you press Enter to send it. Claude's
-   reply (`STATUS: DONE` / `STATUS: CONTINUE`) loops back to AUTO-RUN or ends at COMPLETE.
+4. **Idle** → an **independent one-shot `claude` session** (fresh session, no hooks, tools
+   disabled — `internal/judge`) is handed the approved plan + the working session's last
+   message and returns `STATUS: DONE` / `STATUS: CONTINUE`. DONE → COMPLETE; CONTINUE
+   auto-nudges the working session (up to `maxAutoRounds`) so the run finishes hands-free.
+   If the judge errors, times out, or is inconclusive, it falls back to the manual
+   preloaded "are we done?" check (press Enter to send it into the working session).
 
 ## Architecture (package map)
 
@@ -27,8 +31,17 @@ for long-running tasks. Flow:
 - `internal/config` — generates the `--settings` JSON that registers the PreToolUse hook
   pointing at `<self> hook --socket <path>` (the binary is its own hook).
 - `internal/ui` — the Bubble Tea model. `model.go` (state + ingest), `update.go` (event
-  routing + keys), `view.go` (header/footer/gate panel), `render.go` (structured transcript
-  entries → lipgloss), `phase.go` (phase machine, done-check), `gate.go` (countdown).
+  routing + keys), `view.go` (header/footer/gate panel + help/resume/ask overlays),
+  `render.go` (structured transcript entries → lipgloss, incl. `clampBlock` line-capped
+  gutter blocks), `phase.go` (phase machine, judge dispatch + done-check fallback),
+  `commands.go` (slash commands + resume picker), `ask.go` (AskUserQuestion panel),
+  `gate.go` (countdown).
+- `internal/session` — lists resumable sessions for `/resume` from claude's
+  `~/.claude/projects/<slug>/*.jsonl` transcripts (slug = cwd with `/`→`-`). Injected as
+  `Config.Sessions`, so tests supply a fake.
+- `internal/judge` — runs an independent one-shot `claude` session (via `driver`, tools
+  disabled) that judges plan completion from the plan + last message. Injected into the UI
+  as `Config.Judge`, so tests swap in a fake verdict.
 - `internal/cli` — Cobra commands: `run` (the TUI) and the hidden `hook`.
 - `internal/alog` — process-wide debug logger (off until `Open`); the `--log` flag drives it.
 
@@ -54,6 +67,13 @@ for long-running tasks. Flow:
   don't truncate it.
 - **Interrupt**: write `{"type":"control_request","request_id":"<id>","request":{"subtype":"interrupt"}}`
   on stdin (capability `interrupt_receipt_v1`); the turn ends `terminal_reason:"aborted_streaming"`.
+- **`AskUserQuestion`** arrives as an assistant `tool_use` block (input:
+  `{questions:[{header,question,multiSelect,options:[{label,description}]}]}`) and the turn
+  **blocks** — no `result` event — until you answer it. Answer via `driver.SendToolResult`,
+  which injects a user message whose content is a `tool_result` block referencing the
+  `tool_use_id`. Note: this can't be spiked from inside an agent harness (a nested `claude`
+  inherits an altered/deferred tool registry and won't offer `AskUserQuestion`); verify from a
+  real terminal. Detection is name-based and harmless if the tool never appears.
 - No official Go SDK; Claude Code is Node/TypeScript.
 
 ## Gotchas we already hit (don't reintroduce)
@@ -66,6 +86,11 @@ for long-running tasks. Flow:
   child blocks once the pipe buffer fills.
 - Driver swaps between phases are tracked by a generation counter (`gen`); stale events from
   a stopped driver are ignored, so stopping the old driver doesn't look like the session ending.
+- **The viewport's default keymap steals typing.** bubbles `viewport.DefaultKeyMap` binds
+  `j/k/d/u/f/b` and space to scrolling, and `Update` forwards key events to both the input and
+  the viewport — so typing those letters scrolled the transcript. `transcriptKeyMap()` in
+  `update.go` restricts scrolling to the arrows and `PgUp`/`PgDn`. Don't hand the viewport an
+  unrestricted keymap.
 
 ## Commands
 
