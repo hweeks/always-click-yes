@@ -14,30 +14,43 @@ func (m Model) View() string {
 	}
 
 	body := m.vp.View()
-	footer := m.inputView()
 	switch {
 	case m.showHelp:
 		body = m.overlay(m.helpView())
-		footer = lipgloss.NewStyle().Foreground(colDim).Render("press any key to close")
 	case m.picking:
 		body = m.overlay(m.pickerView())
-		footer = lipgloss.NewStyle().Foreground(colDim).Render("↑/↓ move · Enter resume · Esc cancel")
 	case m.ask != nil:
 		body = m.overlay(m.askView())
-		hint := "↑/↓ move · Enter confirm · Esc skip"
-		if m.ask.questions[m.ask.qIdx].multiSelect {
-			hint = "↑/↓ move · Space toggle · Enter confirm · Esc skip"
-		}
-		footer = lipgloss.NewStyle().Foreground(colDim).Render(hint)
-	case len(m.pending) > 0:
-		footer = m.gateView()
 	}
 
 	return strings.Join([]string{
 		m.headerView(),
 		body,
-		footer,
+		m.footerView(),
 	}, "\n")
+}
+
+// footerView is the bottom region: a hint line under an overlay, the countdown
+// panel while permissions are pending, and otherwise the composer. layout()
+// measures this to size the transcript, so it must be the only place the footer
+// is built — a second copy of these conditions would drift and put the frame's
+// height back out of sync with what's drawn.
+func (m Model) footerView() string {
+	hint := func(s string) string { return lipgloss.NewStyle().Foreground(colDim).Render(s) }
+	switch {
+	case m.showHelp:
+		return hint("press any key to close")
+	case m.picking:
+		return hint("↑/↓ move · Enter resume · Esc cancel")
+	case m.ask != nil:
+		if m.ask.questions[m.ask.qIdx].multiSelect {
+			return hint("↑/↓ move · Space toggle · Enter confirm · Esc skip")
+		}
+		return hint("↑/↓ move · Enter confirm · Esc skip")
+	case len(m.pending) > 0:
+		return m.gateView()
+	}
+	return m.inputView()
 }
 
 // overlay pads content to the viewport height so the footer stays anchored while
@@ -65,6 +78,8 @@ func (m Model) helpView() string {
 		cmd("/quit", "quit (same as Ctrl+C)"),
 		"",
 		lipgloss.NewStyle().Bold(true).Foreground(colDim).Render("keys"),
+		cmd("Enter", "send the message"),
+		cmd("Ctrl+J", "newline without sending"),
 		cmd("Ctrl+G", "arm the plan (start auto-run)"),
 		cmd("Esc", "interject / interrupt the current turn"),
 		cmd("↑/↓ PgUp/PgDn", "scroll the transcript"),
@@ -72,6 +87,12 @@ func (m Model) helpView() string {
 		"",
 		lipgloss.NewStyle().Bold(true).Foreground(colDim).Render("while a gate is counting down"),
 		cmd("a / s / p", "allow now / stop (veto) / pause-resume"),
+		"",
+		lipgloss.NewStyle().Bold(true).Foreground(colDim).Render("while Claude is asking a question"),
+		cmd("↑/↓ j/k", "move between options"),
+		cmd("Space", "toggle a choice (multi-select only)"),
+		cmd("Enter", "confirm and go to the next question"),
+		cmd("Esc", "skip the questions"),
 	}
 	return strings.Join(lines, "\n")
 }
@@ -161,7 +182,10 @@ func (m Model) headerView() string {
 	if m.sessionID != "" {
 		meta = append(meta, "session "+short(m.sessionID))
 	}
-	meta = append(meta, fmt.Sprintf("$%.4f", m.cost))
+	meta = append(meta, fmt.Sprintf("$%.4f", m.totalCost()))
+	if b := m.billing(); b != "" {
+		meta = append(meta, b)
+	}
 	right := ""
 	if m.processing || m.verifying {
 		right = spinner(m.spinFrame) + " "
@@ -238,8 +262,6 @@ func (m Model) gateView() string {
 		state + "   " + desc,
 		keys,
 	}, "\n")
-	// A top rule keeps the gate panel the same height (4 lines) as the framed
-	// input box, so the footer doesn't jump when a gate appears.
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder(), true, false, false, false).
 		BorderForeground(colTool).

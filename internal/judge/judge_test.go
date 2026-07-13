@@ -60,22 +60,22 @@ func TestLiveAssess(t *testing.T) {
 
 	plan := "Step 1: create hello.txt. Step 2: create world.txt."
 	done := "I created both hello.txt and world.txt. Every step is finished."
-	v, reply, err := Assess(ctx, Options{Model: "sonnet"}, plan, done)
+	res, err := Assess(ctx, Options{Model: "sonnet"}, plan, done)
 	if err != nil {
 		t.Fatalf("assess: %v", err)
 	}
-	t.Logf("verdict=%v reply=%q", v, reply)
-	if v != VerdictDone {
-		t.Fatalf("verdict = %v, want DONE (reply: %q)", v, reply)
+	t.Logf("verdict=%v cost=$%.4f reply=%q", res.Verdict, res.CostUSD, res.Text)
+	if res.Verdict != VerdictDone {
+		t.Fatalf("verdict = %v, want DONE (reply: %q)", res.Verdict, res.Text)
 	}
 
 	partial := "I created hello.txt. I still need to create world.txt."
-	v, reply, err = Assess(ctx, Options{Model: "sonnet"}, plan, partial)
+	res, err = Assess(ctx, Options{Model: "sonnet"}, plan, partial)
 	if err != nil {
 		t.Fatalf("assess: %v", err)
 	}
-	t.Logf("verdict=%v reply=%q", v, reply)
-	if v != VerdictContinue {
-		t.Fatalf("verdict = %v, want CONTINUE (reply: %q)", v, reply)
+	t.Logf("verdict=%v cost=$%.4f reply=%q", res.Verdict, res.CostUSD, res.Text)
+	if res.Verdict != VerdictContinue {
+		t.Fatalf("verdict = %v, want CONTINUE (reply: %q)", res.Verdict, res.Text)
 	}
 }

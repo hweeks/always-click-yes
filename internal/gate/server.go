@@ -7,6 +7,8 @@ import (
 	"net"
 	"path/filepath"
 	"sync"
+
+	"github.com/hweeks/always-click-yes/internal/alog"
 )
 
 // Pending is a single in-flight permission request awaiting a decision. The TUI
@@ -74,6 +76,7 @@ func (s *Server) Close() error { return s.ln.Close() }
 
 func (s *Server) accept() {
 	defer close(s.requests)
+	defer alog.Recover("gate.accept")
 	for {
 		conn, err := s.ln.Accept()
 		if err != nil {
@@ -85,6 +88,7 @@ func (s *Server) accept() {
 
 func (s *Server) handle(conn net.Conn) {
 	defer func() { _ = conn.Close() }()
+	defer alog.Recover("gate.handle")
 
 	br := bufio.NewReaderSize(conn, 1<<20)
 	line, err := br.ReadBytes('\n')

@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"runtime/debug"
 	"sync"
 )
 
@@ -62,4 +63,16 @@ func Raw(tag, payload string) {
 	mu.Lock()
 	defer mu.Unlock()
 	l.Printf("%s %s", tag, payload)
+}
+
+// Recover swallows a panic in a background goroutine and logs it with its stack.
+// Deferred at the top of every goroutine we start: Bubble Tea only recovers
+// panics raised inside its own loop, so a panic anywhere else would kill the
+// process without unwinding its terminal restore — leaving the tty in raw mode
+// with the alt-screen still on, which is exactly how a terminal ends up spewing
+// control characters at the shell prompt afterwards.
+func Recover(where string) {
+	if r := recover(); r != nil {
+		Printf("panic in %s: %v\n%s", where, r, debug.Stack())
+	}
 }

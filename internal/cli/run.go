@@ -15,6 +15,7 @@ import (
 	"github.com/hweeks/always-click-yes/internal/gate"
 	"github.com/hweeks/always-click-yes/internal/judge"
 	"github.com/hweeks/always-click-yes/internal/session"
+	"github.com/hweeks/always-click-yes/internal/term"
 	"github.com/hweeks/always-click-yes/internal/ui"
 )
 
@@ -26,6 +27,7 @@ type runFlags struct {
 	logPath    string
 	maxLines   int
 	planTools  []string
+	useAPIKey  bool
 }
 
 func newRunCmd() *cobra.Command {
@@ -43,7 +45,8 @@ func newRunCmd() *cobra.Command {
 	cmd.Flags().DurationVar(&f.countdown, "countdown", 30*time.Second, "auto-approve delay per gated tool")
 	cmd.Flags().StringVar(&f.logPath, "log", "acy-debug.log", "debug log file (raw event stream, gate decisions, transitions); empty to disable")
 	cmd.Flags().IntVar(&f.maxLines, "max-lines", 10, "max lines shown per tool call/result/thinking block in the transcript")
-	cmd.Flags().StringSliceVar(&f.planTools, "plan-tools", []string{"Monitor"}, "tools pre-approved during plan mode via --allowedTools (exact tool names, e.g. Monitor or mcp__<server>__Monitor)")
+	cmd.Flags().StringSliceVar(&f.planTools, "plan-tools", []string{"Monitor", "AskUserQuestion"}, "tools pre-approved during plan mode via --allowedTools (exact tool names, e.g. Monitor or mcp__<server>__Monitor)")
+	cmd.Flags().BoolVar(&f.useAPIKey, "use-api-key", false, "bill ANTHROPIC_API_KEY instead of the claude.ai login; by default the key is stripped from claude's environment, since headless runs would otherwise use it silently")
 	return cmd
 }
 
@@ -96,7 +99,7 @@ func runSupervisor(ctx context.Context, f runFlags) error {
 		if model == "" {
 			model = f.model
 		}
-		opts := driver.Options{Bin: f.bin, Model: model}
+		opts := driver.Options{Bin: f.bin, Model: model, UseAPIKey: f.useAPIKey}
 		switch spec.Phase {
 		case ui.PhaseAutoRun:
 			opts.PermissionMode = "default"
@@ -107,7 +110,12 @@ func runSupervisor(ctx context.Context, f runFlags) error {
 			opts.PermissionMode = "plan"
 			opts.ResumeID = spec.ResumeID // set by /resume to continue a prior session
 			// Plan mode refuses non-read-only tools and has no gate wired in;
-			// pre-approve the configured tools (e.g. Monitor) so they still run.
+			// pre-approve the configured tools so they still run.
+			//
+			// AskUserQuestion stays in the default set for the day it works, but it
+			// is currently inert: `claude -p` does not put AskUserQuestion in its
+			// tool registry at all (see AGENTS.md), and --allowedTools cannot
+			// allowlist a tool that isn't there. Harmless either way.
 			opts.AllowedTools = f.planTools
 		}
 		d := driver.New(opts)
@@ -123,8 +131,8 @@ func runSupervisor(ctx context.Context, f runFlags) error {
 	if judgeModel == "" {
 		judgeModel = f.model
 	}
-	judgeFn := func(ctx context.Context, plan, lastMsg string) (judge.Verdict, string, error) {
-		return judge.Assess(ctx, judge.Options{Bin: f.bin, Model: judgeModel}, plan, lastMsg)
+	judgeFn := func(ctx context.Context, plan, lastMsg string) (judge.Result, error) {
+		return judge.Assess(ctx, judge.Options{Bin: f.bin, Model: judgeModel, UseAPIKey: f.useAPIKey}, plan, lastMsg)
 	}
 
 	model := ui.New(nil, ui.Config{
@@ -146,10 +154,14 @@ func runSupervisor(ctx context.Context, f runFlags) error {
 
 	// Alt-screen by default; ACY_NO_ALTSCREEN=1 keeps output inline (useful for
 	// capturing frames when smoke-testing under a pseudo-terminal).
-	var progOpts []tea.ProgramOption
+	progOpts := []tea.ProgramOption{tea.WithContext(ctx)}
 	if os.Getenv("ACY_NO_ALTSCREEN") == "" {
 		progOpts = append(progOpts, tea.WithAltScreen())
 	}
+
+	// Bubble Tea's init() has already queried the terminal by now; throw away any
+	// reply still sitting in the input queue, before it gets read as keystrokes.
+	term.DrainInput(os.Stdin)
 
 	_, err = tea.NewProgram(model, progOpts...).Run()
 	return err

@@ -6,10 +6,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/hweeks/always-click-yes/internal/alog"
 )
@@ -26,6 +28,7 @@ type Options struct {
 	IncludeHooks   bool     // --include-hook-events
 	AllowedTools   []string // --allowedTools (optional; pre-approves tools, e.g. so a read tool runs under --permission-mode plan)
 	ExtraArgs      []string // any additional raw args
+	UseAPIKey      bool     // bill ANTHROPIC_API_KEY instead of the claude.ai login (see childEnv)
 }
 
 // Driver owns a running claude process and surfaces its decoded event stream.
@@ -34,6 +37,9 @@ type Driver struct {
 	cmd    *exec.Cmd
 	stdin  io.WriteCloser
 	events chan Event
+
+	exited  chan struct{} // closed once the process is reaped
+	waitErr error         // result of cmd.Wait; read only after exited is closed
 
 	writeMu sync.Mutex
 	once    sync.Once
@@ -95,6 +101,25 @@ func NewWithWriter(opts Options, w io.WriteCloser) *Driver {
 	return d
 }
 
+// childEnv returns the environment for the claude subprocess. ANTHROPIC_API_KEY
+// silently takes precedence over the user's claude.ai login, and headless `claude -p`
+// never shows the interactive "use this API key?" prompt, so a key merely present in
+// the shell bills the API account for every run. Strip it unless asked otherwise.
+func (o Options) childEnv() []string {
+	if o.UseAPIKey {
+		return nil // nil => inherit the parent environment verbatim
+	}
+	parent := os.Environ()
+	env := make([]string, 0, len(parent))
+	for _, kv := range parent {
+		if strings.HasPrefix(kv, "ANTHROPIC_API_KEY=") {
+			continue
+		}
+		env = append(env, kv)
+	}
+	return env
+}
+
 // Start launches the claude subprocess and begins streaming events. The provided
 // context cancels the process when done.
 func (d *Driver) Start(ctx context.Context) error {
@@ -102,6 +127,12 @@ func (d *Driver) Start(ctx context.Context) error {
 	if d.opts.Cwd != "" {
 		cmd.Dir = d.opts.Cwd
 	}
+	cmd.Env = d.opts.childEnv()
+	cmd.SysProcAttr = detachedSysProcAttr()
+	// Cancelling ctx must take down claude's whole tree, not just claude: it
+	// spawns tool subprocesses and MCP servers that would otherwise be orphaned.
+	cmd.Cancel = func() error { return terminateGroup(cmd.Process) }
+	cmd.WaitDelay = 5 * time.Second
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -120,10 +151,21 @@ func (d *Driver) Start(ctx context.Context) error {
 	}
 	d.cmd = cmd
 	d.stdin = stdin
+	d.exited = make(chan struct{})
 	alog.Printf("driver: start %s %v (cwd=%q)", d.opts.Bin, d.opts.Args(), cmd.Dir)
 
-	go d.readEvents(stdout)
-	go d.readStderr(stderr)
+	var readers sync.WaitGroup
+	readers.Add(2)
+	go func() { defer readers.Done(); d.readEvents(stdout) }()
+	go func() { defer readers.Done(); d.readStderr(stderr) }()
+
+	// Reap the process, but only once both pipes have hit EOF: cmd.Wait closes
+	// them, and closing a pipe out from under a reader loses its output.
+	go func() {
+		readers.Wait()
+		d.waitErr = cmd.Wait()
+		close(d.exited)
+	}()
 	return nil
 }
 
@@ -132,6 +174,7 @@ func (d *Driver) Start(ctx context.Context) error {
 // large tool inputs).
 func (d *Driver) readEvents(r io.Reader) {
 	defer close(d.events)
+	defer alog.Recover("driver.readEvents")
 	br := bufio.NewReaderSize(r, 1<<20)
 	for {
 		line, err := readLine(br)
@@ -176,6 +219,7 @@ func trimNewline(b []byte) []byte {
 // readStderr drains the process's stderr into the debug log so it never blocks
 // the child and is inspectable after the fact.
 func (d *Driver) readStderr(r io.Reader) {
+	defer alog.Recover("driver.readStderr")
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
 	for sc.Scan() {
@@ -271,20 +315,23 @@ func (d *Driver) CloseInput() error {
 	return d.stdin.Close()
 }
 
-// Wait blocks until the process exits.
+// Wait blocks until the process has exited and its output has been drained.
 func (d *Driver) Wait() error {
 	if d.cmd == nil {
 		return nil
 	}
-	return d.cmd.Wait()
+	<-d.exited
+	return d.waitErr
 }
 
-// Stop closes stdin and kills the process if still running.
+// Stop closes stdin and kills the process — and everything it spawned — if
+// still running. It does not block: the goroutine started by Start reaps the
+// process once its pipes drain.
 func (d *Driver) Stop() {
 	d.once.Do(func() {
 		_ = d.CloseInput()
-		if d.cmd != nil && d.cmd.Process != nil {
-			_ = d.cmd.Process.Kill()
+		if d.cmd != nil {
+			_ = killGroup(d.cmd.Process)
 		}
 	})
 }

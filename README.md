@@ -75,6 +75,7 @@ acy run --model opus --countdown 20s
 | Phase | Key | Action |
 |-------|-----|--------|
 | Plan | type + `Enter` | talk to Claude, build the plan |
+| Plan | `Ctrl+J` | insert a newline without sending |
 | Plan | `Ctrl+G` | **arm** — start auto-run on the current session |
 | Auto-run (gate pending) | `s` | stop / veto this tool |
 | Auto-run (gate pending) | `a` | approve this tool now |
@@ -85,7 +86,8 @@ acy run --model opus --countdown 20s
 | anywhere | `Ctrl+C` | quit |
 
 Scrolling is bound to the arrows and page keys only, so typing a message never
-scrolls the transcript out from under you.
+scrolls the transcript out from under you. The message box grows as you type (up
+to 8 rows) and the transcript gives up the space.
 
 When Claude presents a plan (via `ExitPlanMode`) it's shown in a boxed
 **📋 PROPOSED PLAN** with a `▶ Press Ctrl+G to arm` prompt — that keypress is how
@@ -94,6 +96,17 @@ you "accept" the plan and start the auto-run.
 When Claude asks a multiple-choice question (via `AskUserQuestion`), an inline
 picker appears — `↑`/`↓` to move, `Space` to toggle (multi-select), `Enter` to
 answer, `Esc` to skip — and the answer is sent straight back into the turn.
+
+> **⚠ Both of the above are currently dormant.** Measured against `claude` 2.1.207:
+> the `-p` (headless) mode `acy` drives does **not** offer `AskUserQuestion` or
+> `ExitPlanMode` — its `system/init` tool registry contains neither, in any
+> `--permission-mode`, with or without `--allowedTools`. So Claude never emits the
+> tool call, the boxed plan never renders, and the question picker never opens.
+> The plan still arrives — as ordinary assistant text — and `Ctrl+G` still arms.
+> `internal/ui/ask_live_test.go` probes this live and will start passing if it
+> changes. Making the picker real means exposing the question as an **MCP** tool
+> (`mcp__acy__…`), which *does* land in the registry; the UI already handles
+> MCP-prefixed names.
 
 ## Slash commands
 
@@ -116,6 +129,18 @@ Type these in the message box (they're handled by `acy`, not forwarded to Claude
 - `--max-lines` — max lines shown per tool call/result/thinking block before a
   `… +N more lines` footer (default `10`)
 - `--claude-bin` — path to the `claude` binary (default `claude`)
+- `--plan-tools` — tools pre-approved during **plan mode** via `--allowedTools`, as exact
+  names (default `Monitor,AskUserQuestion`). Plan mode refuses non-read-only tools and has
+  no gate wired in, so a tool that isn't listed here simply never runs while you're
+  planning. Use exact tool names, MCP ones included (e.g. `mcp__<server>__Monitor`).
+  `AskUserQuestion` is kept in the default set for the day it works, but it is **inert
+  today** — `claude -p` has no such tool to allowlist (see the note above).
+- `--use-api-key` — bill `ANTHROPIC_API_KEY` instead of your claude.ai login. By
+  default the key is **stripped** from the environment `claude` runs in: a key
+  merely sitting in your shell silently takes precedence over the login, and
+  headless `claude -p` never shows the interactive "use this API key?" prompt, so
+  every run would quietly bill the API account. The header and the final tally say
+  which account paid (`subscription` vs `API`), read from claude's own init event.
 - `--log` — debug log file (default `acy-debug.log`); captures the full stream —
   every event received (`RX`), every message sent (`TX`), gate decisions, and phase
   transitions. Set to `""` to disable. `tail -f acy-debug.log` to watch it live.

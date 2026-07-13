@@ -1,0 +1,1 @@
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_ask1","name":"AskUserQuestion","input":{"questions":[{"header":"Scope","question":"Which target?","multiSelect":false,"options":[{"label":"acy handles it","description":"consumer side"},{"label":"This harness","description":"producer side"}]}]}}]}}

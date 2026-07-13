@@ -30,8 +30,8 @@ func TestIngest(t *testing.T) {
 	if m.sessionID != "abcdef1234" || m.model != "claude-sonnet-5" || m.mode != "default" {
 		t.Errorf("header state wrong: %+v", m)
 	}
-	if m.cost != 0.5 {
-		t.Errorf("cost = %v, want 0.5", m.cost)
+	if m.totalCost() != 0.5 {
+		t.Errorf("totalCost() = %v, want 0.5", m.totalCost())
 	}
 	if m.status != "idle" {
 		t.Errorf("status = %q, want idle", m.status)

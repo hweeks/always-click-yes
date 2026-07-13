@@ -88,6 +88,11 @@ type Event struct {
 	Model          string `json:"model"`
 	PermissionMode string `json:"permissionMode"`
 
+	// init-only: which credential claude billed this session to. "none" means
+	// the claude.ai login (a subscription); anything else names the API key's
+	// origin, e.g. "ANTHROPIC_API_KEY".
+	APIKeySource string `json:"apiKeySource"`
+
 	Message *Message `json:"message"`
 
 	// result-only fields

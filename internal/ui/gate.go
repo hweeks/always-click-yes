@@ -38,7 +38,19 @@ func tickCmd() tea.Cmd {
 }
 
 // enqueue records a new pending gate with a fresh countdown deadline.
+//
+// Tools acy intercepts and answers itself (see intercepted in model.go) are
+// allowed straight through and never queued. The PreToolUse hook matches "*", so
+// in auto-run an AskUserQuestion would otherwise raise a gate at the same moment
+// ingestToolUse opens the ask panel — and the panel wins both the key-routing and
+// render races, leaving a countdown ticking invisibly until it auto-approved a
+// duplicate execution of a tool the user had already answered.
 func (m *Model) enqueue(p *gate.Pending) {
+	if intercepted[baseToolName(p.Input.ToolName)] {
+		p.Resolve(gate.Decision{Behavior: gate.Allow, Reason: "handled by acy"})
+		alog.Printf("gate: pass-through tool=%s (intercepted by acy)", p.Input.ToolName)
+		return
+	}
 	it := &gateItem{p: p}
 	if m.paused {
 		it.remaining = m.countdown
