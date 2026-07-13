@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -23,6 +24,7 @@ type Options struct {
 	ResumeID       string   // --resume <session-id> (optional)
 	SessionID      string   // --session-id <uuid> (optional)
 	IncludeHooks   bool     // --include-hook-events
+	AllowedTools   []string // --allowedTools (optional; pre-approves tools, e.g. so a read tool runs under --permission-mode plan)
 	ExtraArgs      []string // any additional raw args
 }
 
@@ -65,6 +67,9 @@ func (o Options) Args() []string {
 	if o.SessionID != "" {
 		args = append(args, "--session-id", o.SessionID)
 	}
+	if len(o.AllowedTools) > 0 {
+		args = append(args, "--allowedTools", strings.Join(o.AllowedTools, ","))
+	}
 	args = append(args, o.ExtraArgs...)
 	return args
 }
@@ -78,6 +83,16 @@ func New(opts Options) *Driver {
 		opts:   opts,
 		events: make(chan Event, 64),
 	}
+}
+
+// NewWithWriter builds a Driver whose injected messages go to w instead of a real
+// process stdin. It never launches claude, so Send/SendToolResult/Interrupt can be
+// exercised and their exact wire format inspected in tests. Events() stays empty.
+// Test-only; production code uses New + Start.
+func NewWithWriter(opts Options, w io.WriteCloser) *Driver {
+	d := New(opts)
+	d.stdin = w
+	return d
 }
 
 // Start launches the claude subprocess and begins streaming events. The provided
@@ -178,6 +193,36 @@ func (d *Driver) Send(text string) error {
 		"message": map[string]any{
 			"role":    "user",
 			"content": text,
+		},
+	}
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	alog.Raw("TX", string(b))
+	b = append(b, '\n')
+
+	d.writeMu.Lock()
+	defer d.writeMu.Unlock()
+	_, err = d.stdin.Write(b)
+	return err
+}
+
+// SendToolResult answers a pending tool call (e.g. AskUserQuestion) by injecting
+// a user message whose content is a single tool_result block referencing the
+// tool_use id. This unblocks a turn that is waiting on client-side tool output.
+func (d *Driver) SendToolResult(toolUseID string, content any) error {
+	payload := map[string]any{
+		"type": "user",
+		"message": map[string]any{
+			"role": "user",
+			"content": []any{
+				map[string]any{
+					"type":        "tool_result",
+					"tool_use_id": toolUseID,
+					"content":     content,
+				},
+			},
 		},
 	}
 	b, err := json.Marshal(payload)

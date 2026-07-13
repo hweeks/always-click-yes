@@ -17,15 +17,26 @@ import (
 
 	"github.com/hweeks/always-click-yes/internal/driver"
 	"github.com/hweeks/always-click-yes/internal/gate"
+	"github.com/hweeks/always-click-yes/internal/judge"
+	"github.com/hweeks/always-click-yes/internal/session"
 )
+
+// JudgeFunc runs an independent session that judges whether the approved plan is
+// complete, given the plan text and the working session's final message.
+type JudgeFunc func(ctx context.Context, plan, lastMsg string) (judge.Verdict, string, error)
 
 // Config holds the wiring the model needs beyond the driver.
 type Config struct {
 	Ctx       context.Context      // cancels driver processes on shutdown
 	Launcher  Launcher             // starts a claude driver for a given phase
+	Judge     JudgeFunc            // independent completion judge (nil = manual verify)
 	GateReqs  <-chan *gate.Pending // nil if no gate is active
 	Countdown time.Duration        // auto-approve delay per gated tool
 	LogPath   string               // debug log file path (shown in the UI), if any
+	MaxLines  int                  // per-block line cap in the transcript (default 10)
+
+	// Sessions lists resumable sessions for the /resume picker (nil = disabled).
+	Sessions func() ([]session.Info, error)
 }
 
 // gateItem is a permission request the UI is counting down.
@@ -55,6 +66,16 @@ type Model struct {
 	ended     bool
 	planReady bool
 	logPath   string
+	maxLines  int
+
+	// slash-command / overlay state
+	nextModel     string // --model override applied to the next launched session (/model)
+	showHelp      bool   // the /help overlay is open
+	sessionLister func() ([]session.Info, error)
+	picking       bool           // the /resume session picker is open
+	sessionList   []session.Info // sessions shown in the picker
+	pickIdx       int            // selected row in the picker
+	ask           *askState      // a pending AskUserQuestion the user is answering
 
 	// gate / countdown state
 	gateReqs  <-chan *gate.Pending
@@ -66,13 +87,18 @@ type Model struct {
 	// phase machine
 	ctx             context.Context
 	launcher        Launcher
+	judge           JudgeFunc
 	phase           Phase
 	gen             int    // current driver generation
 	turnText        string // assistant text accumulated for the current turn
+	planBody        string // approved plan text, captured at ExitPlanMode
 	preloaded       bool   // done-check prompt is sitting in the input, awaiting send
-	awaitingVerdict bool   // a done-check was sent; next turn end carries the verdict
+	awaitingVerdict bool   // a manual done-check was sent; next turn end carries the verdict
+	verifying       bool   // an independent judge session is evaluating completion
+	rounds          int    // auto-continue rounds taken in this run
 	processing      bool   // a turn is in flight (model working)
 	interrupted     bool   // user interrupted the current turn; don't auto-preload
+	spinFrame       int    // advances every tick to animate the "working…" spinner
 }
 
 // New builds the initial model bound to a started driver.
@@ -86,6 +112,9 @@ func New(drv *driver.Driver, cfg Config) Model {
 	if cfg.Countdown <= 0 {
 		cfg.Countdown = 30 * time.Second
 	}
+	if cfg.MaxLines <= 0 {
+		cfg.MaxLines = 10
+	}
 
 	m := Model{
 		drv:       drv,
@@ -96,8 +125,12 @@ func New(drv *driver.Driver, cfg Config) Model {
 		countdown: cfg.Countdown,
 		ctx:       cfg.Ctx,
 		launcher:  cfg.Launcher,
+		judge:     cfg.Judge,
 		phase:     PhasePlan,
 		logPath:   cfg.LogPath,
+		maxLines:  cfg.MaxLines,
+
+		sessionLister: cfg.Sessions,
 	}
 	m.appendEntry(entry{kind: eMeta, body: "Plan your task with Claude below. When the plan is ready, press Ctrl+G"})
 	m.appendEntry(entry{kind: eMeta, body: "to arm — auto-run then approves each step after a countdown."})
@@ -132,7 +165,7 @@ func (m Model) Init() tea.Cmd {
 	if m.drv != nil {
 		cmds = append(cmds, waitEvent(m.drv.Events(), m.gen))
 	} else if m.launcher != nil {
-		cmds = append(cmds, launchCmd(m.ctx, m.launcher, PhasePlan, ""))
+		cmds = append(cmds, launchCmd(m.ctx, m.launcher, LaunchSpec{Phase: PhasePlan}))
 	}
 	return tea.Batch(cmds...)
 }
@@ -157,7 +190,7 @@ func (m *Model) rebuild() {
 	if !m.ready {
 		return
 	}
-	m.vp.SetContent(renderEntries(m.entries, m.vp.Width))
+	m.vp.SetContent(renderEntries(m.entries, m.vp.Width, m.maxLines))
 	m.vp.GotoBottom()
 }
 
@@ -215,11 +248,20 @@ func (m *Model) ingestToolUse(b driver.ContentBlock) {
 		if plan == "" {
 			plan = "(the model proposed a plan but sent no text)"
 		}
+		m.planBody = plan
 		m.appendEntry(entry{kind: ePlan, body: plan})
 		m.planReady = true
 		return
 	}
-	m.appendEntry(entry{kind: eTool, title: b.Name, body: toolArgs(b.Input)})
+	if b.Name == "AskUserQuestion" {
+		if a, ok := parseAsk(b.Input); ok {
+			a.toolUseID = b.ID
+			m.ask = a
+			m.appendEntry(entry{kind: eMeta, body: "❓ Claude is asking a question — answer below"})
+			return
+		}
+	}
+	m.appendEntry(entry{kind: eTool, title: b.Name, body: toolBody(b.Name, b.Input)})
 }
 
 // --- small formatting helpers ---
@@ -259,6 +301,84 @@ func planText(raw json.RawMessage) string {
 		return obj.Plan
 	}
 	return string(raw)
+}
+
+// toolBody renders a tool call's input as a multi-line preview for the
+// transcript: the command for Bash, the file path plus content for Write, a
+// minimal diff for Edit, the file path (and range) for Read. Everything else
+// falls back to the one-line toolArgs summary. The line cap is applied at render
+// time by clampBlock, so the full text is retained in the entry.
+func toolBody(name string, raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var obj map[string]any
+	if json.Unmarshal(raw, &obj) != nil {
+		return string(raw)
+	}
+	str := func(k string) string { s, _ := obj[k].(string); return s }
+
+	switch name {
+	case "Bash":
+		return str("command")
+	case "Write":
+		return headed(fileHeader(obj), str("content"))
+	case "Edit":
+		return headed(fileHeader(obj), diffPreview(str("old_string"), str("new_string")))
+	case "Read":
+		return fileHeader(obj)
+	}
+	return toolArgs(raw)
+}
+
+// fileHeader builds a "path (offset N, limit M)" line from a tool input, using
+// file_path or path and any Read range fields.
+func fileHeader(obj map[string]any) string {
+	p, _ := obj["file_path"].(string)
+	if p == "" {
+		p, _ = obj["path"].(string)
+	}
+	var extra []string
+	if v, ok := obj["offset"]; ok {
+		extra = append(extra, fmt.Sprintf("offset %v", v))
+	}
+	if v, ok := obj["limit"]; ok {
+		extra = append(extra, fmt.Sprintf("limit %v", v))
+	}
+	if len(extra) > 0 {
+		return strings.TrimSpace(p + "  (" + strings.Join(extra, ", ") + ")")
+	}
+	return p
+}
+
+// headed joins a header line and a body block, dropping either if empty.
+func headed(header, body string) string {
+	header = strings.TrimSpace(header)
+	body = strings.TrimRight(body, "\n")
+	switch {
+	case header == "":
+		return body
+	case strings.TrimSpace(body) == "":
+		return header
+	default:
+		return header + "\n" + body
+	}
+}
+
+// diffPreview renders old/new strings as a simple -/+ diff for an Edit preview.
+func diffPreview(oldS, newS string) string {
+	var b strings.Builder
+	if strings.TrimSpace(oldS) != "" {
+		for ln := range strings.SplitSeq(strings.TrimRight(oldS, "\n"), "\n") {
+			b.WriteString("- " + ln + "\n")
+		}
+	}
+	if strings.TrimSpace(newS) != "" {
+		for ln := range strings.SplitSeq(strings.TrimRight(newS, "\n"), "\n") {
+			b.WriteString("+ " + ln + "\n")
+		}
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 // toolArgs renders a tool's input as a readable (possibly multi-field) summary,
