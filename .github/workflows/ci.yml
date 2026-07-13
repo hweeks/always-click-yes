@@ -32,7 +32,16 @@ jobs:
           "$(go env GOPATH)/bin/golangci-lint" run ./...
 
   test:
-    runs-on: ubuntu-latest
+    # internal/term's flushInput is per-GOOS — TIOCFLUSH (int*) on darwin, TCFLSH
+    # (by value) on linux — and only one of them compiles on any given machine.
+    # Running a single OS would leave the other ioctl completely unexercised, and
+    # a wrong one fails silently: the ioctl reports no error and the stale
+    # terminal replies stay queued as phantom keys.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5

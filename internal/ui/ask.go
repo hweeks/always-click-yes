@@ -6,6 +6,8 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/hweeks/always-click-yes/internal/alog"
 )
 
 // askOption is one selectable answer to a question.
@@ -139,7 +141,15 @@ func (m *Model) submitAsk(skipped bool) tea.Cmd {
 	}
 	answer := strings.Join(lines, "\n")
 	if m.drv != nil {
-		_ = m.drv.SendToolResult(a.toolUseID, answer)
+		// The turn is blocked on this tool_result. If the write fails there is
+		// nothing left to unblock it, so say so rather than parking on "working…"
+		// forever with no explanation.
+		if err := m.drv.SendToolResult(a.toolUseID, answer); err != nil {
+			alog.Printf("ask: send tool_result failed: %v", err)
+			m.appendEntry(entry{kind: eWarn, body: "⚠ could not send the answer — the session may be dead: " + err.Error()})
+			m.status = "answer not delivered"
+			return nil
+		}
 	}
 	m.appendEntry(entry{kind: eYou, body: "↳ answered:\n" + answer})
 	m.status = "working…"

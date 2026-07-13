@@ -95,6 +95,7 @@ type verdictMsg struct {
 	gen       int
 	v         judge.Verdict
 	rationale string
+	cost      float64 // the judge's own session spend, to fold into the tally
 	err       error
 }
 
@@ -104,8 +105,8 @@ func verifyCmd(ctx context.Context, j JudgeFunc, gen int, plan, lastMsg string) 
 	return func() tea.Msg {
 		cctx, cancel := context.WithTimeout(ctx, judgeTimeout)
 		defer cancel()
-		v, rationale, err := j(cctx, plan, lastMsg)
-		return verdictMsg{gen: gen, v: v, rationale: rationale, err: err}
+		res, err := j(cctx, plan, lastMsg)
+		return verdictMsg{gen: gen, v: res.Verdict, rationale: res.Text, cost: res.CostUSD, err: err}
 	}
 }
 
@@ -188,8 +189,10 @@ func (m *Model) onTurnEnd(ev driver.Event) tea.Cmd {
 func (m *Model) markComplete() {
 	m.phase = PhaseComplete
 	m.status = "complete"
-	alog.Printf("phase: COMPLETE (cost=$%.4f)", m.cost)
-	m.appendEntry(entry{kind: eComplete, body: fmt.Sprintf("✅ plan complete · $%.4f total", m.cost)})
+	total := m.totalCost()
+	alog.Printf("phase: COMPLETE (cost=$%.4f, billing=%s)", total, m.billingNote())
+	m.appendEntry(entry{kind: eComplete, body: fmt.Sprintf(
+		"✅ plan complete · $%.4f total · %s", total, m.billingNote())})
 }
 
 // startVerification launches an independent judge session to decide whether the
@@ -212,6 +215,7 @@ func (m *Model) onVerdict(msg verdictMsg) {
 		return // stale generation from a swapped-out driver
 	}
 	m.verifying = false
+	m.costSettled += msg.cost // the judge ran in its own process; bank what it spent
 
 	if msg.err != nil {
 		alog.Printf("judge: error: %v", msg.err)
@@ -259,11 +263,16 @@ func (m *Model) onVerdict(msg verdictMsg) {
 func (m *Model) onDriverReady(msg driverReadyMsg) tea.Cmd {
 	if m.drv != nil {
 		m.drv.Stop() // stale generation; its events will be ignored
+		m.settleCost()
 	}
 	m.drv = msg.drv
 	m.phase = msg.phase
 	m.gen++
 	m.turnText = ""
+	// Any question still on screen belongs to the driver we just stopped; its
+	// tool_use id is meaningless to the new one, and the panel would otherwise
+	// keep eating every keystroke.
+	m.ask = nil
 	alog.Printf("phase: %s (gen=%d)", msg.phase, m.gen)
 
 	cmds := []tea.Cmd{waitEvent(m.drv.Events(), m.gen)}

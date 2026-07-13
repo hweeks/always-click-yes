@@ -7,6 +7,7 @@ import (
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/hweeks/always-click-yes/internal/alog"
 	"github.com/hweeks/always-click-yes/internal/gate"
@@ -29,26 +30,79 @@ func transcriptKeyMap() viewport.KeyMap {
 
 const (
 	headerHeight = 1
-	footerHeight = 4 // framed input/gate panel occupies four lines (top rule, body×2, hint)
+	maxInputRows = 8 // the composer grows to this many rows, then scrolls internally
 )
 
+// Update runs the message switch, then re-lays-out the frame. The composer grows
+// with its content, so the footer's height is not a constant — layout has to run
+// after anything that can change it (a keystroke, a send that clears the box, a
+// preloaded prompt, a gate arriving), which is to say: after everything.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Give the composer its full height *before* it handles the message. The
+	// textarea scrolls its own view to keep the cursor visible and only ever
+	// scrolls down: left one row tall, the keystroke that first wraps the message
+	// would scroll it past row one, and growing it afterwards never scrolls back —
+	// the top of the message would just vanish. Sized up front, it never scrolls
+	// until the message genuinely outgrows the cap, and layout shrinks it back to
+	// fit the content.
+	m.input.SetHeight(maxInputRows)
+
+	m, cmd := m.update(msg)
+	m.layout()
+	return m, cmd
+}
+
+// layout sizes the composer to its content and gives the transcript whatever is
+// left. Deriving the viewport's height from the footer as *actually rendered* is
+// what keeps header + body + footer exactly `height` lines tall: the old fixed
+// footerHeight was a lie the moment the input wrapped, and the extra line pushed
+// the frame past the bottom of the screen, which is what made the box appear to
+// flip between one and two lines.
+func (m *Model) layout() {
+	if !m.ready {
+		return
+	}
+	m.input.SetWidth(max(m.width-2, 20))
+	m.input.SetHeight(clamp(wrappedRows(m.input.Value(), m.input.Width()), 1, maxInputRows))
+
+	vpHeight := max(m.height-headerHeight-lipgloss.Height(m.footerView()), 3)
+	if m.vp.Height == vpHeight {
+		return
+	}
+	atBottom := m.vp.AtBottom()
+	m.vp.Height = vpHeight
+	if atBottom {
+		m.vp.GotoBottom() // stay pinned to the newest output as the composer grows
+	}
+}
+
+// wrappedRows is how many rows a value occupies once soft-wrapped to width.
+// textarea.LineCount counts logical lines only (it is len(value) split on "\n"),
+// so it can't answer this; measuring the wrapped render can.
+func wrappedRows(value string, width int) int {
+	if width < 1 || value == "" {
+		return 1
+	}
+	return lipgloss.Height(lipgloss.NewStyle().Width(width).Render(value))
+}
+
+func clamp(v, lo, hi int) int { return min(max(v, lo), hi) }
+
+func (m Model) update(msg tea.Msg) (Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
-		vpHeight := max(msg.Height-headerHeight-footerHeight, 3)
 		if !m.ready {
-			m.vp = viewport.New(msg.Width, vpHeight)
+			m.vp = viewport.New(msg.Width, max(msg.Height-headerHeight-4, 3))
 			m.vp.KeyMap = transcriptKeyMap()
 			m.ready = true
 		} else {
 			m.vp.Width = msg.Width
-			m.vp.Height = vpHeight
 		}
-		m.input.Width = msg.Width - 4
 		m.bar.Width = max(msg.Width-4, 10)
+		m.layout() // the viewport must be sized before rebuild re-renders into it
 		m.rebuild()
 		return m, nil
 
@@ -124,6 +178,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.ended = true
 		m.status = "session ended"
+		// Nothing is left to answer, and an open panel would swallow every key.
+		m.ask = nil
 		m.appendEntry(entry{kind: eTurn, body: "──── session ended ────"})
 		m.rebuild()
 		return m, nil

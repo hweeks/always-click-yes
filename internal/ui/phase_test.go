@@ -26,8 +26,8 @@ func autoRunWithJudge(j JudgeFunc) Model {
 }
 
 func fakeJudge(v judge.Verdict, rationale string, err error) JudgeFunc {
-	return func(context.Context, string, string) (judge.Verdict, string, error) {
-		return v, rationale, err
+	return func(context.Context, string, string) (judge.Result, error) {
+		return judge.Result{Verdict: v, Text: rationale}, err
 	}
 }
 

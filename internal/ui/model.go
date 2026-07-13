@@ -10,10 +10,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/progress"
-	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/hweeks/always-click-yes/internal/driver"
 	"github.com/hweeks/always-click-yes/internal/gate"
@@ -23,7 +25,7 @@ import (
 
 // JudgeFunc runs an independent session that judges whether the approved plan is
 // complete, given the plan text and the working session's final message.
-type JudgeFunc func(ctx context.Context, plan, lastMsg string) (judge.Verdict, string, error)
+type JudgeFunc func(ctx context.Context, plan, lastMsg string) (judge.Result, error)
 
 // Config holds the wiring the model needs beyond the driver.
 type Config struct {
@@ -51,7 +53,7 @@ type Model struct {
 	drv *driver.Driver
 
 	vp    viewport.Model
-	input textinput.Model
+	input textarea.Model
 	bar   progress.Model
 
 	width, height int
@@ -61,12 +63,23 @@ type Model struct {
 	sessionID string
 	model     string
 	mode      string
-	cost      float64
 	status    string
 	ended     bool
 	planReady bool
 	logPath   string
 	maxLines  int
+
+	// Billing. apiKeySource comes from claude's init event and says which account
+	// actually paid; see billing().
+	//
+	// Cost needs two buckets because each claude process reports its own
+	// total_cost_usd, cumulative within that process but reset by a --resume (and
+	// the judge runs in a process of its own). So the current session's figure is
+	// *assigned*, and finished sessions are *banked* — summing per turn would
+	// double-count, and assigning across sessions would lose everything but the last.
+	apiKeySource string
+	costSettled  float64 // banked: previous driver generations + judge sessions
+	costCurrent  float64 // the running session's latest total_cost_usd
 
 	// slash-command / overlay state
 	nextModel     string // --model override applied to the next launched session (/model)
@@ -103,11 +116,26 @@ type Model struct {
 
 // New builds the initial model bound to a started driver.
 func New(drv *driver.Driver, cfg Config) Model {
-	ti := textinput.New()
-	ti.Placeholder = "type a message for Claude, Enter to send (Ctrl+C to quit)"
-	ti.Prompt = "▸ "
-	ti.Focus()
-	ti.CharLimit = 0
+	// A textarea, not a textinput: the composer grows with its content (see
+	// layout), and a textinput is single-line by construction — it scrolls
+	// sideways and can only ever be one row tall.
+	ta := textarea.New()
+	ta.Placeholder = "type a message for Claude, Enter to send (Ctrl+C to quit)"
+	ta.Prompt = "▸ "
+	ta.ShowLineNumbers = false
+	ta.CharLimit = 0
+	ta.MaxHeight = maxInputRows
+	ta.SetHeight(1)
+	ta.Focus()
+	// Enter sends, so a deliberate newline needs its own key; terminals can't
+	// tell shift+enter from enter, so ctrl+j it is.
+	ta.KeyMap.InsertNewline = key.NewBinding(key.WithKeys("ctrl+j"), key.WithHelp("ctrl+j", "newline"))
+	// ↑/↓ belong to the transcript, as /help promises. Leave the textarea's own
+	// line movement on ctrl+p/ctrl+n.
+	ta.KeyMap.LinePrevious = key.NewBinding(key.WithKeys("ctrl+p"))
+	ta.KeyMap.LineNext = key.NewBinding(key.WithKeys("ctrl+n"))
+	// The cursor-line highlight reads as a selection bar in a one-line composer.
+	ta.FocusedStyle.CursorLine = lipgloss.NewStyle()
 
 	if cfg.Countdown <= 0 {
 		cfg.Countdown = 30 * time.Second
@@ -118,7 +146,7 @@ func New(drv *driver.Driver, cfg Config) Model {
 
 	m := Model{
 		drv:       drv,
-		input:     ti,
+		input:     ta,
 		bar:       progress.New(progress.WithoutPercentage()),
 		status:    "planning",
 		gateReqs:  cfg.GateReqs,
@@ -161,7 +189,7 @@ func waitEvent(ch <-chan driver.Event, gen int) tea.Cmd {
 }
 
 func (m Model) Init() tea.Cmd {
-	cmds := []tea.Cmd{textinput.Blink, waitGate(m.gateReqs), tickCmd()}
+	cmds := []tea.Cmd{textarea.Blink, waitGate(m.gateReqs), tickCmd()}
 	if m.drv != nil {
 		cmds = append(cmds, waitEvent(m.drv.Events(), m.gen))
 	} else if m.launcher != nil {
@@ -202,6 +230,7 @@ func (m *Model) ingest(ev driver.Event) {
 			m.sessionID = ev.SessionID
 			m.model = ev.Model
 			m.mode = ev.PermissionMode
+			m.apiKeySource = ev.APIKeySource
 			m.status = "ready"
 			m.appendEntry(entry{kind: eMeta, body: fmt.Sprintf(
 				"● session %s · model %s · mode %s", short(ev.SessionID), ev.Model, ev.PermissionMode)})
@@ -233,17 +262,82 @@ func (m *Model) ingest(ev driver.Event) {
 			}
 		}
 	case driver.TypeResult:
-		m.cost = ev.TotalCostUSD
+		// Assigned, not added: total_cost_usd is this process's running total.
+		m.costCurrent = ev.TotalCostUSD
 		m.processing = false
 		m.status = "idle"
 		m.appendEntry(entry{kind: eTurn, body: fmt.Sprintf(
-			"──── turn complete · stop=%s · $%.4f ────", ev.StopReason, ev.TotalCostUSD)})
+			"──── turn complete · stop=%s · $%.4f ────", ev.StopReason, m.totalCost())})
 	}
 }
 
-// ingestToolUse renders a tool call; ExitPlanMode gets a prominent plan box.
+// totalCost is what the run has spent so far, across every claude process it has
+// launched: the plan session, each resumed auto-run session, and every judge.
+func (m Model) totalCost() float64 { return m.costSettled + m.costCurrent }
+
+// settleCost banks the running session's spend before its driver is replaced. A
+// resumed session's process starts its own total from zero, so without this the
+// plan phase's cost would vanish the moment auto-run began.
+func (m *Model) settleCost() {
+	m.costSettled += m.costCurrent
+	m.costCurrent = 0
+}
+
+// billing names the account this run is charged to, per claude's init event:
+// apiKeySource is "none" when the claude.ai login pays, and otherwise names the
+// key's origin. Empty until the init event arrives.
+func (m Model) billing() string {
+	switch m.apiKeySource {
+	case "":
+		return ""
+	case "none":
+		return "subscription"
+	default:
+		return "API"
+	}
+}
+
+// billingNote spells out, for the final tally, whether that dollar figure was
+// actually charged. claude reports total_cost_usd either way, but on a
+// subscription it is notional.
+func (m Model) billingNote() string {
+	switch m.billing() {
+	case "subscription":
+		return "subscription (not billed)"
+	case "API":
+		return "API (billed)"
+	default:
+		return "billing unknown"
+	}
+}
+
+// intercepted lists the tools acy answers itself rather than letting claude run:
+// ExitPlanMode is consumed to arm the run, AskUserQuestion is answered by the
+// panel in ask.go. They must never reach the gate — a countdown for a tool we
+// already handle would sit invisible behind the ask overlay and auto-approve a
+// second, conflicting execution. See enqueue in gate.go.
+var intercepted = map[string]bool{
+	"ExitPlanMode":    true,
+	"AskUserQuestion": true,
+}
+
+// baseToolName strips an "mcp__<server>__" prefix so an MCP-provided tool is
+// matched by the same name as its built-in counterpart.
+func baseToolName(name string) string {
+	if !strings.HasPrefix(name, "mcp__") {
+		return name
+	}
+	if i := strings.LastIndex(name, "__"); i > len("mcp__")-1 {
+		return name[i+len("__"):]
+	}
+	return name
+}
+
+// ingestToolUse renders a tool call; ExitPlanMode gets a prominent plan box and
+// AskUserQuestion opens the answer panel.
 func (m *Model) ingestToolUse(b driver.ContentBlock) {
-	if b.Name == "ExitPlanMode" {
+	switch baseToolName(b.Name) {
+	case "ExitPlanMode":
 		plan := planText(b.Input)
 		if plan == "" {
 			plan = "(the model proposed a plan but sent no text)"
@@ -252,8 +346,9 @@ func (m *Model) ingestToolUse(b driver.ContentBlock) {
 		m.appendEntry(entry{kind: ePlan, body: plan})
 		m.planReady = true
 		return
-	}
-	if b.Name == "AskUserQuestion" {
+	case "AskUserQuestion":
+		// A shape we can't parse falls through to a plain tool entry rather than
+		// opening an empty panel the user could never dismiss.
 		if a, ok := parseAsk(b.Input); ok {
 			a.toolUseID = b.ID
 			m.ask = a

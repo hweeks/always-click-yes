@@ -67,13 +67,27 @@ for long-running tasks. Flow:
   don't truncate it.
 - **Interrupt**: write `{"type":"control_request","request_id":"<id>","request":{"subtype":"interrupt"}}`
   on stdin (capability `interrupt_receipt_v1`); the turn ends `terminal_reason:"aborted_streaming"`.
-- **`AskUserQuestion`** arrives as an assistant `tool_use` block (input:
-  `{questions:[{header,question,multiSelect,options:[{label,description}]}]}`) and the turn
-  **blocks** — no `result` event — until you answer it. Answer via `driver.SendToolResult`,
-  which injects a user message whose content is a `tool_result` block referencing the
-  `tool_use_id`. Note: this can't be spiked from inside an agent harness (a nested `claude`
-  inherits an altered/deferred tool registry and won't offer `AskUserQuestion`); verify from a
-  real terminal. Detection is name-based and harmless if the tool never appears.
+- **`AskUserQuestion` and `ExitPlanMode` do not exist in `-p` mode.** Measured against 2.1.207
+  (`internal/ui/ask_live_test.go` probes this live): the `system/init` event advertises a fixed
+  30-tool registry — `Task, Bash, CronCreate, …, ToolSearch, WebFetch, WebSearch, Workflow,
+  Write` — and **neither tool is in it**, under every `--permission-mode`, with or without
+  `--allowedTools`, with or without a scrubbed environment. They appear to be interactive-TUI
+  tools. An earlier note here blamed a nested-agent-harness tool registry; that was wrong — a
+  clean shell behaves identically. Consequences:
+  - `--plan-tools`' `AskUserQuestion` default (`cli/run.go`) is inert: you cannot allowlist a
+    tool that isn't in the registry.
+  - The ask panel (`ui/ask.go`) is **unreachable in production** — claude never emits the
+    `tool_use`. Its code and tests are correct and stay exercised offline against
+    `ui/testdata/ask_tool_use.json`, but nothing triggers them at runtime.
+  - `m.planReady` / the boxed plan entry are unreachable for the same reason; the plan still
+    arrives, just as ordinary assistant text. `Ctrl+G` is unaffected (it only needs a session id).
+  - The route that would actually work is an **MCP tool** (`mcp__acy__…`): MCP tools *are* added
+    to the registry. `baseToolName` (`ui/model.go`) already strips the `mcp__<server>__` prefix
+    so the panel and the gate bypass would pick one up unchanged.
+  - The assumed wire shape — turn **blocks** with no `result` event until you answer, answered
+    via `driver.SendToolResult` (a user message carrying a `tool_result` block referencing the
+    `tool_use_id`) — is therefore **still unverified**. Detection is name-based and harmless
+    while the tool never appears.
 - No official Go SDK; Claude Code is Node/TypeScript.
 
 ## Gotchas we already hit (don't reintroduce)

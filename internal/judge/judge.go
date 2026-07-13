@@ -37,9 +37,19 @@ func (v Verdict) String() string {
 
 // Options configures the one-shot judge subprocess.
 type Options struct {
-	Bin   string // claude binary (default "claude")
-	Cwd   string // working directory (the same repo the run operates in)
-	Model string // --model for the judge (optional; empty = claude's default)
+	Bin       string // claude binary (default "claude")
+	Cwd       string // working directory (the same repo the run operates in)
+	Model     string // --model for the judge (optional; empty = claude's default)
+	UseAPIKey bool   // bill ANTHROPIC_API_KEY rather than the claude.ai login
+}
+
+// Result is a judge session's verdict, its raw reply, and what the check cost.
+// The judge runs in its own claude process, which reports its own spend — so its
+// cost has to be carried back and added to the run's tally, or it goes unseen.
+type Result struct {
+	Verdict Verdict
+	Text    string
+	CostUSD float64
 }
 
 // ParseVerdict scans judge output for the STATUS sentinel. DONE wins ties.
@@ -76,27 +86,29 @@ func Prompt(plan, lastMsg string) string {
 		"=== AGENT'S FINAL MESSAGE ===\n" + lastMsg + "\n"
 }
 
-// Assess launches a one-shot judge session and returns its verdict plus the raw
-// reply text. It reuses the streaming driver with a fresh session, plan
-// permission mode, and tools disabled, so it is a single fast read-only turn with
-// no side effects.
-func Assess(ctx context.Context, opts Options, plan, lastMsg string) (Verdict, string, error) {
+// Assess launches a one-shot judge session and returns its verdict, raw reply,
+// and cost. It reuses the streaming driver with a fresh session, plan permission
+// mode, and tools disabled, so it is a single fast read-only turn with no side
+// effects.
+func Assess(ctx context.Context, opts Options, plan, lastMsg string) (Result, error) {
 	d := driver.New(driver.Options{
 		Bin:            opts.Bin,
 		Cwd:            opts.Cwd,
 		Model:          opts.Model,
 		PermissionMode: "plan",
+		UseAPIKey:      opts.UseAPIKey,
 		ExtraArgs:      []string{"--tools", ""}, // no tools -> no side effects
 	})
 	if err := d.Start(ctx); err != nil {
-		return VerdictUnclear, "", fmt.Errorf("start judge: %w", err)
+		return Result{}, fmt.Errorf("start judge: %w", err)
 	}
 	defer d.Stop()
 
 	if err := d.Send(Prompt(plan, lastMsg)); err != nil {
-		return VerdictUnclear, "", fmt.Errorf("send judge prompt: %w", err)
+		return Result{}, fmt.Errorf("send judge prompt: %w", err)
 	}
 
+	var res Result
 	var reply strings.Builder
 	for ev := range d.Events() {
 		if ev.Type == driver.TypeAssistant && ev.Message != nil {
@@ -108,10 +120,12 @@ func Assess(ctx context.Context, opts Options, plan, lastMsg string) (Verdict, s
 			}
 		}
 		if ev.IsTurnEnd() {
+			res.CostUSD = ev.TotalCostUSD
 			break
 		}
 	}
 
-	text := reply.String()
-	return ParseVerdict(text), text, nil
+	res.Text = reply.String()
+	res.Verdict = ParseVerdict(res.Text)
+	return res, nil
 }
