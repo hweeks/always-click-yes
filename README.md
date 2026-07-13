@@ -47,10 +47,19 @@ spawns one more short-lived judge process.
 **Prerequisites:** Go 1.26+ and the [Claude Code](https://claude.com/claude-code) CLI
 (`claude`) on your `PATH` and authenticated (`claude auth`).
 
+**Prebuilt binary** — grab the tarball for your platform from the
+[latest release](https://github.com/hweeks/always-click-yes/releases/latest):
+
+```sh
+tar xzf acy_v*_darwin_arm64.tar.gz
+sudo mv acy /usr/local/bin/
+```
+
 **With `go install`** (puts `acy` in `$(go env GOPATH)/bin` — add that to your `PATH`):
 
 ```sh
-go install github.com/hweeks/always-click-yes@latest
+go install github.com/hweeks/always-click-yes@latest   # newest tagged release
+go install github.com/hweeks/always-click-yes@v0.1.0   # or pin a version
 mv "$(go env GOPATH)/bin/always-click-yes" "$(go env GOPATH)/bin/acy"  # optional: shorter name
 ```
 
@@ -62,6 +71,10 @@ cd always-click-yes
 go build -o acy .
 # optionally: sudo mv acy /usr/local/bin/
 ```
+
+`acy --version` reports what you're running — a tag (`v0.1.0`) for a released build, or a
+`v0.0.0-<date>-<sha>` pseudo-version (with `+dirty` for uncommitted changes) when built
+from a checkout. Include it in bug reports.
 
 ## Run
 

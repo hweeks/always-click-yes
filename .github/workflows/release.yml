@@ -1,0 +1,81 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  # Watches main for Conventional Commits and keeps a "chore(release): x.y.z" PR
+  # open with the version bump + changelog. Merging that PR is what cuts a release:
+  # it tags the commit and creates the GitHub Release.
+  release-please:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      released: ${{ steps.release.outputs.release_created }}
+      tag: ${{ steps.release.outputs.tag_name }}
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: release
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  # Attaches binaries to the release release-please just created. This must stay in
+  # the same workflow run: a tag pushed by GITHUB_TOKEN does not trigger a separate
+  # `on: push: tags` workflow, so a standalone release workflow would never fire.
+  binaries:
+    needs: release-please
+    if: needs.release-please.outputs.released == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: darwin, goarch: arm64 }
+          - { goos: darwin, goarch: amd64 }
+          - { goos: linux, goarch: amd64 }
+          - { goos: linux, goarch: arm64 }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-please.outputs.tag }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Built from a plain checkout, so the toolchain records no module version —
+      # the tag has to be stamped in explicitly or `acy --version` reports (devel).
+      - name: build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+          TAG: ${{ needs.release-please.outputs.tag }}
+        run: |
+          go build -trimpath \
+            -ldflags "-s -w -X github.com/hweeks/always-click-yes/internal/version.stamped=${TAG}" \
+            -o acy .
+          ./acy --version || true  # only runs on the native target; informational
+
+      - name: package
+        env:
+          TAG: ${{ needs.release-please.outputs.tag }}
+        run: |
+          archive="acy_${TAG}_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz"
+          tar czf "$archive" acy README.md
+          shasum -a 256 "$archive" > "$archive.sha256"
+
+      - name: upload to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.release-please.outputs.tag }}
+        run: gh release upload "$TAG" acy_*.tar.gz acy_*.sha256 --clobber

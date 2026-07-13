@@ -124,4 +124,29 @@ Live tests need the `claude` CLI on PATH and auth. CI skips them.
 - Keep the debug log useful: new subsystems should `alog.Printf`/`alog.Raw` their key events.
 - UI transcript is structured `entry` values rendered in `render.go` — add an `ekind` rather
   than pre-styling strings, so entries re-render correctly on resize.
-- End commit messages with the Co-Authored-By trailer.
+- End commit messages with the Co-Authored-By trailer. **CI enforces this** — the
+  `ai-attribution` job fails a PR if any non-merge, non-bot commit lacks a
+  `Co-Authored-By: Claude ...` line. Contributions here are AI-assisted by policy and the
+  trailer is the record of it.
+
+## Commits and releases
+
+Commit subjects **must** follow [Conventional Commits](https://www.conventionalcommits.org)
+— release-please parses them to decide the next version, and a subject it can't parse
+contributes nothing to the changelog:
+
+```
+feat: add an independent completion judge      -> minor bump (0.2.0)
+fix: strip ANTHROPIC_API_KEY from the child    -> patch bump (0.1.1)
+feat!: rename --countdown to --delay           -> major bump (see below)
+docs|test|chore|refactor|perf: ...             -> no release on its own
+```
+
+A `!` after the type (or a `BREAKING CHANGE:` footer) marks a breaking change. While the
+project is pre-1.0 that bumps the *minor*, not the major.
+
+Releases are automatic: merging to `main` makes release-please open or update a
+`chore(release): x.y.z` PR. Nothing ships until you merge that PR — doing so tags the
+commit, writes `CHANGELOG.md`, and `.github/workflows/release.yml` attaches the
+cross-compiled binaries. Don't tag by hand; `.release-please-manifest.json` tracks the
+current version and hand-tagging desyncs it.
