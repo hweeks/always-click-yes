@@ -156,14 +156,51 @@ Type these in the message box (they're handled by `acy`, not forwarded to Claude
 | Command | Action |
 |---------|--------|
 | `/help` | show the command + key reference overlay |
-| `/resume [id]` | resume a prior session for this repo — a picker if no id, direct if given; lands back in the chat so you can keep planning, then `Ctrl+G` to arm |
+| `/resume [id]` | resume a prior session for this repo — a picker if no id, direct if given. Restores the transcript **and the run**: a session you armed comes back armed and keeps going (see [Resuming](#resuming)) |
 | `/model <name>` | set the model for the next launched/resumed session |
 | `/clear` | clear the transcript view |
 | `/log` | show the debug-log path |
 | `/quit` | quit (same as `Ctrl+C`) |
 
+## Resuming
+
+A long unattended run is exactly the thing you can't babysit — so it's exactly the thing
+that gets interrupted. Close the terminal, sleep the laptop, hit `Ctrl+C` by accident, and
+the work is stranded halfway.
+
+```sh
+acy --continue          # pick the run back up where it stopped
+acy --resume <id>       # or name the session
+```
+
+You come back to the transcript you were looking at, in the phase you were in. If you'd
+armed the run, it comes back **armed**: no keys, no re-approval, no re-planning. It doesn't
+restart the task — it asks the independent judge where things stand, and either finishes or
+declares itself already done.
+
+That works because the two halves are restored from two places. The conversation is
+Claude's: `acy` replays the transcript Claude already keeps under `~/.claude/projects`.
+Everything else — which phase you were in, the plan being worked to, the auto-round count,
+the running cost — is `acy`'s own, and it isn't in Claude's file, so `acy` keeps a small
+snapshot per session (a few hundred bytes, written atomically at every transition) under
+`$ACY_STATE_DIR`, defaulting to your OS config dir (`~/Library/Application Support/acy` on
+macOS, `~/.config/acy` on Linux).
+
+Sessions `acy` never supervised — a bare `claude` run — still resume; you just get the
+conversation back, with nothing to restore. The `/resume` picker marks the difference:
+rows `acy` drove show `[AUTO-RUN · 3 rounds · $1.23]`.
+
+Two things worth knowing. The transcript view is capped at the most recent 200 entries
+(Claude still has the whole thing — only the re-render is bounded, and the elided head
+says so). And a finished run resumes as a **chat**, not an auto-run: there's nothing left
+to drive, but the cost carries over, and `Ctrl+G` re-arms if you want more.
+
 ## Flags
 
+- `--resume <id>` / `-c`, `--continue` — restore a prior run: its transcript, phase, plan,
+  round count and cost. `--continue` takes the most recent run **`acy` supervised** in this
+  directory, so it can never land on a stray `claude` session or on one of the judge's
+  one-shot sessions. See [Resuming](#resuming).
 - `--model` — model alias/name (default: Claude's default)
 - `--judge-model` — model for the independent completion judge (default: `--model`)
 - `--countdown` — auto-approve delay per gated tool (default `30s`)
@@ -198,14 +235,47 @@ Type these in the message box (they're handled by `acy`, not forwarded to Claude
 - `internal/ui` — the Bubble Tea model: transcript, countdown, phase machine,
   judge dispatch + manual done-check fallback, slash commands, and the resume /
   AskUserQuestion pickers.
-- `internal/session` — lists resumable sessions for the `/resume` picker by
-  reading claude's `~/.claude/projects/<slug>/*.jsonl` transcripts.
+- `internal/session` — reads claude's `~/.claude/projects/<slug>/*.jsonl` transcripts:
+  lists them for the `/resume` picker, and replays one back into the transcript view.
+- `internal/state` — `acy`'s own snapshot of a run (phase, plan, rounds, cost) — the
+  part of a session claude's transcript doesn't record.
+- `internal/e2e` — the live end-to-end suite (see below).
 - `internal/cli` — Cobra commands (`run`, hidden `hook`).
 
 ## Tests
 
 ```sh
-go test ./...                 # unit tests (no network)
-ACY_LIVE=1 go test ./...      # also runs the live tests that spend a few cents:
-                              #   driver stream, gate hook chain, plan->run handoff, interrupt
+go test ./...                 # unit tests — no network, no spend, no claude
 ```
+
+### The live suite
+
+Unit tests can only prove `acy` agrees with itself. The live suite proves it agrees with
+Claude — it drives the **real** supervisor (real gate socket, real `PreToolUse` hook
+subprocess, real `claude` sessions, real state files) with no terminal, and asserts on
+things a model can't talk its way out of: a file exists on disk, a phase changed, a prompt
+was or wasn't sent.
+
+```sh
+ACY_LIVE=1 go test ./... -timeout 30m            # everything, including the e2e suite
+ACY_LIVE=1 go test ./internal/e2e/ -v -timeout 20m   # just the end-to-end scenarios
+ACY_LIVE=1 go test ./internal/e2e/ -run TestE2EResume -v -timeout 15m
+```
+
+It **runs on your subscription and spends real money** (cents, not dollars) and takes real
+minutes, which is why it is opt-in and can never run in CI. Every test gets a scratch
+project directory and a scratch snapshot directory, so it can't touch your work.
+
+What it covers:
+
+| Test | What it proves |
+|------|----------------|
+| `TestE2EPlanArmAutoApproveComplete` | the whole premise: plan → arm → tools auto-approve → work done → judge says DONE, with a file on disk as the evidence |
+| `TestE2EVetoBlocksATool` | `s` actually stops a tool. The most important key on the board, and the one you'll never press |
+| `TestE2EResumeAnArmedRunAfterACrash` | kill an armed run mid-flight, `--continue`, and watch it finish unattended |
+| `TestE2EResumeACompletedRunLandsInPlan` | a finished run comes back as a chat, with its cost intact |
+| `TestE2EResumeASessionWithNoSnapshot` | a session `acy` never drove still resumes |
+
+The narrower live tests (`ACY_LIVE=1` in `internal/driver`, `internal/gate`, `internal/judge`,
+`internal/ui`) probe single seams: the stream-json wire format, the hook chain, the judge,
+and whether `AskUserQuestion` has become real yet.

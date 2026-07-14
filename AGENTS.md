@@ -56,9 +56,16 @@ for long-running tasks. Flow:
   gutter blocks), `phase.go` (phase machine, judge dispatch + done-check fallback),
   `commands.go` (slash commands + resume picker), `ask.go` (AskUserQuestion panel),
   `gate.go` (countdown).
-- `internal/session` — lists resumable sessions for `/resume` from claude's
-  `~/.claude/projects/<slug>/*.jsonl` transcripts (slug = cwd with `/`→`-`). Injected as
-  `Config.Sessions`, so tests supply a fake.
+- `internal/session` — reads claude's `~/.claude/projects/<slug>/*.jsonl` transcripts:
+  `List` for the `/resume` picker, `Replay` to turn one back into `[]driver.Event` for the
+  transcript view. Injected as `Config.Sessions` / `Config.Replay`, so tests supply fakes.
+- `internal/state` — acy's own snapshot per session (phase, plan, rounds, cost): the part
+  of a run claude's transcript does not record. Atomic JSON under
+  `$ACY_STATE_DIR` (else `<user config dir>/acy/sessions/<id>.json`). Injected as
+  `Config.LoadState` / `Config.SaveState`.
+- `internal/e2e` — the live end-to-end suite: drives the real supervisor (real gate, real
+  hook, real claude, real state files) headlessly, on your subscription. `ACY_LIVE=1` only;
+  it can never run in CI.
 - `internal/judge` — runs an independent one-shot `claude` session (via `driver`, tools
   disabled) that judges plan completion from the plan + last message. Injected into the UI
   as `Config.Judge`, so tests swap in a fake verdict.
@@ -108,6 +115,26 @@ for long-running tasks. Flow:
     via `driver.SendToolResult` (a user message carrying a `tool_result` block referencing the
     `tool_use_id`) — is therefore **still unverified**. Detection is name-based and harmless
     while the tool never appears.
+- **`-p` sessions are persisted like any other**, at `~/.claude/projects/<slug>/<id>.jsonl`.
+  The records are a *superset of the stream-json event* — `{type:"user"|"assistant",
+  message:{role,content:[…]}}` with the same `text`/`thinking`/`tool_use`/`tool_result`
+  blocks — which is why `session.Replay` unmarshals straight into `driver.Message` and acy
+  has exactly one content parser. Sub-agent records carry `isSidechain:true`. There are **no
+  `result` records** (so cost and turn boundaries can't be replayed — that's what
+  `internal/state` is for) and **no `init` records** (so a replay can't clobber the live
+  session id).
+- **`--resume` keeps the session id in `-p` mode; it does not fork.** Verified against real
+  transcripts: an armed run appends to the same jsonl the plan phase wrote. `--fork-session`
+  is the opt-in that changes it. acy still tombstones a changed id (`state.SupersededBy`) in
+  case that ever stops being true.
+- **claude never echoes an injected user turn back on the stream.** Every live `user` event
+  is a `tool_result`; the prompts acy sends are simply not in the output. They *are* in the
+  transcript — so a replay must render user text itself (`ui.ingestReplay`), or you get
+  Claude's answers with none of the questions.
+- **The project-dir slug is not just `/`→`-`.** claude resolves symlinks first (`/var/…` is
+  stored as `-private-var-…`) and maps *every* character outside `[A-Za-z0-9-]` to a dash
+  (`/tmp/my.dotted_dir` → `-tmp-my-dotted-dir`). Guessing this wrong silently finds no
+  sessions, so `session.Replay` also falls back to globbing every project dir for the id.
 - No official Go SDK; Claude Code is Node/TypeScript.
 
 ## Gotchas we already hit (don't reintroduce)
@@ -120,6 +147,23 @@ for long-running tasks. Flow:
   child blocks once the pipe buffer fills.
 - Driver swaps between phases are tracked by a generation counter (`gen`); stale events from
   a stopped driver are ignored, so stopping the old driver doesn't look like the session ending.
+- **Anything that swaps the session must stop the old driver *and* bump `gen` in the same
+  breath.** `applyResume` (resume.go) does; it has to. `/resume` is reachable mid-turn, and a
+  `result` from the abandoned session arriving a second later still carries the current
+  generation — it would bank the old session's cost into the restored run's tally and stamp
+  the old phase over the restored snapshot.
+- **A resumed run must clear `ended` / `processing` / `verifying`.** They describe a session
+  that no longer exists. `sendInput` refuses to send while `ended` or `processing` is set, so
+  resuming after "session ended" would otherwise leave the composer permanently dead.
+- **`onDriverReady` clears `turnText` — except for a resumed auto-run.** That is the one launch
+  where the replay deliberately left the final assistant turn there, because it is the only
+  evidence the completion judge gets (`startVerification` passes it as `lastMsg`). Clearing it
+  asks the judge whether an empty plan is complete, and it will keep answering CONTINUE and
+  re-doing finished work.
+- **A resume takes its phase immediately, not when the driver lands.** Launching claude takes
+  a second or two; until the phase moves, a restored run looks like a plan session with a
+  session id — exactly what `Ctrl+G` arms from. Arming in that window launches a *second*
+  process for the same session and kicks off work that is already half done.
 - **The viewport's default keymap steals typing.** bubbles `viewport.DefaultKeyMap` binds
   `j/k/d/u/f/b` and space to scrolling, and `Update` forwards key events to both the input and
   the viewport — so typing those letters scrolled the transcript. `transcriptKeyMap()` in
