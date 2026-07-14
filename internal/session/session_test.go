@@ -72,3 +72,54 @@ func writeFile(t *testing.T, path, content string) {
 		t.Fatal(err)
 	}
 }
+
+// The slug rules are claude's, and they are not "swap the slashes" — these cases
+// are transcribed from real transcript directories on disk. Getting them wrong
+// means silently finding no sessions for a project, which is exactly the bug the
+// live e2e suite caught.
+func TestSlugMatchesClaudesLayout(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		want string
+	}{
+		{
+			name: "an ordinary path",
+			path: "/Users/x/projects/always-click-yes",
+			want: "-Users-x-projects-always-click-yes",
+		},
+		{
+			// /var/folders/_g/... is stored under -private-var-folders--g-...: the
+			// symlink is resolved, and the underscore becomes a dash.
+			name: "dots and underscores become dashes",
+			path: "/tmp-not-a-symlink/my.dotted_dir",
+			want: "-tmp-not-a-symlink-my-dotted-dir",
+		},
+		{
+			name: "dashes and digits survive",
+			path: "/a/csc-252",
+			want: "-a-csc-252",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := Slug(tt.path); got != tt.want {
+				t.Errorf("Slug(%q) = %q, want %q", tt.path, got, tt.want)
+			}
+		})
+	}
+}
+
+// A path reached through a symlink must slug to the same place claude puts it, or
+// every session in it is invisible.
+func TestSlugResolvesSymlinks(t *testing.T) {
+	real := t.TempDir()
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("cannot symlink here: %v", err)
+	}
+
+	if got, want := Slug(link), Slug(real); got != want {
+		t.Errorf("Slug through a symlink = %q, want the resolved %q", got, want)
+	}
+}

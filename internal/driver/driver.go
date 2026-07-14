@@ -67,10 +67,13 @@ func (o Options) Args() []string {
 	if o.SettingsPath != "" {
 		args = append(args, "--settings", o.SettingsPath)
 	}
-	if o.ResumeID != "" {
+	// --resume names an existing session; --session-id names a new one. Passing both
+	// asks claude to be in two sessions at once, and it refuses. Resuming wins: the
+	// session already exists, so the id we would have assigned is moot.
+	switch {
+	case o.ResumeID != "":
 		args = append(args, "--resume", o.ResumeID)
-	}
-	if o.SessionID != "" {
+	case o.SessionID != "":
 		args = append(args, "--session-id", o.SessionID)
 	}
 	if len(o.AllowedTools) > 0 {

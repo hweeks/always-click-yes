@@ -27,3 +27,17 @@ func TestArgsNoAllowedToolsWhenEmpty(t *testing.T) {
 		t.Errorf("did not expect --allowedTools with no tools set, got: %v", strings.Join(args, " "))
 	}
 }
+
+// --resume names a session that exists; --session-id names one that does not.
+// claude refuses both at once, so the driver must never emit both.
+func TestArgsResumeWinsOverSessionID(t *testing.T) {
+	args := Options{ResumeID: "existing", SessionID: "brand-new"}.Args()
+
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "--resume existing") {
+		t.Errorf("expected --resume to survive, got: %s", joined)
+	}
+	if strings.Contains(joined, "--session-id") {
+		t.Errorf("--session-id must not be passed alongside --resume, got: %s", joined)
+	}
+}
