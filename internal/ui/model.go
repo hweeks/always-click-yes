@@ -21,6 +21,7 @@ import (
 	"github.com/hweeks/always-click-yes/internal/gate"
 	"github.com/hweeks/always-click-yes/internal/judge"
 	"github.com/hweeks/always-click-yes/internal/session"
+	"github.com/hweeks/always-click-yes/internal/state"
 )
 
 // JudgeFunc runs an independent session that judges whether the approved plan is
@@ -36,9 +37,23 @@ type Config struct {
 	Countdown time.Duration        // auto-approve delay per gated tool
 	LogPath   string               // debug log file path (shown in the UI), if any
 	MaxLines  int                  // per-block line cap in the transcript (default 10)
+	Cwd       string               // the project this run belongs to (snapshot key)
 
 	// Sessions lists resumable sessions for the /resume picker (nil = disabled).
 	Sessions func() ([]session.Info, error)
+
+	// Resume is a session id to restore at startup: --resume/--continue set it, and
+	// Init then rebuilds the run instead of cold-starting a plan session.
+	Resume string
+
+	// Restoring a run needs two sources, injected as functions so the ui tests never
+	// touch a disk: LoadState/SaveState carry acy's own state (phase, plan, rounds,
+	// cost — none of which claude records), and Replay reads claude's transcript back
+	// as the events the UI would have ingested live. Any of them nil disables that
+	// half: no persistence, or no transcript, but never a crash.
+	LoadState func(id string) (state.Snapshot, bool, error)
+	SaveState func(s state.Snapshot) error
+	Replay    func(id string) ([]driver.Event, error)
 }
 
 // gateItem is a permission request the UI is counting down.
@@ -85,10 +100,19 @@ type Model struct {
 	nextModel     string // --model override applied to the next launched session (/model)
 	showHelp      bool   // the /help overlay is open
 	sessionLister func() ([]session.Info, error)
-	picking       bool           // the /resume session picker is open
-	sessionList   []session.Info // sessions shown in the picker
-	pickIdx       int            // selected row in the picker
-	ask           *askState      // a pending AskUserQuestion the user is answering
+	picking       bool                      // the /resume session picker is open
+	sessionList   []session.Info            // sessions shown in the picker
+	sessionSnaps  map[string]state.Snapshot // acy state per session, loaded when the picker opens
+	pickIdx       int                       // selected row in the picker
+	ask           *askState                 // a pending AskUserQuestion the user is answering
+
+	// resume / persistence
+	cwd       string // the project this run belongs to
+	resumeID  string // session to restore at startup ("" = cold start)
+	lineage   []string
+	loadState func(id string) (state.Snapshot, bool, error)
+	saveState func(s state.Snapshot) error
+	replay    func(id string) ([]driver.Event, error)
 
 	// gate / countdown state
 	gateReqs  <-chan *gate.Pending
@@ -159,9 +183,20 @@ func New(drv *driver.Driver, cfg Config) Model {
 		maxLines:  cfg.MaxLines,
 
 		sessionLister: cfg.Sessions,
+
+		cwd:       cfg.Cwd,
+		resumeID:  cfg.Resume,
+		loadState: cfg.LoadState,
+		saveState: cfg.SaveState,
+		replay:    cfg.Replay,
 	}
-	m.appendEntry(entry{kind: eMeta, body: "Plan your task with Claude below. When the plan is ready, press Ctrl+G"})
-	m.appendEntry(entry{kind: eMeta, body: "to arm — auto-run then approves each step after a countdown."})
+	if m.resumeID != "" {
+		m.status = "resuming…"
+		m.appendEntry(entry{kind: eMeta, body: "↩ restoring session " + short(m.resumeID) + " …"})
+	} else {
+		m.appendEntry(entry{kind: eMeta, body: "Plan your task with Claude below. When the plan is ready, press Ctrl+G"})
+		m.appendEntry(entry{kind: eMeta, body: "to arm — auto-run then approves each step after a countdown."})
+	}
 	if m.logPath != "" {
 		m.appendEntry(entry{kind: eMeta, body: "logging to " + m.logPath})
 	}
@@ -190,9 +225,14 @@ func waitEvent(ch <-chan driver.Event, gen int) tea.Cmd {
 
 func (m Model) Init() tea.Cmd {
 	cmds := []tea.Cmd{textarea.Blink, waitGate(m.gateReqs), tickCmd()}
-	if m.drv != nil {
+	switch {
+	case m.drv != nil:
 		cmds = append(cmds, waitEvent(m.drv.Events(), m.gen))
-	} else if m.launcher != nil {
+	case m.resumeID != "":
+		// Restore first, launch second: the phase we come back in is the one the
+		// snapshot recorded, not a cold PLAN.
+		cmds = append(cmds, loadResumeCmd(m.resumeID, m.loadState, m.replay))
+	case m.launcher != nil:
 		cmds = append(cmds, launchCmd(m.ctx, m.launcher, LaunchSpec{Phase: PhasePlan}))
 	}
 	return tea.Batch(cmds...)
@@ -227,7 +267,7 @@ func (m *Model) ingest(ev driver.Event) {
 	switch ev.Type {
 	case driver.TypeSystem:
 		if ev.IsInit() {
-			m.sessionID = ev.SessionID
+			m.adoptSession(ev.SessionID)
 			m.model = ev.Model
 			m.mode = ev.PermissionMode
 			m.apiKeySource = ev.APIKeySource

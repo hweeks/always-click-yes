@@ -71,7 +71,7 @@ func (m Model) helpView() string {
 		"",
 		lipgloss.NewStyle().Bold(true).Foreground(colDim).Render("commands"),
 		cmd("/help", "show this help"),
-		cmd("/resume [id]", "resume a prior session (picker if no id)"),
+		cmd("/resume [id]", "restore a prior run — transcript, phase and cost (picker if no id)"),
 		cmd("/model <name>", "set the model for the next launched/resumed session"),
 		cmd("/clear", "clear the transcript view"),
 		cmd("/log", "show the debug-log path"),
@@ -100,7 +100,8 @@ func (m Model) helpView() string {
 // pickerView renders the /resume session list with the selected row highlighted,
 // windowed to fit the viewport height.
 func (m Model) pickerView() string {
-	title := lipgloss.NewStyle().Bold(true).Foreground(colPlan).Render("↩ resume a session")
+	title := lipgloss.NewStyle().Bold(true).Foreground(colPlan).Render(
+		"↩ resume a session · [PHASE] marks the runs acy supervised")
 	maxVisible := max(m.vp.Height-3, 3)
 	start := 0
 	if m.pickIdx >= maxVisible {
@@ -114,6 +115,12 @@ func (m Model) pickerView() string {
 		summary := s.Summary
 		if summary == "" {
 			summary = "(no summary)"
+		}
+		// Sessions acy supervised carry their state; the rest are just claude
+		// sessions, and show only what claude knows about them.
+		snap, ok := m.sessionSnaps[s.ID]
+		if label := snapLabel(snap, ok); label != "" {
+			summary = "[" + label + "] " + summary
 		}
 		line := fmt.Sprintf("%s  %s  %s", short(s.ID), s.ModTime.Format("Jan 02 15:04"), summary)
 		line = truncate(line, max(m.vp.Width-2, 20))

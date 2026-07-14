@@ -40,6 +40,12 @@ type LaunchSpec struct {
 	Phase    Phase  // PhasePlan (interactive, ungated) or PhaseAutoRun (hooks + gated)
 	ResumeID string // --resume <session-id>; set to continue a captured/prior session
 	Model    string // --model override for this launch; empty = launcher default
+
+	// Kickoff sends kickoffPrompt once the session is up. Arming sets it — that
+	// prompt is what starts the work. A *resumed* auto-run must not: the run is
+	// already underway, and telling it "the plan is approved, begin implementing it"
+	// would start it over. Opt-in, so the zero value is the harmless one.
+	Kickoff bool
 }
 
 // Launcher starts a claude driver for a launch spec. For PhaseAutoRun the
@@ -74,9 +80,18 @@ const judgeTimeout = 2 * time.Minute
 // --- launch plumbing ---
 
 type driverReadyMsg struct {
-	drv   *driver.Driver
-	phase Phase
+	drv     *driver.Driver
+	phase   Phase
+	kickoff bool
 }
+
+// resumedAutoRun reports an armed run coming back to life rather than starting.
+// Arming is the only launch that kicks off work, so an auto-run arriving without a
+// kickoff is one that was already underway.
+func (m driverReadyMsg) resumedAutoRun() bool {
+	return m.phase == PhaseAutoRun && !m.kickoff
+}
+
 type errMsg struct{ err error }
 
 func launchCmd(ctx context.Context, l Launcher, spec LaunchSpec) tea.Cmd {
@@ -85,7 +100,7 @@ func launchCmd(ctx context.Context, l Launcher, spec LaunchSpec) tea.Cmd {
 		if err != nil {
 			return errMsg{err}
 		}
-		return driverReadyMsg{drv: d, phase: spec.Phase}
+		return driverReadyMsg{drv: d, phase: spec.Phase, kickoff: spec.Kickoff}
 	}
 }
 
@@ -185,6 +200,21 @@ func (m *Model) onTurnEnd(ev driver.Event) tea.Cmd {
 	return nil
 }
 
+// capturePlan makes sure the run is armed with a plan the judge can grade against.
+//
+// planBody is normally set from an ExitPlanMode tool call — but that tool does not
+// exist in `claude -p`'s registry (see AGENTS.md), so in practice it never fires
+// and planBody stays empty. The judge is then asked whether an empty plan is
+// complete, which it cannot meaningfully answer. The plan is still right there: it
+// is the last thing the assistant said, which is exactly what the user just read
+// and approved by pressing Ctrl+G. Use it.
+func (m *Model) capturePlan() {
+	if strings.TrimSpace(m.planBody) != "" {
+		return
+	}
+	m.planBody = strings.TrimSpace(m.turnText)
+}
+
 // markComplete transitions the run to the COMPLETE phase.
 func (m *Model) markComplete() {
 	m.phase = PhaseComplete
@@ -193,6 +223,7 @@ func (m *Model) markComplete() {
 	alog.Printf("phase: COMPLETE (cost=$%.4f, billing=%s)", total, m.billingNote())
 	m.appendEntry(entry{kind: eComplete, body: fmt.Sprintf(
 		"✅ plan complete · $%.4f total · %s", total, m.billingNote())})
+	m.persist()
 }
 
 // startVerification launches an independent judge session to decide whether the
@@ -216,6 +247,7 @@ func (m *Model) onVerdict(msg verdictMsg) {
 	}
 	m.verifying = false
 	m.costSettled += msg.cost // the judge ran in its own process; bank what it spent
+	defer m.persist()         // rounds and phase move below; whatever happens, record it
 
 	if msg.err != nil {
 		alog.Printf("judge: error: %v", msg.err)
@@ -268,7 +300,17 @@ func (m *Model) onDriverReady(msg driverReadyMsg) tea.Cmd {
 	m.drv = msg.drv
 	m.phase = msg.phase
 	m.gen++
-	m.turnText = ""
+
+	// turnText is the working session's last message — the only evidence the judge
+	// gets of what actually happened. A launch normally starts a fresh turn and has
+	// none. A *resumed* auto-run is the exception: the replay went to the trouble of
+	// recovering the final assistant turn precisely so the judge could read it here,
+	// and clearing it would hand the judge an empty transcript and ask it whether an
+	// empty plan was complete.
+	if !msg.resumedAutoRun() {
+		m.turnText = ""
+	}
+
 	// Any question still on screen belongs to the driver we just stopped; its
 	// tool_use id is meaningless to the new one, and the panel would otherwise
 	// keep eating every keystroke.
@@ -279,11 +321,27 @@ func (m *Model) onDriverReady(msg driverReadyMsg) tea.Cmd {
 	if msg.phase == PhaseAutoRun {
 		m.awaitingVerdict = false
 		m.preloaded = false
-		_ = m.drv.Send(kickoffPrompt)
-		m.processing = true
-		m.status = "working…"
-		m.appendEntry(entry{kind: eYou, body: kickoffPrompt})
+		switch {
+		case msg.kickoff:
+			// Arming: this prompt is what sets the work going.
+			_ = m.drv.Send(kickoffPrompt)
+			m.processing = true
+			m.status = "working…"
+			m.appendEntry(entry{kind: eYou, body: kickoffPrompt})
+
+		case m.judge != nil:
+			// Resumed mid-run. A resumed auto-run *is* an idle auto-run, so it needs
+			// no prompt of its own — it rejoins the loop at the point every turn
+			// already ends at, and the judge decides from the plan and the last thing
+			// the session said. If the work actually finished before acy died, the
+			// judge says DONE; if it didn't, its CONTINUE nudge picks the run back up.
+			cmds = append(cmds, m.startVerification())
+
+		default:
+			m.preloadDoneCheck() // no judge wired: fall back to the manual check
+		}
 	}
+	m.persist()
 	m.rebuild()
 	return tea.Batch(cmds...)
 }

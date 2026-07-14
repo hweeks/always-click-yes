@@ -142,13 +142,22 @@ func (m Model) update(msg tea.Msg) (Model, tea.Cmd) {
 			m.rebuild()
 			return m, nil
 		}
-		// Ctrl+G arms the run: switch from planning to auto-run.
-		if msg.Type == tea.KeyCtrlG && m.phase == PhasePlan && m.sessionID != "" {
+		// Ctrl+G arms the run: switch from planning to auto-run. The driver check is
+		// not redundant — a resume knows the session id before its process exists, and
+		// arming into that gap would launch a second claude for the same session.
+		if msg.Type == tea.KeyCtrlG && m.phase == PhasePlan && m.sessionID != "" && m.drv != nil {
+			m.capturePlan()
 			m.appendEntry(entry{kind: eGood, body: "▶ arming — resuming session in auto-run…"})
 			m.planReady = false
 			m.status = "arming…"
+			m.persist()
 			m.rebuild()
-			return m, launchCmd(m.ctx, m.launcher, LaunchSpec{Phase: PhaseAutoRun, ResumeID: m.sessionID, Model: m.nextModel})
+			return m, launchCmd(m.ctx, m.launcher, LaunchSpec{
+				Phase:    PhaseAutoRun,
+				ResumeID: m.sessionID,
+				Model:    m.nextModel,
+				Kickoff:  true, // arming is the one launch that starts the work
+			})
 		}
 		if msg.Type == tea.KeyEnter {
 			cmd := m.handleEnter()
@@ -161,11 +170,20 @@ func (m Model) update(msg tea.Msg) (Model, tea.Cmd) {
 			return m, nil // stale driver
 		}
 		m.ingest(msg.ev)
+		// init tells us the session id, result moves the cost: both are the state a
+		// crash would otherwise lose.
+		if msg.ev.IsInit() || msg.ev.IsTurnEnd() {
+			m.persist()
+		}
 		if c := m.onTurnEnd(msg.ev); c != nil {
 			cmds = append(cmds, c)
 		}
 		m.rebuild()
 		cmds = append(cmds, waitEvent(m.drv.Events(), m.gen))
+
+	case resumeMsg:
+		cmds = append(cmds, m.applyResume(msg))
+		m.rebuild()
 
 	case verdictMsg:
 		m.onVerdict(msg)
