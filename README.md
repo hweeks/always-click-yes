@@ -4,9 +4,10 @@
 
 A terminal supervisor for long-running [Claude Code](https://claude.com/claude-code)
 tasks. You plan a task interactively, **arm** it, and `always-click-yes` approves
-each permission prompt after a short, interruptible countdown — then, when the run
-goes idle, an **independent Claude session** judges whether the plan is complete and
-the run loops itself to the finish, hands-free.
+each permission prompt after a short, interruptible countdown — then, every time the
+run goes idle, it asks the **working session itself** whether the plan is complete
+and nudges it back to work until it says so. When it does, you're dropped into a
+normal chat with the session to vet what it built.
 
 It exists to solve one problem: *sitting at the keyboard pressing "yes" for the
 length of a long task.*
@@ -15,13 +16,16 @@ length of a long task.*
 
 This is an experiment in total trust, and you should read it as one.
 
-The bet: a human makes contact exactly once — at the plan — and after that the machine
-runs unattended to the end. No approvals, no spot-checks, no one reading the diff as it
-lands. The only human judgment in the loop is spent up front, on *what* to build. Every
-decision after that is delegated, including the decision about whether the work is done,
-which is why the completion judge is a **separate Claude session**: the model that did the
-work does not get to grade its own homework. That's not a safety feature so much as an
-acknowledgment that we removed the person who used to do the grading.
+The bet: a human makes contact exactly twice — at the plan, and at the end — and in
+between the machine runs unattended. No approvals, no spot-checks, no one reading the
+diff as it lands. Every decision in the middle is delegated, **including the decision
+about whether the work is done**: the model that did the work grades its own homework,
+by ending every reply with a `STATUS:` line that `acy` reads. (An earlier version spawned
+an independent judge session per idle check so the worker couldn't self-certify — it was
+more honest and burned tokens like a furnace, a fresh uncached context per check. The
+trade made here is explicit: self-grading in the session that already has the context,
+and the human vet moves to the end, where COMPLETE drops you into a chat with the session
+to check its work.)
 
 Call the output what it is. Unsupervised codegen at volume is slop, and this tool is a
 slop pump with a countdown timer. It is built to find out what happens when you stop
@@ -51,24 +55,24 @@ approval is done with a `PreToolUse` hook: the tool wants to run → the hook bl
 PLAN ──▶ (Ctrl+G arms) ──▶ AUTO-RUN ──▶ per-tool 30s countdown ──▶ auto-approve
   │  interactive                │  claude works        ▲   │(veto / pause / allow)
   │  chat & plan                │                      └───┘
-  └─ session captured           ▼ idle
-                    independent judge session
-                    (plan + last message → verdict)
-                                │  STATUS: DONE ──▶ COMPLETE
-                                └▶ STATUS: CONTINUE ──▶ nudge back to AUTO-RUN
+  └─ session captured           ▼ idle: read the turn's STATUS line
+                                │  STATUS: DONE ──▶ COMPLETE ──▶ chat & vet the work
+                                └▶ STATUS: CONTINUE (or none) ──▶ nudge, back to AUTO-RUN
 ```
 
-When the run goes idle, a separate one-shot `claude` session — not the one that did
-the work, so it can't grade its own homework — reads the approved plan and the
-working session's final message and returns a verdict. `DONE` ends at COMPLETE;
-`CONTINUE` automatically nudges the working session to keep going (up to a round
-cap). If that judge errors, times out, or is unclear, it falls back to a manual
+During auto-run the system prompt has the working session end **every reply** with a
+sentinel line: `STATUS: DONE` when every step of the plan is complete, `STATUS: CONTINUE`
+when work remains. Each time the run goes idle, `acy` reads that line from the turn it
+just watched. `DONE` ends at COMPLETE and the composer becomes a normal chat — same
+session, full context — for you to vet the result. `CONTINUE` (or a missing line) sends a
+nudge back into the **same session**, which is nearly free by comparison: the resumed
+context is prompt-cached, and there is no second process to feed the plan to. After 10
+auto-nudges without a `DONE`, the loop stops driving itself and preloads a manual
 "are we done?" check you send with `Enter`.
 
-The two main phases are backed by two processes: planning runs in
-`--permission-mode plan` (nothing executes); arming resumes the **same session**
-with the hook wired in and the default (gated) permission mode. Each idle check
-spawns one more short-lived judge process.
+Planning and auto-run are backed by two launches of the same session: planning runs over
+a read-only tool registry (nothing that can write is even loaded); arming resumes it with
+the hook wired in and the default (gated) permission mode.
 
 ## Install
 
@@ -111,6 +115,20 @@ acy run                    # in the project directory you want Claude to work in
 acy run --model opus --countdown 20s
 ```
 
+## Local development
+
+Working on `acy` itself? The Makefile keeps the dogfood loop one command away:
+
+```sh
+make run     # build the latest acy from this checkout and launch it, right here
+```
+
+That builds a fresh binary from your working tree and starts it supervising the repo
+you're standing in — which for this project is the point: `acy` is developed by running
+`acy` on itself (see `AGENTS.md`). Other targets: `make build` (just the binary),
+`make test` (unit tests), `make race` (what CI runs), `make live` (the paid live suite,
+`ACY_LIVE=1`), `make lint`, and `make clean`.
+
 ## Keys
 
 | Phase | Key | Action |
@@ -122,7 +140,8 @@ acy run --model opus --countdown 20s
 | Auto-run (gate pending) | `a` | approve this tool now |
 | Auto-run (gate pending) | `p` | pause / resume the countdown |
 | Auto-run (working) | `Esc` | interject — interrupt the turn, then type to redirect |
-| Idle (judge fell back) | `Enter` | send the preloaded manual "are we done?" check |
+| Idle (round cap hit) | `Enter` | send the preloaded manual "are we done?" check |
+| Complete | type + `Enter` | chat with the session to vet the work |
 | anywhere | `↑`/`↓`, `PgUp`/`PgDn` | scroll the transcript |
 | anywhere | `Ctrl+C` | quit |
 
@@ -156,16 +175,52 @@ Type these in the message box (they're handled by `acy`, not forwarded to Claude
 | Command | Action |
 |---------|--------|
 | `/help` | show the command + key reference overlay |
-| `/resume [id]` | resume a prior session for this repo — a picker if no id, direct if given; lands back in the chat so you can keep planning, then `Ctrl+G` to arm |
+| `/resume [id]` | resume a prior session for this repo — a picker if no id, direct if given. Restores the transcript **and the run**: a session you armed comes back armed and keeps going (see [Resuming](#resuming)) |
 | `/model <name>` | set the model for the next launched/resumed session |
 | `/clear` | clear the transcript view |
 | `/log` | show the debug-log path |
 | `/quit` | quit (same as `Ctrl+C`) |
 
+## Resuming
+
+A long unattended run is exactly the thing you can't babysit — so it's exactly the thing
+that gets interrupted. Close the terminal, sleep the laptop, hit `Ctrl+C` by accident, and
+the work is stranded halfway.
+
+```sh
+acy --continue          # pick the run back up where it stopped
+acy --resume <id>       # or name the session
+```
+
+You come back to the transcript you were looking at, in the phase you were in. If you'd
+armed the run, it comes back **armed**: no keys, no re-approval, no re-planning. It doesn't
+restart the task — it reads the last thing the session said (a replayed `STATUS: DONE`
+completes on the spot) and otherwise asks the session where things stand, which picks the
+work back up.
+
+That works because the two halves are restored from two places. The conversation is
+Claude's: `acy` replays the transcript Claude already keeps under `~/.claude/projects`.
+Everything else — which phase you were in, the plan being worked to, the auto-round count,
+the running cost — is `acy`'s own, and it isn't in Claude's file, so `acy` keeps a small
+snapshot per session (a few hundred bytes, written atomically at every transition) under
+`$ACY_STATE_DIR`, defaulting to your OS config dir (`~/Library/Application Support/acy` on
+macOS, `~/.config/acy` on Linux).
+
+Sessions `acy` never supervised — a bare `claude` run — still resume; you just get the
+conversation back, with nothing to restore. The `/resume` picker marks the difference:
+rows `acy` drove show `[AUTO-RUN · 3 rounds · $1.23]`.
+
+Two things worth knowing. The transcript view is capped at the most recent 200 entries
+(Claude still has the whole thing — only the re-render is bounded, and the elided head
+says so). And a finished run resumes as a **chat**, not an auto-run: there's nothing left
+to drive, but the cost carries over, and `Ctrl+G` re-arms if you want more.
+
 ## Flags
 
+- `--resume <id>` / `-c`, `--continue` — restore a prior run: its transcript, phase, plan,
+  round count and cost. `--continue` takes the most recent run **`acy` supervised** in this
+  directory, so it can never land on a stray `claude` session. See [Resuming](#resuming).
 - `--model` — model alias/name (default: Claude's default)
-- `--judge-model` — model for the independent completion judge (default: `--model`)
 - `--countdown` — auto-approve delay per gated tool (default `30s`)
 - `--max-lines` — max lines shown per tool call/result/thinking block before a
   `… +N more lines` footer (default `10`)
@@ -193,19 +248,50 @@ Type these in the message box (they're handled by `acy`, not forwarded to Claude
 - `internal/gate` — the permission bridge: a unix-socket server (supervisor) and
   the `hook` client, with allow/deny decisions.
 - `internal/config` — generates the `--settings` file that registers the hook.
-- `internal/judge` — the independent one-shot completion judge (plan + last
-  message → `STATUS: DONE`/`CONTINUE`).
-- `internal/ui` — the Bubble Tea model: transcript, countdown, phase machine,
-  judge dispatch + manual done-check fallback, slash commands, and the resume /
-  AskUserQuestion pickers.
-- `internal/session` — lists resumable sessions for the `/resume` picker by
-  reading claude's `~/.claude/projects/<slug>/*.jsonl` transcripts.
+- `internal/ui` — the Bubble Tea model: transcript, countdown, phase machine, the
+  STATUS-sentinel completion loop + manual done-check fallback, slash commands, and
+  the resume / AskUserQuestion pickers.
+- `internal/session` — reads claude's `~/.claude/projects/<slug>/*.jsonl` transcripts:
+  lists them for the `/resume` picker, and replays one back into the transcript view.
+- `internal/state` — `acy`'s own snapshot of a run (phase, plan, rounds, cost) — the
+  part of a session claude's transcript doesn't record.
+- `internal/e2e` — the live end-to-end suite (see below).
 - `internal/cli` — Cobra commands (`run`, hidden `hook`).
 
 ## Tests
 
 ```sh
-go test ./...                 # unit tests (no network)
-ACY_LIVE=1 go test ./...      # also runs the live tests that spend a few cents:
-                              #   driver stream, gate hook chain, plan->run handoff, interrupt
+go test ./...                 # unit tests — no network, no spend, no claude
 ```
+
+### The live suite
+
+Unit tests can only prove `acy` agrees with itself. The live suite proves it agrees with
+Claude — it drives the **real** supervisor (real gate socket, real `PreToolUse` hook
+subprocess, real `claude` sessions, real state files) with no terminal, and asserts on
+things a model can't talk its way out of: a file exists on disk, a phase changed, a prompt
+was or wasn't sent.
+
+```sh
+ACY_LIVE=1 go test ./... -timeout 30m            # everything, including the e2e suite
+ACY_LIVE=1 go test ./internal/e2e/ -v -timeout 20m   # just the end-to-end scenarios
+ACY_LIVE=1 go test ./internal/e2e/ -run TestE2EResume -v -timeout 15m
+```
+
+It **runs on your subscription and spends real money** (cents, not dollars) and takes real
+minutes, which is why it is opt-in and can never run in CI. Every test gets a scratch
+project directory and a scratch snapshot directory, so it can't touch your work.
+
+What it covers:
+
+| Test | What it proves |
+|------|----------------|
+| `TestE2EPlanArmAutoApproveComplete` | the whole premise: plan → arm → tools auto-approve → work done → the session says DONE, with a file on disk as the evidence |
+| `TestE2EVetoBlocksATool` | `s` actually stops a tool. The most important key on the board, and the one you'll never press |
+| `TestE2EResumeAnArmedRunAfterACrash` | kill an armed run mid-flight, `--continue`, and watch it finish unattended |
+| `TestE2EResumeACompletedRunLandsInPlan` | a finished run comes back as a chat, with its cost intact |
+| `TestE2EResumeASessionWithNoSnapshot` | a session `acy` never drove still resumes |
+
+The narrower live tests (`ACY_LIVE=1` in `internal/driver`, `internal/gate`,
+`internal/ui`) probe single seams: the stream-json wire format, the hook chain, and
+whether `AskUserQuestion` has become real yet.

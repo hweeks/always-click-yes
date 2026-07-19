@@ -142,13 +142,22 @@ func (m Model) update(msg tea.Msg) (Model, tea.Cmd) {
 			m.rebuild()
 			return m, nil
 		}
-		// Ctrl+G arms the run: switch from planning to auto-run.
-		if msg.Type == tea.KeyCtrlG && m.phase == PhasePlan && m.sessionID != "" {
+		// Ctrl+G arms the run: switch from planning to auto-run. The driver check is
+		// not redundant — a resume knows the session id before its process exists, and
+		// arming into that gap would launch a second claude for the same session.
+		if msg.Type == tea.KeyCtrlG && m.phase == PhasePlan && m.sessionID != "" && m.drv != nil {
+			m.capturePlan()
 			m.appendEntry(entry{kind: eGood, body: "▶ arming — resuming session in auto-run…"})
 			m.planReady = false
 			m.status = "arming…"
+			m.persist()
 			m.rebuild()
-			return m, launchCmd(m.ctx, m.launcher, LaunchSpec{Phase: PhaseAutoRun, ResumeID: m.sessionID, Model: m.nextModel})
+			return m, launchCmd(m.ctx, m.launcher, LaunchSpec{
+				Phase:    PhaseAutoRun,
+				ResumeID: m.sessionID,
+				Model:    m.nextModel,
+				Kickoff:  true, // arming is the one launch that starts the work
+			})
 		}
 		if msg.Type == tea.KeyEnter {
 			cmd := m.handleEnter()
@@ -161,16 +170,18 @@ func (m Model) update(msg tea.Msg) (Model, tea.Cmd) {
 			return m, nil // stale driver
 		}
 		m.ingest(msg.ev)
-		if c := m.onTurnEnd(msg.ev); c != nil {
-			cmds = append(cmds, c)
+		// init tells us the session id, result moves the cost: both are the state a
+		// crash would otherwise lose.
+		if msg.ev.IsInit() || msg.ev.IsTurnEnd() {
+			m.persist()
 		}
+		m.onTurnEnd(msg.ev)
 		m.rebuild()
 		cmds = append(cmds, waitEvent(m.drv.Events(), m.gen))
 
-	case verdictMsg:
-		m.onVerdict(msg)
+	case resumeMsg:
+		cmds = append(cmds, m.applyResume(msg))
 		m.rebuild()
-		return m, nil
 
 	case streamClosedMsg:
 		if msg.gen != m.gen {
@@ -179,7 +190,7 @@ func (m Model) update(msg tea.Msg) (Model, tea.Cmd) {
 		m.ended = true
 		m.status = "session ended"
 		// Nothing is left to answer, and an open panel would swallow every key.
-		m.ask = nil
+		m.abandonAsk()
 		m.appendEntry(entry{kind: eTurn, body: "──── session ended ────"})
 		m.rebuild()
 		return m, nil
@@ -202,11 +213,21 @@ func (m Model) update(msg tea.Msg) (Model, tea.Cmd) {
 		// no more gates will arrive; nothing to re-arm
 		return m, nil
 
+	case askMsg:
+		m.openAsk(msg.p)
+		m.rebuild()
+		cmds = append(cmds, waitAsk(m.askReqs))
+
+	case askClosedMsg:
+		// no more questions will arrive; nothing to re-arm
+		return m, nil
+
 	case tickMsg:
 		m.now = time.Time(msg)
 		m.spinFrame++ // animates the footer/header spinner; View() re-renders each tick
 		m.expireDue()
-		if len(m.pending) > 0 {
+		m.expireAsk()
+		if len(m.pending) > 0 || m.ask != nil {
 			m.rebuild()
 		}
 		return m, tickCmd()

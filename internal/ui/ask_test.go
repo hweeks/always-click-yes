@@ -3,33 +3,21 @@ package ui
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/hweeks/always-click-yes/internal/driver"
+	"github.com/hweeks/always-click-yes/internal/mcp"
 )
 
-// bufCloser is an in-memory io.WriteCloser so a test can inspect the exact bytes
-// the driver would write to claude's stdin.
-type bufCloser struct{ *bytes.Buffer }
-
-func (bufCloser) Close() error { return nil }
-
-// errCloser fails every write, standing in for a dead claude stdin.
-type errCloser struct{}
-
-func (errCloser) Write([]byte) (int, error) { return 0, errors.New("broken pipe") }
-func (errCloser) Close() error              { return nil }
-
 // askFixture is the AskUserQuestion tool_use line as claude emits it, kept in
-// testdata so the offline tests below are checked against a payload we can
-// refresh from a live run rather than one we invented. TestLiveAskUserQuestion
-// (internal/driver) re-captures it; see AGENTS.md on why it can't run in CI.
+// testdata so the offline tests below are checked against a payload we can refresh
+// from a live run rather than one we invented.
 func askFixture(t *testing.T) []byte {
 	t.Helper()
 	b, err := os.ReadFile(filepath.Join("testdata", "ask_tool_use.json"))
@@ -39,27 +27,60 @@ func askFixture(t *testing.T) []byte {
 	return bytes.TrimSpace(b)
 }
 
-// askModel builds a model whose driver writes into buf, with the fixture's
-// question already open in the panel.
-func askModel(t *testing.T, w interface {
-	Write([]byte) (int, error)
-	Close() error
-}) *Model {
+// fixtureArgs pulls the tool input out of the fixture's tool_use block. That input
+// is exactly what claude passes as a tools/call's `arguments`, so it is what
+// arrives on the ask socket.
+func fixtureArgs(t *testing.T) json.RawMessage {
 	t.Helper()
 	ev, err := driver.Decode(askFixture(t))
 	if err != nil {
 		t.Fatalf("decode fixture: %v", err)
 	}
-	m := &Model{drv: driver.NewWithWriter(driver.Options{}, w)}
 	for _, b := range ev.Message.Blocks() {
 		if b.Type == driver.BlockToolUse {
-			m.ingestToolUse(b)
+			return b.Input
 		}
 	}
+	t.Fatal("fixture carries no tool_use block")
+	return nil
+}
+
+// pendingFor builds an in-flight question the way the ask bridge would, and returns
+// the channel its answer will land on.
+func pendingFor(args string) (*mcp.Pending, <-chan mcp.Answer) {
+	return mcp.NewPending(mcp.Request{
+		Tool:      mcp.ToolAsk,
+		ToolUseID: "tu_test",
+		Args:      json.RawMessage(args),
+	})
+}
+
+// answer reads the answer the UI resolved, failing if none arrived. Resolve is
+// buffered, so a correctly-answered question is readable immediately.
+func answer(t *testing.T, ch <-chan mcp.Answer) string {
+	t.Helper()
+	select {
+	case a := <-ch:
+		return a.Text
+	case <-time.After(time.Second):
+		t.Fatal("no answer was sent back — claude's turn would hang forever")
+		return ""
+	}
+}
+
+// askModel opens the fixture's question in the panel, exactly as the ask socket
+// would, and returns the model plus the channel the answer must arrive on.
+func askModel(t *testing.T, phase Phase) (*Model, <-chan mcp.Answer) {
+	t.Helper()
+	p, reply := mcp.NewPending(mcp.Request{
+		Tool: mcp.ToolAsk, ToolUseID: "tu_fixture", Args: fixtureArgs(t),
+	})
+	m := &Model{phase: phase, countdown: 30 * time.Second, now: time.Now()}
+	m.openAsk(p)
 	if m.ask == nil {
 		t.Fatal("fixture did not open the ask panel")
 	}
-	return m
+	return m, reply
 }
 
 func TestParseAsk(t *testing.T) {
@@ -89,81 +110,37 @@ func TestParseAskRejectsEmpty(t *testing.T) {
 	}
 }
 
-func TestSubmitAskBuildsAnswer(t *testing.T) {
-	// A model with no driver: submitAsk should clear state and not panic.
-	m := &Model{ask: &askState{
-		toolUseID: "tu1",
-		questions: []askQuestion{{
-			header:   "Color",
-			options:  []askOption{{label: "red"}, {label: "blue"}},
-			selected: map[int]bool{1: true},
-		}},
-	}}
-	m.submitAsk(false)
-	if m.ask != nil {
-		t.Error("expected ask cleared after submit")
+// TestAskSchemaMatchesParser holds mcp's advertised input schema and parseAsk
+// together. They are declared in different packages, and if the schema ever
+// describes a shape parseAsk cannot read, the panel silently degrades to a plain
+// tool entry — which looks exactly like the tool not working at all.
+func TestAskSchemaMatchesParser(t *testing.T) {
+	// A payload using every field the schema advertises.
+	in := `{"questions":[{
+		"question":"Which store?","header":"Storage","multiSelect":true,
+		"options":[{"label":"postgres","description":"durable"},{"label":"redis","description":"fast"}]}]}`
+	a, ok := parseAsk(json.RawMessage(in))
+	if !ok {
+		t.Fatal("parseAsk rejected a payload that mcp.askSchema says is valid")
 	}
-	// The answer echo should have been appended.
-	found := false
-	for _, e := range m.entries {
-		if e.kind == eYou && strings.Contains(e.body, "blue") {
-			found = true
-		}
+	q := a.questions[0]
+	if q.header != "Storage" || !q.multiSelect || len(q.options) != 2 {
+		t.Errorf("schema fields did not survive the parse: %+v", q)
 	}
-	if !found {
-		t.Error("expected an answer entry mentioning the selected label")
+	if q.options[0].description != "durable" {
+		t.Errorf("option description dropped: %+v", q.options[0])
 	}
 }
 
-// sentResult decodes the single tool_result the driver wrote back to claude.
-func sentResult(t *testing.T, buf *bytes.Buffer) (toolUseID, content string) {
-	t.Helper()
-	var sent struct {
-		Type    string `json:"type"`
-		Message struct {
-			Role    string `json:"role"`
-			Content []struct {
-				Type      string `json:"type"`
-				ToolUseID string `json:"tool_use_id"`
-				Content   string `json:"content"`
-			} `json:"content"`
-		} `json:"message"`
-	}
-	if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &sent); err != nil {
-		t.Fatalf("tool_result was not valid JSON: %v (raw=%q)", err, buf.String())
-	}
-	if sent.Type != "user" || sent.Message.Role != "user" {
-		t.Errorf("wrong envelope: type=%q role=%q", sent.Type, sent.Message.Role)
-	}
-	if len(sent.Message.Content) != 1 {
-		t.Fatalf("want 1 content block, got %d", len(sent.Message.Content))
-	}
-	b := sent.Message.Content[0]
-	if b.Type != "tool_result" {
-		t.Errorf("content type = %q, want tool_result", b.Type)
-	}
-	return b.ToolUseID, b.Content
-}
-
-// TestAskEndToEnd drives an AskUserQuestion tool call through acy's whole consumer
-// path — the stream-json line claude emits, decoded by the driver, ingested into
-// the panel, answered by keystroke — and asserts the precise tool_result acy
-// writes back.
-//
-// Expectations are derived from the fixture rather than hardcoded, so refreshing
-// testdata from a live capture (ACY_UPDATE_FIXTURE=1, see ask_live_test.go)
-// cannot silently break this test.
+// TestAskEndToEnd drives a question through acy's whole consumer path — the
+// arguments claude sends over the ask socket, the panel, the keystrokes — and
+// asserts the answer that goes back. That answer is the only thing that unblocks
+// the turn.
 func TestAskEndToEnd(t *testing.T) {
-	buf := bufCloser{&bytes.Buffer{}}
-	m := askModel(t, buf)
+	m, reply := askModel(t, PhasePlan)
 
-	wantID := m.ask.toolUseID
-	if wantID == "" {
-		t.Fatal("fixture carries no tool_use id; the tool_result could not be routed back")
-	}
-
-	// Answer every question, taking the second option where there is one so the
-	// test proves the selection is actually read rather than defaulted.
+	// Answer every question, taking the second option where there is one so the test
+	// proves the selection is actually read rather than defaulted.
 	var picked []string
 	for range len(m.ask.questions) {
 		if m.ask == nil {
@@ -183,34 +160,26 @@ func TestAskEndToEnd(t *testing.T) {
 		t.Error("expected the panel to close after Enter on the last question")
 	}
 
-	id, content := sentResult(t, buf.Buffer)
-	if id != wantID {
-		t.Errorf("tool_use_id = %q, want %q — claude could not match the result to its call", id, wantID)
-	}
+	got := answer(t, reply)
 	for _, label := range picked {
-		if !strings.Contains(content, label) {
-			t.Errorf("answer content = %q, want it to mention the chosen label %q", content, label)
+		if !strings.Contains(got, label) {
+			t.Errorf("answer = %q, want it to mention the chosen label %q", got, label)
 		}
 	}
 }
 
-// Esc skips the questions. It must still send a tool_result: the turn is blocked
-// on this tool call, so a skip that sends nothing hangs claude forever.
+// Esc skips the questions. It must still answer: the turn is blocked on the MCP
+// server's reply, so a skip that resolves nothing hangs claude forever.
 func TestAskEscapeStillAnswers(t *testing.T) {
-	buf := bufCloser{&bytes.Buffer{}}
-	m := askModel(t, buf)
+	m, reply := askModel(t, PhasePlan)
 
 	m.handleAskKey(tea.KeyMsg{Type: tea.KeyEsc})
 
 	if m.ask != nil {
 		t.Error("expected the panel to close after Esc")
 	}
-	id, content := sentResult(t, buf.Buffer)
-	if id != "toolu_ask1" {
-		t.Errorf("tool_use_id = %q, want toolu_ask1", id)
-	}
-	if !strings.Contains(content, "skipped") {
-		t.Errorf("skip answer = %q, want it to tell claude to proceed on its own judgment", content)
+	if got := answer(t, reply); !strings.Contains(got, "skipped") {
+		t.Errorf("skip answer = %q, want it to tell claude to proceed on its own judgment", got)
 	}
 }
 
@@ -218,65 +187,51 @@ func TestAskEscapeStillAnswers(t *testing.T) {
 // answer. Enter with nothing toggled falls back to the cursor row, so a
 // multi-select question can never return an empty answer.
 func TestAskMultiSelect(t *testing.T) {
-	newModel := func() (*Model, *bytes.Buffer) {
-		buf := bufCloser{&bytes.Buffer{}}
-		m := &Model{
-			drv: driver.NewWithWriter(driver.Options{}, buf),
-			ask: &askState{
-				toolUseID: "tu_multi",
-				questions: []askQuestion{{
-					header:      "Targets",
-					multiSelect: true,
-					options:     []askOption{{label: "alpha"}, {label: "beta"}, {label: "gamma"}},
-					selected:    map[int]bool{},
-				}},
-			},
-		}
-		return m, buf.Buffer
+	const args = `{"questions":[{"header":"Targets","multiSelect":true,
+		"options":[{"label":"alpha"},{"label":"beta"},{"label":"gamma"}]}]}`
+
+	newModel := func() (*Model, <-chan mcp.Answer) {
+		p, reply := pendingFor(args)
+		m := &Model{phase: PhasePlan, now: time.Now()}
+		m.openAsk(p)
+		return m, reply
 	}
 
 	// Toggle alpha and gamma, leave beta off.
-	m, buf := newModel()
+	m, reply := newModel()
 	m.handleAskKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}}) // alpha on
 	m.handleAskKey(tea.KeyMsg{Type: tea.KeyDown})                      // -> beta
 	m.handleAskKey(tea.KeyMsg{Type: tea.KeyDown})                      // -> gamma
 	m.handleAskKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}}) // gamma on
 	m.handleAskKey(tea.KeyMsg{Type: tea.KeyEnter})
 
-	_, content := sentResult(t, buf)
-	if !strings.Contains(content, "alpha") || !strings.Contains(content, "gamma") {
-		t.Errorf("answer = %q, want both toggled labels", content)
+	got := answer(t, reply)
+	if !strings.Contains(got, "alpha") || !strings.Contains(got, "gamma") {
+		t.Errorf("answer = %q, want both toggled labels", got)
 	}
-	if strings.Contains(content, "beta") {
-		t.Errorf("answer = %q, want the untoggled label left out", content)
+	if strings.Contains(got, "beta") {
+		t.Errorf("answer = %q, want the untoggled label left out", got)
 	}
 
-	// Enter with nothing toggled: the cursor row is selected rather than sending
-	// an empty answer.
-	m, buf = newModel()
+	// Enter with nothing toggled: the cursor row is selected rather than sending an
+	// empty answer.
+	m, reply = newModel()
 	m.handleAskKey(tea.KeyMsg{Type: tea.KeyDown}) // cursor on beta, nothing toggled
 	m.handleAskKey(tea.KeyMsg{Type: tea.KeyEnter})
 
-	_, content = sentResult(t, buf)
-	if !strings.Contains(content, "beta") {
-		t.Errorf("answer = %q, want Enter with no toggles to fall back to the cursor row", content)
+	if got := answer(t, reply); !strings.Contains(got, "beta") {
+		t.Errorf("answer = %q, want Enter with no toggles to fall back to the cursor row", got)
 	}
 }
 
 // Enter on a non-final question advances instead of submitting; only the last
-// question sends the tool_result, and it carries every question's answer.
+// question resolves the pending, and it carries every question's answer.
 func TestAskAdvancesThroughQuestions(t *testing.T) {
-	buf := bufCloser{&bytes.Buffer{}}
-	m := &Model{
-		drv: driver.NewWithWriter(driver.Options{}, buf),
-		ask: &askState{
-			toolUseID: "tu_multi_q",
-			questions: []askQuestion{
-				{header: "First", options: []askOption{{label: "one"}, {label: "two"}}, selected: map[int]bool{}},
-				{header: "Second", options: []askOption{{label: "red"}, {label: "blue"}}, selected: map[int]bool{}},
-			},
-		},
-	}
+	p, reply := pendingFor(`{"questions":[
+		{"header":"First","options":[{"label":"one"},{"label":"two"}]},
+		{"header":"Second","options":[{"label":"red"},{"label":"blue"}]}]}`)
+	m := &Model{phase: PhasePlan, now: time.Now()}
+	m.openAsk(p)
 
 	m.handleAskKey(tea.KeyMsg{Type: tea.KeyEnter}) // answer "one", advance
 	if m.ask == nil {
@@ -285,8 +240,10 @@ func TestAskAdvancesThroughQuestions(t *testing.T) {
 	if m.ask.qIdx != 1 {
 		t.Fatalf("qIdx = %d, want 1 after answering the first question", m.ask.qIdx)
 	}
-	if buf.Len() != 0 {
-		t.Fatalf("a tool_result was sent before the last question was answered: %q", buf.String())
+	select {
+	case a := <-reply:
+		t.Fatalf("the question was answered before its last part: %q", a.Text)
+	default:
 	}
 
 	m.handleAskKey(tea.KeyMsg{Type: tea.KeyDown})  // -> blue
@@ -295,92 +252,139 @@ func TestAskAdvancesThroughQuestions(t *testing.T) {
 		t.Error("expected the panel to close after the last question")
 	}
 
-	_, content := sentResult(t, buf.Buffer)
+	got := answer(t, reply)
 	for _, want := range []string{"First", "one", "Second", "blue"} {
-		if !strings.Contains(content, want) {
-			t.Errorf("answer = %q, want it to contain %q", content, want)
+		if !strings.Contains(got, want) {
+			t.Errorf("answer = %q, want it to contain %q", got, want)
 		}
 	}
 }
 
-// An AskUserQuestion whose input we can't parse must fall through to a plain tool
-// entry. Opening an empty panel would trap the user: the panel swallows every key
-// and there would be no option to select to get out of it.
-func TestAskUnparsableFallsBackToToolEntry(t *testing.T) {
-	m := &Model{}
-	m.ingestToolUse(driver.ContentBlock{
-		Type:  driver.BlockToolUse,
-		ID:    "tu_bad",
-		Name:  "AskUserQuestion",
-		Input: json.RawMessage(`{"questions":[]}`),
-	})
+// A question whose arguments we can't parse must still be answered. Opening an
+// empty panel would trap the user (it swallows every key and has no option to
+// select), and answering nothing would hang the turn — so it self-answers.
+func TestAskUnparsableStillAnswers(t *testing.T) {
+	p, reply := pendingFor(`{"questions":[]}`)
+	m := &Model{phase: PhasePlan, now: time.Now()}
+	m.openAsk(p)
 
 	if m.ask != nil {
-		t.Fatal("an unparsable AskUserQuestion opened a panel with no options to pick")
+		t.Fatal("an unparsable question opened a panel with no options to pick")
 	}
-	if len(m.entries) != 1 || m.entries[0].kind != eTool || m.entries[0].title != "AskUserQuestion" {
-		t.Fatalf("want a plain tool entry, got %+v", m.entries)
+	if got := answer(t, reply); got == "" {
+		t.Error("an unparsable question was left unanswered; claude's turn would hang")
 	}
 }
 
-// An MCP-provided AskUserQuestion arrives as mcp__<server>__AskUserQuestion. It
-// must open the same panel — --plan-tools already accepts MCP-prefixed names, so
-// ingestToolUse has to recognise them too.
-func TestAskMCPPrefixedOpensPanel(t *testing.T) {
+// The tool_use event renders the question but must NOT open the panel: only the
+// socket request carries the handle that can answer it, and claude's turn is
+// blocked on that answer. Opening from both would race and leave a second panel
+// with no way to reply.
+func TestAskToolUseDoesNotOpenPanel(t *testing.T) {
 	m := &Model{}
 	m.ingestToolUse(driver.ContentBlock{
 		Type:  driver.BlockToolUse,
 		ID:    "tu_mcp",
-		Name:  "mcp__questions__AskUserQuestion",
+		Name:  mcp.Qualified(mcp.ToolAsk),
 		Input: json.RawMessage(`{"questions":[{"header":"H","question":"Q?","options":[{"label":"yes"}]}]}`),
 	})
 
-	if m.ask == nil {
-		t.Fatal("an MCP-prefixed AskUserQuestion did not open the panel")
-	}
-	if m.ask.toolUseID != "tu_mcp" {
-		t.Errorf("tool_use id = %q, want tu_mcp", m.ask.toolUseID)
+	if m.ask != nil {
+		t.Fatal("the tool_use event opened a panel; it would race the socket request that can actually answer")
 	}
 }
 
-// If the tool_result can't be written, the turn is stuck — claude is blocked on a
-// result that will never arrive. Say so, instead of clearing the panel and
-// parking on "working…" forever with no explanation.
-func TestAskSurfacesSendFailure(t *testing.T) {
-	m := askModel(t, errCloser{})
-	// Esc submits in one keystroke regardless of how many questions the fixture
-	// carries, so this stays correct across a fixture refresh.
+// In AUTO-RUN the human has walked away by assumption. A question that blocks
+// forever would strand the run — the exact failure acy exists to prevent — so it
+// auto-skips on the same countdown as a gated tool.
+func TestAskAutoSkipsInAutoRun(t *testing.T) {
+	p, reply := pendingFor(`{"questions":[{"header":"H","options":[{"label":"yes"}]}]}`)
+	start := time.Now()
+	m := &Model{phase: PhaseAutoRun, countdown: 30 * time.Second, now: start}
+	m.openAsk(p)
+
+	if m.ask.deadline.IsZero() {
+		t.Fatal("a question raised in AUTO-RUN got no deadline; nobody is there to answer it")
+	}
+
+	// Not yet due: it must still be waiting.
+	m.now = start.Add(29 * time.Second)
+	m.expireAsk()
+	if m.ask == nil {
+		t.Fatal("the question expired before its countdown ran out")
+	}
+
+	m.now = start.Add(31 * time.Second)
+	m.expireAsk()
+	if m.ask != nil {
+		t.Error("the question did not auto-skip after its countdown")
+	}
+	if got := answer(t, reply); !strings.Contains(got, "skipped") {
+		t.Errorf("auto-skip answer = %q, want it to tell claude to use its best judgment", got)
+	}
+}
+
+// In PLAN a human is sitting right there, so a question waits as long as it takes.
+func TestAskHasNoDeadlineInPlan(t *testing.T) {
+	p, _ := pendingFor(`{"questions":[{"header":"H","options":[{"label":"yes"}]}]}`)
+	start := time.Now()
+	m := &Model{phase: PhasePlan, countdown: 30 * time.Second, now: start}
+	m.openAsk(p)
+
+	if !m.ask.deadline.IsZero() {
+		t.Fatal("a question raised in PLAN got a deadline; it would time out under a human who is right there")
+	}
+	m.now = start.Add(time.Hour)
+	m.expireAsk()
+	if m.ask == nil {
+		t.Error("a PLAN question expired; it should wait for the human indefinitely")
+	}
+}
+
+// If the question's session is already gone there is nothing left to unblock. Say
+// so, rather than parking on "working…" forever with no explanation.
+func TestAskSurfacesDeadSession(t *testing.T) {
+	m, _ := askModel(t, PhasePlan)
+
+	// Stand in for the mcp child dying: the bridge abandons the request, and the
+	// answer has nowhere left to go.
+	p, _ := pendingFor(`{"questions":[{"header":"H","options":[{"label":"y"}]}]}`)
+	m.ask.pending = p
+	p.Abandon()
+
 	m.handleAskKey(tea.KeyMsg{Type: tea.KeyEsc})
 
 	if m.ask != nil {
-		t.Error("expected the panel to close even when the send failed")
+		t.Error("expected the panel to close even when the session was gone")
 	}
 	if m.processing {
-		t.Error("processing = true after a failed send; the turn is not actually running")
+		t.Error("processing = true after answering a dead session; the turn is not actually running")
 	}
 	var warned bool
 	for _, e := range m.entries {
-		if e.kind == eWarn && strings.Contains(e.body, "could not send") {
+		if e.kind == eWarn && strings.Contains(e.body, "could not deliver") {
 			warned = true
 		}
 	}
 	if !warned {
-		t.Errorf("no warning entry after a failed tool_result send; entries = %+v", m.entries)
+		t.Errorf("no warning after answering a dead session; entries = %+v", m.entries)
 	}
 }
 
-// A question left open when the session ends must be cleared. The panel captures
-// every keystroke, so an orphaned one over a dead driver locks the UI: its only
-// exits (Enter/Esc) both write to a closed pipe.
+// A question left open when the session ends must be cleared AND answered. The
+// panel captures every keystroke, so an orphan locks the UI; and the mcp child, if
+// somehow still alive, would hold claude blocked forever.
 func TestAskClearedWhenStreamCloses(t *testing.T) {
 	m := sizedModel(t)
-	m.ask = &askState{
-		toolUseID: "tu_orphan",
-		questions: []askQuestion{{options: []askOption{{label: "x"}}, selected: map[int]bool{}}},
-	}
+	p, reply := pendingFor(`{"questions":[{"header":"H","options":[{"label":"x"}]}]}`)
+	m.now = time.Now()
+	m.openAsk(p)
 
 	next, _ := m.Update(streamClosedMsg{gen: m.gen})
 	if next.(Model).ask != nil {
 		t.Error("the ask panel survived the session ending; the UI would be stuck")
+	}
+	if got := answer(t, reply); got == "" {
+		t.Error("the orphaned question was never answered")
 	}
 }

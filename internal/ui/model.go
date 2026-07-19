@@ -19,26 +19,37 @@ import (
 
 	"github.com/hweeks/always-click-yes/internal/driver"
 	"github.com/hweeks/always-click-yes/internal/gate"
-	"github.com/hweeks/always-click-yes/internal/judge"
+	"github.com/hweeks/always-click-yes/internal/mcp"
 	"github.com/hweeks/always-click-yes/internal/session"
+	"github.com/hweeks/always-click-yes/internal/state"
 )
-
-// JudgeFunc runs an independent session that judges whether the approved plan is
-// complete, given the plan text and the working session's final message.
-type JudgeFunc func(ctx context.Context, plan, lastMsg string) (judge.Result, error)
 
 // Config holds the wiring the model needs beyond the driver.
 type Config struct {
 	Ctx       context.Context      // cancels driver processes on shutdown
 	Launcher  Launcher             // starts a claude driver for a given phase
-	Judge     JudgeFunc            // independent completion judge (nil = manual verify)
 	GateReqs  <-chan *gate.Pending // nil if no gate is active
-	Countdown time.Duration        // auto-approve delay per gated tool
+	AskReqs   <-chan *mcp.Pending  // questions from acy's MCP server (nil = disabled)
+	Countdown time.Duration        // auto-approve delay per gated tool, and per question in AUTO-RUN
 	LogPath   string               // debug log file path (shown in the UI), if any
 	MaxLines  int                  // per-block line cap in the transcript (default 10)
+	Cwd       string               // the project this run belongs to (snapshot key)
 
 	// Sessions lists resumable sessions for the /resume picker (nil = disabled).
 	Sessions func() ([]session.Info, error)
+
+	// Resume is a session id to restore at startup: --resume/--continue set it, and
+	// Init then rebuilds the run instead of cold-starting a plan session.
+	Resume string
+
+	// Restoring a run needs two sources, injected as functions so the ui tests never
+	// touch a disk: LoadState/SaveState carry acy's own state (phase, plan, rounds,
+	// cost — none of which claude records), and Replay reads claude's transcript back
+	// as the events the UI would have ingested live. Any of them nil disables that
+	// half: no persistence, or no transcript, but never a crash.
+	LoadState func(id string) (state.Snapshot, bool, error)
+	SaveState func(s state.Snapshot) error
+	Replay    func(id string) ([]driver.Event, error)
 }
 
 // gateItem is a permission request the UI is counting down.
@@ -73,45 +84,52 @@ type Model struct {
 	// actually paid; see billing().
 	//
 	// Cost needs two buckets because each claude process reports its own
-	// total_cost_usd, cumulative within that process but reset by a --resume (and
-	// the judge runs in a process of its own). So the current session's figure is
-	// *assigned*, and finished sessions are *banked* — summing per turn would
-	// double-count, and assigning across sessions would lose everything but the last.
+	// total_cost_usd, cumulative within that process but reset by a --resume. So the
+	// current session's figure is *assigned*, and finished sessions are *banked* —
+	// summing per turn would double-count, and assigning across sessions would lose
+	// everything but the last.
 	apiKeySource string
-	costSettled  float64 // banked: previous driver generations + judge sessions
+	costSettled  float64 // banked: previous driver generations
 	costCurrent  float64 // the running session's latest total_cost_usd
 
 	// slash-command / overlay state
 	nextModel     string // --model override applied to the next launched session (/model)
 	showHelp      bool   // the /help overlay is open
 	sessionLister func() ([]session.Info, error)
-	picking       bool           // the /resume session picker is open
-	sessionList   []session.Info // sessions shown in the picker
-	pickIdx       int            // selected row in the picker
-	ask           *askState      // a pending AskUserQuestion the user is answering
+	picking       bool                      // the /resume session picker is open
+	sessionList   []session.Info            // sessions shown in the picker
+	sessionSnaps  map[string]state.Snapshot // acy state per session, loaded when the picker opens
+	pickIdx       int                       // selected row in the picker
+	ask           *askState                 // a pending AskUserQuestion the user is answering
+
+	// resume / persistence
+	cwd       string // the project this run belongs to
+	resumeID  string // session to restore at startup ("" = cold start)
+	lineage   []string
+	loadState func(id string) (state.Snapshot, bool, error)
+	saveState func(s state.Snapshot) error
+	replay    func(id string) ([]driver.Event, error)
 
 	// gate / countdown state
 	gateReqs  <-chan *gate.Pending
+	askReqs   <-chan *mcp.Pending
 	countdown time.Duration
 	pending   []*gateItem
 	paused    bool
 	now       time.Time
 
 	// phase machine
-	ctx             context.Context
-	launcher        Launcher
-	judge           JudgeFunc
-	phase           Phase
-	gen             int    // current driver generation
-	turnText        string // assistant text accumulated for the current turn
-	planBody        string // approved plan text, captured at ExitPlanMode
-	preloaded       bool   // done-check prompt is sitting in the input, awaiting send
-	awaitingVerdict bool   // a manual done-check was sent; next turn end carries the verdict
-	verifying       bool   // an independent judge session is evaluating completion
-	rounds          int    // auto-continue rounds taken in this run
-	processing      bool   // a turn is in flight (model working)
-	interrupted     bool   // user interrupted the current turn; don't auto-preload
-	spinFrame       int    // advances every tick to animate the "working…" spinner
+	ctx         context.Context
+	launcher    Launcher
+	phase       Phase
+	gen         int    // current driver generation
+	turnText    string // assistant text accumulated for the current turn
+	planBody    string // approved plan text, captured at ExitPlanMode
+	preloaded   bool   // done-check prompt is sitting in the input, awaiting send
+	rounds      int    // auto-nudge rounds taken in this run
+	processing  bool   // a turn is in flight (model working)
+	interrupted bool   // user interrupted the current turn; don't auto-nudge
+	spinFrame   int    // advances every tick to animate the "working…" spinner
 }
 
 // New builds the initial model bound to a started driver.
@@ -150,18 +168,29 @@ func New(drv *driver.Driver, cfg Config) Model {
 		bar:       progress.New(progress.WithoutPercentage()),
 		status:    "planning",
 		gateReqs:  cfg.GateReqs,
+		askReqs:   cfg.AskReqs,
 		countdown: cfg.Countdown,
 		ctx:       cfg.Ctx,
 		launcher:  cfg.Launcher,
-		judge:     cfg.Judge,
 		phase:     PhasePlan,
 		logPath:   cfg.LogPath,
 		maxLines:  cfg.MaxLines,
 
 		sessionLister: cfg.Sessions,
+
+		cwd:       cfg.Cwd,
+		resumeID:  cfg.Resume,
+		loadState: cfg.LoadState,
+		saveState: cfg.SaveState,
+		replay:    cfg.Replay,
 	}
-	m.appendEntry(entry{kind: eMeta, body: "Plan your task with Claude below. When the plan is ready, press Ctrl+G"})
-	m.appendEntry(entry{kind: eMeta, body: "to arm — auto-run then approves each step after a countdown."})
+	if m.resumeID != "" {
+		m.status = "resuming…"
+		m.appendEntry(entry{kind: eMeta, body: "↩ restoring session " + short(m.resumeID) + " …"})
+	} else {
+		m.appendEntry(entry{kind: eMeta, body: "Plan your task with Claude below. When the plan is ready, press Ctrl+G"})
+		m.appendEntry(entry{kind: eMeta, body: "to arm — auto-run then approves each step after a countdown."})
+	}
 	if m.logPath != "" {
 		m.appendEntry(entry{kind: eMeta, body: "logging to " + m.logPath})
 	}
@@ -189,10 +218,15 @@ func waitEvent(ch <-chan driver.Event, gen int) tea.Cmd {
 }
 
 func (m Model) Init() tea.Cmd {
-	cmds := []tea.Cmd{textarea.Blink, waitGate(m.gateReqs), tickCmd()}
-	if m.drv != nil {
+	cmds := []tea.Cmd{textarea.Blink, waitGate(m.gateReqs), waitAsk(m.askReqs), tickCmd()}
+	switch {
+	case m.drv != nil:
 		cmds = append(cmds, waitEvent(m.drv.Events(), m.gen))
-	} else if m.launcher != nil {
+	case m.resumeID != "":
+		// Restore first, launch second: the phase we come back in is the one the
+		// snapshot recorded, not a cold PLAN.
+		cmds = append(cmds, loadResumeCmd(m.resumeID, m.loadState, m.replay))
+	case m.launcher != nil:
 		cmds = append(cmds, launchCmd(m.ctx, m.launcher, LaunchSpec{Phase: PhasePlan}))
 	}
 	return tea.Batch(cmds...)
@@ -227,7 +261,7 @@ func (m *Model) ingest(ev driver.Event) {
 	switch ev.Type {
 	case driver.TypeSystem:
 		if ev.IsInit() {
-			m.sessionID = ev.SessionID
+			m.adoptSession(ev.SessionID)
 			m.model = ev.Model
 			m.mode = ev.PermissionMode
 			m.apiKeySource = ev.APIKeySource
@@ -272,7 +306,7 @@ func (m *Model) ingest(ev driver.Event) {
 }
 
 // totalCost is what the run has spent so far, across every claude process it has
-// launched: the plan session, each resumed auto-run session, and every judge.
+// launched: the plan session and each resumed auto-run session.
 func (m Model) totalCost() float64 { return m.costSettled + m.costCurrent }
 
 // settleCost banks the running session's spend before its driver is replaced. A
@@ -311,14 +345,18 @@ func (m Model) billingNote() string {
 	}
 }
 
-// intercepted lists the tools acy answers itself rather than letting claude run:
-// ExitPlanMode is consumed to arm the run, AskUserQuestion is answered by the
-// panel in ask.go. They must never reach the gate — a countdown for a tool we
-// already handle would sit invisible behind the ask overlay and auto-approve a
-// second, conflicting execution. See enqueue in gate.go.
+// intercepted lists the tools acy handles itself, so they must never raise a gate
+// countdown. Two of them are its own MCP tools, answered over the ask socket by
+// ask.go; ExitPlanMode stays listed because a session resumed from an interactive
+// claude run can still carry one.
+//
+// A countdown here would be worse than redundant: it would sit invisible behind the
+// ask overlay (which outranks the gate panel in both key routing and rendering) and
+// then "auto-approve" a tool acy had already answered. See enqueue in gate.go.
 var intercepted = map[string]bool{
-	"ExitPlanMode":    true,
-	"AskUserQuestion": true,
+	"ExitPlanMode": true,
+	mcp.ToolAsk:    true,
+	mcp.ToolPlan:   true,
 }
 
 // baseToolName strips an "mcp__<server>__" prefix so an MCP-provided tool is
@@ -333,11 +371,18 @@ func baseToolName(name string) string {
 	return name
 }
 
-// ingestToolUse renders a tool call; ExitPlanMode gets a prominent plan box and
-// AskUserQuestion opens the answer panel.
+// ingestToolUse renders a tool call. PresentPlan (and ExitPlanMode, from a session
+// resumed out of an interactive claude) gets a prominent plan box.
+//
+// AskUserQuestion is rendered but NOT acted on here. The panel is opened by the ask
+// socket instead — see openAsk. The split matters: this event says only that a
+// question was asked, while the socket request carries the handle that can answer
+// it, and claude's turn is blocked on that answer. Opening the panel from here too
+// would race the socket and produce a second panel with no way to reply. Because
+// the two paths write different state, their arrival order is irrelevant.
 func (m *Model) ingestToolUse(b driver.ContentBlock) {
 	switch baseToolName(b.Name) {
-	case "ExitPlanMode":
+	case "ExitPlanMode", mcp.ToolPlan:
 		plan := planText(b.Input)
 		if plan == "" {
 			plan = "(the model proposed a plan but sent no text)"
@@ -346,15 +391,8 @@ func (m *Model) ingestToolUse(b driver.ContentBlock) {
 		m.appendEntry(entry{kind: ePlan, body: plan})
 		m.planReady = true
 		return
-	case "AskUserQuestion":
-		// A shape we can't parse falls through to a plain tool entry rather than
-		// opening an empty panel the user could never dismiss.
-		if a, ok := parseAsk(b.Input); ok {
-			a.toolUseID = b.ID
-			m.ask = a
-			m.appendEntry(entry{kind: eMeta, body: "❓ Claude is asking a question — answer below"})
-			return
-		}
+	case mcp.ToolAsk:
+		return // rendered by openAsk, which owns the answer
 	}
 	m.appendEntry(entry{kind: eTool, title: b.Name, body: toolBody(b.Name, b.Input)})
 }

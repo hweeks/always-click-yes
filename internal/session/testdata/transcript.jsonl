@@ -1,0 +1,15 @@
+{"type":"summary","summary":"a stored summary line","leafUuid":"x"}
+{"type":"user","isSidechain":false,"sessionId":"sess-1","message":{"role":"user","content":"add a doc comment to main.go"}}
+{"type":"assistant","isSidechain":false,"sessionId":"sess-1","message":{"role":"assistant","model":"opus","content":[{"type":"thinking","thinking":"they want a doc comment"},{"type":"text","text":"Here is the plan: add the comment."}]}}
+{"type":"assistant","isSidechain":false,"sessionId":"sess-1","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Read","input":{"file_path":"main.go"}}]}}
+{"type":"user","isSidechain":false,"sessionId":"sess-1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"package main"}]}}
+{"type":"ai-title","aiTitle":"doc comment","sessionId":"sess-1"}
+{"type":"assistant","isSidechain":true,"sessionId":"sess-1","message":{"role":"assistant","content":[{"type":"text","text":"SUBAGENT CHATTER — must not be replayed"}]}}
+{"type":"user","isSidechain":true,"sessionId":"sess-1","message":{"role":"user","content":"SUBAGENT PROMPT — must not be replayed"}}
+{"type":"attachment","attachment":{"kind":"file"},"sessionId":"sess-1"}
+{"type":"queue-operation","operation":"enqueue","sessionId":"sess-1"}
+this line is not json at all and must be skipped
+{"type":"last-prompt","lastPrompt":"add a doc comment to main.go","sessionId":"sess-1"}
+{"type":"user","isMeta":true,"sessionId":"sess-1","message":{"role":"user","content":"a meta record — not part of the conversation"}}
+{"type":"user","isSidechain":false,"sessionId":"sess-1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_2","content":[{"type":"text","text":"array-shaped tool result"}],"is_error":true}]}}
+{"type":"assistant","isSidechain":false,"sessionId":"sess-1","message":{"role":"assistant","content":[{"type":"text","text":"the last assistant word"}]}}

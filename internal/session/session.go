@@ -49,20 +49,50 @@ func List(cwd string) ([]Info, error) {
 	return out, nil
 }
 
-// ProjectDir returns the directory claude uses to store transcripts for cwd. The
-// slug is the absolute path with path separators replaced by dashes, matching
-// claude's own layout (e.g. /Users/x/proj -> -Users-x-proj).
+// ProjectDir returns the directory claude uses to store transcripts for cwd.
+//
+// The slug rules are claude's, and they are not simply "swap the slashes" —
+// verified against real transcripts on macOS:
+//
+//   - symlinks are resolved first: /var/folders/… is stored under -private-var-folders-…,
+//     because /var is a symlink to /private/var;
+//   - every character outside [A-Za-z0-9-] becomes a dash, not just the separator:
+//     /tmp/my.dotted_dir is stored as -tmp-my-dotted-dir.
+//
+// Getting either wrong means silently finding no sessions for a project, which is
+// why Replay does not rely on this alone — see transcriptPath.
 func ProjectDir(cwd string) (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
+	return filepath.Join(home, ".claude", "projects", Slug(cwd)), nil
+}
+
+// Slug is claude's name for a project directory.
+func Slug(cwd string) string {
 	abs, err := filepath.Abs(cwd)
 	if err != nil {
 		abs = cwd
 	}
-	slug := strings.ReplaceAll(abs, string(filepath.Separator), "-")
-	return filepath.Join(home, ".claude", "projects", slug), nil
+	// claude stores the resolved path, so a path reached through a symlink must be
+	// resolved the same way or it lands in a directory of its own. A path that does
+	// not exist yet cannot be resolved — keep it as-is rather than failing.
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		abs = resolved
+	}
+
+	var b strings.Builder
+	b.Grow(len(abs))
+	for _, r := range abs {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('-')
+		}
+	}
+	return b.String()
 }
 
 // firstSummary scans the head of a transcript for a human-readable label: a

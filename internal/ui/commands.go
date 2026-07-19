@@ -1,10 +1,32 @@
 package ui
 
 import (
+	"fmt"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/hweeks/always-click-yes/internal/session"
+	"github.com/hweeks/always-click-yes/internal/state"
 )
+
+// snapLabel is the acy state shown against a session in the resume picker: which
+// phase it stopped in, how many auto-rounds it had spent, what it had cost. A
+// session acy never supervised has no snapshot and shows nothing, which is how you
+// tell the two apart in the list.
+func snapLabel(s state.Snapshot, ok bool) string {
+	if !ok || s.Phase == "" {
+		return ""
+	}
+	parts := []string{s.Phase}
+	if s.Rounds > 0 {
+		parts = append(parts, fmt.Sprintf("%d rounds", s.Rounds))
+	}
+	if s.CostSettled > 0 {
+		parts = append(parts, fmt.Sprintf("$%.2f", s.CostSettled))
+	}
+	return strings.Join(parts, " · ")
+}
 
 // parseCommand splits a leading-slash input into a lowercase command name and
 // its argument string. ok is false for anything that is not a "/command".
@@ -92,17 +114,34 @@ func (m *Model) startResume(arg string) tea.Cmd {
 		return nil
 	}
 	m.sessionList = list
+	m.sessionSnaps = m.loadSnaps(list)
 	m.pickIdx = 0
 	m.picking = true
 	return nil
 }
 
-// resumeSession relaunches the driver resuming id in interactive plan/chat mode,
-// so the user can keep talking and then Ctrl+G to arm.
+// loadSnaps pairs each listed session with acy's state for it, where there is any.
+// The list is claude's — it includes sessions acy never drove (a bare `claude`
+// run), and those simply have no snapshot.
+func (m *Model) loadSnaps(list []session.Info) map[string]state.Snapshot {
+	if m.loadState == nil {
+		return nil
+	}
+	snaps := make(map[string]state.Snapshot, len(list))
+	for _, s := range list {
+		if snap, ok, err := m.loadState(s.ID); err == nil && ok {
+			snaps[s.ID] = snap
+		}
+	}
+	return snaps
+}
+
+// resumeSession restores a prior session: claude's transcript comes back on screen
+// and acy's own state (phase, plan, rounds, cost) comes back with it, so an armed
+// run picks up where it stopped rather than restarting as a fresh chat.
 func (m *Model) resumeSession(id string) tea.Cmd {
-	m.appendEntry(entry{kind: eGood, body: "↩ resuming session " + short(id) + " — continue chatting, Ctrl+G to arm"})
 	m.status = "resuming…"
-	return launchCmd(m.ctx, m.launcher, LaunchSpec{Phase: PhasePlan, ResumeID: id, Model: m.nextModel})
+	return loadResumeCmd(id, m.loadState, m.replay)
 }
 
 // handlePickKey drives the /resume picker. Returns a tea.Cmd when a selection

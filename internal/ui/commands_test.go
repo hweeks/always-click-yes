@@ -1,6 +1,10 @@
 package ui
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/hweeks/always-click-yes/internal/state"
+)
 
 func TestParseCommand(t *testing.T) {
 	cases := []struct {
@@ -25,5 +29,31 @@ func TestParseCommand(t *testing.T) {
 			t.Errorf("parseCommand(%q) = (%q,%q,%v), want (%q,%q,%v)",
 				c.in, name, args, ok, c.name, c.args, c.ok)
 		}
+	}
+}
+
+// The picker mixes sessions acy supervised with sessions it merely knows about
+// (a bare `claude` run). The label is how you tell them apart, so an unsupervised
+// session must render as nothing at all.
+func TestSnapLabel(t *testing.T) {
+	tests := []struct {
+		name string
+		snap state.Snapshot
+		ok   bool
+		want string
+	}{
+		{"no snapshot", state.Snapshot{}, false, ""},
+		{"empty phase", state.Snapshot{}, true, ""},
+		{"planning", state.Snapshot{Phase: "PLAN"}, true, "PLAN"},
+		{"mid auto-run", state.Snapshot{Phase: "AUTO-RUN", Rounds: 3, CostSettled: 1.234}, true, "AUTO-RUN · 3 rounds · $1.23"},
+		{"complete", state.Snapshot{Phase: "COMPLETE", CostSettled: 4.1}, true, "COMPLETE · $4.10"},
+		{"armed but not yet spent", state.Snapshot{Phase: "AUTO-RUN"}, true, "AUTO-RUN"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := snapLabel(tt.snap, tt.ok); got != tt.want {
+				t.Errorf("snapLabel() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }

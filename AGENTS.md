@@ -9,7 +9,7 @@ Work on this repo **through `acy` itself**. Plan the change interactively, `Ctrl
 it, and let the countdown approve its own way to the finish:
 
 ```sh
-go build -o acy . && ./acy run    # from the repo root
+make run                          # from the repo root (= go build -o acy . && ./acy run)
 ```
 
 This is not ceremony. It is the only honest test the project has. `acy` exists to be
@@ -28,17 +28,21 @@ fix it rather than working around it by hand.
 A Go TUI (Cobra + Bubble Tea + Lipgloss) that supervises a **Claude Code** session
 for long-running tasks. Flow:
 
-1. **PLAN** — you chat with Claude (`--permission-mode plan`, no hooks) to build a plan.
+1. **PLAN** — you chat with Claude over a read-only `--tools` registry to build a plan.
 2. **Ctrl+G arms it** — a fresh `claude` process **resumes the same session** with the
    PreToolUse hook wired in and `--permission-mode default`, and gets a kickoff message.
 3. **AUTO-RUN** — every gated tool triggers a countdown; it auto-approves after N seconds
    unless you veto (`s`), approve now (`a`), or pause (`p`). `Esc` interrupts a running turn.
-4. **Idle** → an **independent one-shot `claude` session** (fresh session, no hooks, tools
-   disabled — `internal/judge`) is handed the approved plan + the working session's last
-   message and returns `STATUS: DONE` / `STATUS: CONTINUE`. DONE → COMPLETE; CONTINUE
-   auto-nudges the working session (up to `maxAutoRounds`) so the run finishes hands-free.
-   If the judge errors, times out, or is inconclusive, it falls back to the manual
+4. **Idle** → the auto-run system prompt has the working session end **every reply** with
+   `STATUS: DONE` / `STATUS: CONTINUE`, and each turn end reads that sentinel from the
+   turn's own text (`parseVerdict` in `internal/ui/phase.go`). DONE → COMPLETE, which is a
+   normal chat again — the user vets the work in the session that did it. CONTINUE (or no
+   sentinel) auto-nudges the **same session** (up to `maxAutoRounds`) so the run finishes
+   hands-free; the resumed context is prompt-cached, so each check costs a single cheap
+   turn rather than a fresh judge process. Past the cap it falls back to the manual
    preloaded "are we done?" check (press Enter to send it into the working session).
+   (An independent per-check judge session existed once — `internal/judge`, removed — and
+   was the tool's biggest token sink: every idle check paid a full uncached context.)
 
 ## Architecture (package map)
 
@@ -53,15 +57,20 @@ for long-running tasks. Flow:
 - `internal/ui` — the Bubble Tea model. `model.go` (state + ingest), `update.go` (event
   routing + keys), `view.go` (header/footer/gate panel + help/resume/ask overlays),
   `render.go` (structured transcript entries → lipgloss, incl. `clampBlock` line-capped
-  gutter blocks), `phase.go` (phase machine, judge dispatch + done-check fallback),
+  gutter blocks), `phase.go` (phase machine, STATUS-sentinel completion loop + manual
+  done-check fallback),
   `commands.go` (slash commands + resume picker), `ask.go` (AskUserQuestion panel),
   `gate.go` (countdown).
-- `internal/session` — lists resumable sessions for `/resume` from claude's
-  `~/.claude/projects/<slug>/*.jsonl` transcripts (slug = cwd with `/`→`-`). Injected as
-  `Config.Sessions`, so tests supply a fake.
-- `internal/judge` — runs an independent one-shot `claude` session (via `driver`, tools
-  disabled) that judges plan completion from the plan + last message. Injected into the UI
-  as `Config.Judge`, so tests swap in a fake verdict.
+- `internal/session` — reads claude's `~/.claude/projects/<slug>/*.jsonl` transcripts:
+  `List` for the `/resume` picker, `Replay` to turn one back into `[]driver.Event` for the
+  transcript view. Injected as `Config.Sessions` / `Config.Replay`, so tests supply fakes.
+- `internal/state` — acy's own snapshot per session (phase, plan, rounds, cost): the part
+  of a run claude's transcript does not record. Atomic JSON under
+  `$ACY_STATE_DIR` (else `<user config dir>/acy/sessions/<id>.json`). Injected as
+  `Config.LoadState` / `Config.SaveState`.
+- `internal/e2e` — the live end-to-end suite: drives the real supervisor (real gate, real
+  hook, real claude, real state files) headlessly, on your subscription. `ACY_LIVE=1` only;
+  it can never run in CI.
 - `internal/cli` — Cobra commands: `run` (the TUI) and the hidden `hook`.
 - `internal/alog` — process-wide debug logger (off until `Open`); the `--log` flag drives it.
 
@@ -108,6 +117,26 @@ for long-running tasks. Flow:
     via `driver.SendToolResult` (a user message carrying a `tool_result` block referencing the
     `tool_use_id`) — is therefore **still unverified**. Detection is name-based and harmless
     while the tool never appears.
+- **`-p` sessions are persisted like any other**, at `~/.claude/projects/<slug>/<id>.jsonl`.
+  The records are a *superset of the stream-json event* — `{type:"user"|"assistant",
+  message:{role,content:[…]}}` with the same `text`/`thinking`/`tool_use`/`tool_result`
+  blocks — which is why `session.Replay` unmarshals straight into `driver.Message` and acy
+  has exactly one content parser. Sub-agent records carry `isSidechain:true`. There are **no
+  `result` records** (so cost and turn boundaries can't be replayed — that's what
+  `internal/state` is for) and **no `init` records** (so a replay can't clobber the live
+  session id).
+- **`--resume` keeps the session id in `-p` mode; it does not fork.** Verified against real
+  transcripts: an armed run appends to the same jsonl the plan phase wrote. `--fork-session`
+  is the opt-in that changes it. acy still tombstones a changed id (`state.SupersededBy`) in
+  case that ever stops being true.
+- **claude never echoes an injected user turn back on the stream.** Every live `user` event
+  is a `tool_result`; the prompts acy sends are simply not in the output. They *are* in the
+  transcript — so a replay must render user text itself (`ui.ingestReplay`), or you get
+  Claude's answers with none of the questions.
+- **The project-dir slug is not just `/`→`-`.** claude resolves symlinks first (`/var/…` is
+  stored as `-private-var-…`) and maps *every* character outside `[A-Za-z0-9-]` to a dash
+  (`/tmp/my.dotted_dir` → `-tmp-my-dotted-dir`). Guessing this wrong silently finds no
+  sessions, so `session.Replay` also falls back to globbing every project dir for the id.
 - No official Go SDK; Claude Code is Node/TypeScript.
 
 ## Gotchas we already hit (don't reintroduce)
@@ -120,6 +149,22 @@ for long-running tasks. Flow:
   child blocks once the pipe buffer fills.
 - Driver swaps between phases are tracked by a generation counter (`gen`); stale events from
   a stopped driver are ignored, so stopping the old driver doesn't look like the session ending.
+- **Anything that swaps the session must stop the old driver *and* bump `gen` in the same
+  breath.** `applyResume` (resume.go) does; it has to. `/resume` is reachable mid-turn, and a
+  `result` from the abandoned session arriving a second later still carries the current
+  generation — it would bank the old session's cost into the restored run's tally and stamp
+  the old phase over the restored snapshot.
+- **A resumed run must clear `ended` / `processing`.** They describe a session that no
+  longer exists. `sendInput` refuses to send while `ended` or `processing` is set, so
+  resuming after "session ended" would otherwise leave the composer permanently dead.
+- **`onDriverReady` clears `turnText` — except for a resumed auto-run.** That is the one launch
+  where the replay deliberately left the final assistant turn there, because it is what the
+  completion check reads for the STATUS sentinel. Clearing it would erase a replayed
+  `STATUS: DONE` and nudge a finished run back into motion.
+- **A resume takes its phase immediately, not when the driver lands.** Launching claude takes
+  a second or two; until the phase moves, a restored run looks like a plan session with a
+  session id — exactly what `Ctrl+G` arms from. Arming in that window launches a *second*
+  process for the same session and kicks off work that is already half done.
 - **The viewport's default keymap steals typing.** bubbles `viewport.DefaultKeyMap` binds
   `j/k/d/u/f/b` and space to scrolling, and `Update` forwards key events to both the input and
   the viewport — so typing those letters scrolled the transcript. `transcriptKeyMap()` in
@@ -129,12 +174,13 @@ for long-running tasks. Flow:
 ## Commands
 
 ```sh
-go build -o acy .            # build
-go test ./...                # unit tests (no network)
-go test -race ./...          # what CI runs
-ACY_LIVE=1 go test ./...     # + live tests: real `claude`, spends a few cents
-golangci-lint run ./...      # lint (config in .golangci.yml, standard set)
-gofmt -l .                   # must be empty
+make run                     # build the latest acy and dogfood it on this repo
+go build -o acy .            # build (= make build)
+go test ./...                # unit tests (no network; = make test)
+go test -race ./...          # what CI runs (= make race)
+ACY_LIVE=1 go test ./...     # + live tests: real `claude`, spends a few cents (= make live)
+golangci-lint run ./...      # lint (config in .golangci.yml, standard set; = make lint)
+gofmt -l .                   # must be empty (= make fmt)
 ```
 
 Live tests need the `claude` CLI on PATH and auth. CI skips them.
@@ -156,7 +202,7 @@ Commit subjects **must** follow [Conventional Commits](https://www.conventionalc
 contributes nothing to the changelog:
 
 ```
-feat: add an independent completion judge      -> minor bump (0.2.0)
+feat: let the working session report completion   -> minor bump (0.2.0)
 fix: strip ANTHROPIC_API_KEY from the child    -> patch bump (0.1.1)
 feat!: rename --countdown to --delay           -> major bump (see below)
 docs|test|chore|refactor|perf: ...             -> no release on its own

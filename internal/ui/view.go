@@ -43,10 +43,16 @@ func (m Model) footerView() string {
 	case m.picking:
 		return hint("↑/↓ move · Enter resume · Esc cancel")
 	case m.ask != nil:
+		keys := "↑/↓ move · Enter confirm · Esc skip"
 		if m.ask.questions[m.ask.qIdx].multiSelect {
-			return hint("↑/↓ move · Space toggle · Enter confirm · Esc skip")
+			keys = "↑/↓ move · Space toggle · Enter confirm · Esc skip"
 		}
-		return hint("↑/↓ move · Enter confirm · Esc skip")
+		// In AUTO-RUN the question is on a clock, and a countdown nobody can see is
+		// how the gate bug happened. Say it out loud.
+		if r := m.askRemaining(); !m.ask.deadline.IsZero() {
+			keys += fmt.Sprintf(" · auto-skip in %ds", int(r.Seconds()+0.5))
+		}
+		return hint(keys)
 	case len(m.pending) > 0:
 		return m.gateView()
 	}
@@ -71,7 +77,7 @@ func (m Model) helpView() string {
 		"",
 		lipgloss.NewStyle().Bold(true).Foreground(colDim).Render("commands"),
 		cmd("/help", "show this help"),
-		cmd("/resume [id]", "resume a prior session (picker if no id)"),
+		cmd("/resume [id]", "restore a prior run — transcript, phase and cost (picker if no id)"),
 		cmd("/model <name>", "set the model for the next launched/resumed session"),
 		cmd("/clear", "clear the transcript view"),
 		cmd("/log", "show the debug-log path"),
@@ -100,7 +106,8 @@ func (m Model) helpView() string {
 // pickerView renders the /resume session list with the selected row highlighted,
 // windowed to fit the viewport height.
 func (m Model) pickerView() string {
-	title := lipgloss.NewStyle().Bold(true).Foreground(colPlan).Render("↩ resume a session")
+	title := lipgloss.NewStyle().Bold(true).Foreground(colPlan).Render(
+		"↩ resume a session · [PHASE] marks the runs acy supervised")
 	maxVisible := max(m.vp.Height-3, 3)
 	start := 0
 	if m.pickIdx >= maxVisible {
@@ -114,6 +121,12 @@ func (m Model) pickerView() string {
 		summary := s.Summary
 		if summary == "" {
 			summary = "(no summary)"
+		}
+		// Sessions acy supervised carry their state; the rest are just claude
+		// sessions, and show only what claude knows about them.
+		snap, ok := m.sessionSnaps[s.ID]
+		if label := snapLabel(snap, ok); label != "" {
+			summary = "[" + label + "] " + summary
 		}
 		line := fmt.Sprintf("%s  %s  %s", short(s.ID), s.ModTime.Format("Jan 02 15:04"), summary)
 		line = truncate(line, max(m.vp.Width-2, 20))
@@ -187,7 +200,7 @@ func (m Model) headerView() string {
 		meta = append(meta, b)
 	}
 	right := ""
-	if m.processing || m.verifying {
+	if m.processing {
 		right = spinner(m.spinFrame) + " "
 	}
 	right += lipgloss.NewStyle().Foreground(colDim).Render(strings.Join(meta, " · "))
@@ -219,7 +232,7 @@ func (m Model) inputView() string {
 	}
 
 	borderColor := colDim
-	if m.processing || m.verifying {
+	if m.processing {
 		borderColor = colClaude
 	}
 	box := lipgloss.NewStyle().
