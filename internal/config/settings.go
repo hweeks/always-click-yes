@@ -1,5 +1,7 @@
-// Package config generates the temporary --settings file that registers our
-// PreToolUse hook, pointing claude at the supervisor's gate socket.
+// Package config generates the temporary files that wire claude back to the
+// supervisor: the --settings file registering our PreToolUse hook (pointing at the
+// gate socket), and the --mcp-config registering acy as an MCP server (pointing at
+// the ask socket).
 package config
 
 import (
@@ -7,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/hweeks/always-click-yes/internal/mcp"
 )
 
 // WriteHookSettings writes a settings JSON registering a PreToolUse hook that
@@ -32,6 +36,34 @@ func WriteHookSettings(dir, exePath, socketPath string) (string, error) {
 		return "", err
 	}
 	path := filepath.Join(dir, "settings.json")
+	if err := os.WriteFile(path, b, 0o600); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+// WriteMCPConfig writes the --mcp-config JSON registering acy's own binary as an
+// MCP server, so claude gains the mcp__acy__* tools (AskUserQuestion, PresentPlan)
+// that `claude -p` otherwise has no equivalent of. It returns the config path.
+//
+// Unlike the hook, whose command claude runs through a shell, an MCP server is
+// exec'd directly from a command + args array — so the path must NOT be
+// shellQuoted here, or claude would try to exec a binary whose name begins with a
+// literal quote.
+func WriteMCPConfig(dir, exePath, socketPath string) (string, error) {
+	cfg := map[string]any{
+		"mcpServers": map[string]any{
+			mcp.ServerName: map[string]any{
+				"command": exePath,
+				"args":    []string{"mcp", "--socket", socketPath},
+			},
+		},
+	}
+	b, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	path := filepath.Join(dir, "mcp.json")
 	if err := os.WriteFile(path, b, 0o600); err != nil {
 		return "", err
 	}

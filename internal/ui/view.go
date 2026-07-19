@@ -43,10 +43,16 @@ func (m Model) footerView() string {
 	case m.picking:
 		return hint("↑/↓ move · Enter resume · Esc cancel")
 	case m.ask != nil:
+		keys := "↑/↓ move · Enter confirm · Esc skip"
 		if m.ask.questions[m.ask.qIdx].multiSelect {
-			return hint("↑/↓ move · Space toggle · Enter confirm · Esc skip")
+			keys = "↑/↓ move · Space toggle · Enter confirm · Esc skip"
 		}
-		return hint("↑/↓ move · Enter confirm · Esc skip")
+		// In AUTO-RUN the question is on a clock, and a countdown nobody can see is
+		// how the gate bug happened. Say it out loud.
+		if r := m.askRemaining(); !m.ask.deadline.IsZero() {
+			keys += fmt.Sprintf(" · auto-skip in %ds", int(r.Seconds()+0.5))
+		}
+		return hint(keys)
 	case len(m.pending) > 0:
 		return m.gateView()
 	}
@@ -194,7 +200,7 @@ func (m Model) headerView() string {
 		meta = append(meta, b)
 	}
 	right := ""
-	if m.processing || m.verifying {
+	if m.processing {
 		right = spinner(m.spinFrame) + " "
 	}
 	right += lipgloss.NewStyle().Foreground(colDim).Render(strings.Join(meta, " · "))
@@ -226,7 +232,7 @@ func (m Model) inputView() string {
 	}
 
 	borderColor := colDim
-	if m.processing || m.verifying {
+	if m.processing {
 		borderColor = colClaude
 	}
 	box := lipgloss.NewStyle().

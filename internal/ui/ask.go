@@ -4,10 +4,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/hweeks/always-click-yes/internal/alog"
+	"github.com/hweeks/always-click-yes/internal/mcp"
 )
 
 // askOption is one selectable answer to a question.
@@ -26,18 +28,28 @@ type askQuestion struct {
 	cursor      int
 }
 
-// askState is a pending AskUserQuestion tool call the user is answering. Because
-// the tool call arrives mid-turn (no result event until answered), the panel
-// blocks input until submitAsk sends the tool_result back.
+// askState is a question claude is blocked on, waiting for the human to answer.
+//
+// The block is real and it is not on claude's stdin: claude called an MCP tool, so
+// it is waiting on the `acy mcp` child's JSON-RPC reply, and that child is waiting
+// on pending. Resolving pending is the only thing that unblocks the turn — which is
+// also why the panel is opened by the socket request rather than by the tool_use
+// event. The event tells us a question was asked; only the request can answer it.
 type askState struct {
-	toolUseID string
+	pending   *mcp.Pending
 	questions []askQuestion
 	qIdx      int
+
+	// deadline auto-skips the question. Set only in AUTO-RUN, where the human has
+	// by assumption walked away and a question that blocks forever would strand the
+	// run — the exact failure acy exists to prevent. Zero in PLAN, where someone is
+	// sitting right there.
+	deadline time.Time
 }
 
 // parseAsk decodes an AskUserQuestion tool input into interactive state. It
 // returns false when the shape is unrecognized so the caller can fall back to a
-// plain tool rendering.
+// plain tool rendering. The shape it accepts is the one mcp.askSchema advertises.
 func parseAsk(raw json.RawMessage) (*askState, bool) {
 	var in struct {
 		Questions []struct {
@@ -73,6 +85,26 @@ func parseAsk(raw json.RawMessage) (*askState, bool) {
 		return nil, false
 	}
 	return a, true
+}
+
+// openAsk raises the picker for a question arriving on the ask socket. A shape we
+// cannot parse is answered immediately rather than opening an empty panel the user
+// could never dismiss — claude is blocked on the reply either way, so there is no
+// version of this where we simply ignore it.
+func (m *Model) openAsk(p *mcp.Pending) {
+	a, ok := parseAsk(p.Req.Args)
+	if !ok {
+		alog.Printf("mcp: unparseable ask args, answering with a no-op: %s", string(p.Req.Args))
+		p.Resolve(mcp.Answer{Text: mcp.SupervisorGone})
+		m.appendEntry(entry{kind: eWarn, body: "⚠ Claude asked a question acy could not read — told it to use its best judgment"})
+		return
+	}
+	a.pending = p
+	if m.phase == PhaseAutoRun {
+		a.deadline = m.now.Add(m.countdown)
+	}
+	m.ask = a
+	m.appendEntry(entry{kind: eMeta, body: "❓ Claude is asking a question — answer below"})
 }
 
 // handleAskKey drives the AskUserQuestion panel. Enter confirms the current
@@ -113,8 +145,43 @@ func (m *Model) handleAskKey(msg tea.KeyMsg) tea.Cmd {
 	return nil
 }
 
-// submitAsk sends the collected answers back as the tool_result, unblocking the
-// turn. A skipped panel returns a neutral answer so claude proceeds.
+// askRemaining returns the time left before the open question auto-skips, or 0 if
+// it has no deadline (PLAN) or none is open.
+func (m *Model) askRemaining() time.Duration {
+	if m.ask == nil || m.ask.deadline.IsZero() {
+		return 0
+	}
+	return max(m.ask.deadline.Sub(m.now), 0)
+}
+
+// expireAsk auto-skips a question whose countdown has elapsed. Called on every
+// tick, beside expireDue.
+func (m *Model) expireAsk() {
+	if m.ask == nil || m.ask.deadline.IsZero() || m.now.Before(m.ask.deadline) {
+		return
+	}
+	alog.Printf("mcp: auto-skip question after countdown")
+	m.appendEntry(entry{kind: eWarn, body: "⏳ no answer in time — telling Claude to use its best judgment"})
+	m.submitAsk(true)
+}
+
+// abandonAsk answers an open question when the session it belongs to is going away
+// (stream closed, or the driver swapped out on arming). The `acy mcp` child is
+// almost certainly dead already — it is in the driver's process group — but the
+// panel must come down regardless, or it sits there eating every keystroke.
+func (m *Model) abandonAsk() {
+	if m.ask == nil {
+		return
+	}
+	if m.ask.pending != nil {
+		m.ask.pending.Resolve(mcp.Answer{Text: mcp.SupervisorGone})
+	}
+	m.ask = nil
+}
+
+// submitAsk sends the collected answers back over the ask socket, unblocking the
+// turn. A skipped panel returns a neutral answer so claude proceeds rather than
+// stalling.
 func (m *Model) submitAsk(skipped bool) tea.Cmd {
 	a := m.ask
 	m.ask = nil
@@ -140,18 +207,26 @@ func (m *Model) submitAsk(skipped bool) tea.Cmd {
 		}
 	}
 	answer := strings.Join(lines, "\n")
-	if m.drv != nil {
-		// The turn is blocked on this tool_result. If the write fails there is
-		// nothing left to unblock it, so say so rather than parking on "working…"
-		// forever with no explanation.
-		if err := m.drv.SendToolResult(a.toolUseID, answer); err != nil {
-			alog.Printf("ask: send tool_result failed: %v", err)
-			m.appendEntry(entry{kind: eWarn, body: "⚠ could not send the answer — the session may be dead: " + err.Error()})
-			m.status = "answer not delivered"
-			return nil
-		}
+
+	if a.pending == nil {
+		return nil
 	}
-	m.appendEntry(entry{kind: eYou, body: "↳ answered:\n" + answer})
+	// The turn is blocked on this answer. If the mcp child has already died there
+	// is nothing left to unblock, so say so rather than parking on "working…"
+	// forever with no explanation.
+	select {
+	case <-a.pending.Done():
+		alog.Printf("ask: the question's session is gone; answer discarded")
+		m.appendEntry(entry{kind: eWarn, body: "⚠ could not deliver the answer — that session has ended"})
+		m.status = "answer not delivered"
+		return nil
+	default:
+	}
+	a.pending.Resolve(mcp.Answer{Text: answer})
+
+	if !skipped {
+		m.appendEntry(entry{kind: eYou, body: "↳ answered:\n" + answer})
+	}
 	m.status = "working…"
 	m.processing = true
 	return nil

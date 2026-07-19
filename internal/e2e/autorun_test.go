@@ -37,15 +37,15 @@ func TestE2EPlanArmAutoApproveComplete(t *testing.T) {
 
 	h.key(tea.KeyCtrlG) // arm
 
-	// Arming is the moment the plan has to be captured: the judge grades against it,
-	// and ExitPlanMode never fires in `claude -p`, so it can only have come from the
-	// last assistant turn.
+	// Arming is the moment the plan has to be captured: it is what the snapshot
+	// persists and a resume restores, and ExitPlanMode never fires in `claude -p`,
+	// so it can only have come from the last assistant turn.
 	h.waitFor("the run to arm", 30*time.Second, func(m ui.Model) bool {
 		return m.Phase() == ui.PhaseAutoRun
 	})
 	h.read(func(m ui.Model) {
 		if strings.TrimSpace(m.PlanBody()) == "" {
-			t.Fatal("armed with an empty plan — the judge would have nothing to grade against")
+			t.Fatal("armed with an empty plan — nothing would survive into a resume")
 		}
 	})
 

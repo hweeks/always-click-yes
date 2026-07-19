@@ -83,14 +83,12 @@ func (m *Model) applyResume(msg resumeMsg) tea.Cmd {
 	m.gen++
 
 	// A restored run is a different run. Everything the old one was in the middle of
-	// — a turn in flight, a judge deciding, a stream that had ended, a question on
-	// screen — belongs to a session that no longer exists. Left set, `ended` or
-	// `processing` would make the composer refuse to send for the rest of the run.
+	// — a turn in flight, a stream that had ended, a question on screen — belongs to
+	// a session that no longer exists. Left set, `ended` or `processing` would make
+	// the composer refuse to send for the rest of the run.
 	m.ended = false
 	m.processing = false
-	m.verifying = false
 	m.preloaded = false
-	m.awaitingVerdict = false
 	m.interrupted = false
 	m.planReady = false
 	m.ask = nil
@@ -191,8 +189,8 @@ func (m *Model) ingestReplay(ev driver.Event) {
 		if text := userText(ev); text != "" {
 			// A new prompt means the turn that follows is a new one. Resetting here
 			// leaves turnText holding exactly the final assistant turn once the replay
-			// ends — which is precisely what startVerification hands the judge as the
-			// working session's last message.
+			// ends — which is precisely what the resumed run's completion check reads
+			// for the STATUS sentinel.
 			m.turnText = ""
 			m.appendEntry(entry{kind: eYou, body: text})
 			return

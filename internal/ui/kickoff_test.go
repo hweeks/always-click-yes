@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/hweeks/always-click-yes/internal/driver"
-	"github.com/hweeks/always-click-yes/internal/judge"
 )
 
 // nopCloser lets a driver's injected stdin be inspected without a claude process.
@@ -19,10 +18,10 @@ func (w nopCloser) Close() error                { return nil }
 // auto-run branch of onDriverReady reads already in place. The returned builder
 // captures every byte acy writes to the session's stdin — which is how these tests
 // tell "sent the kickoff" from "sent nothing".
-func armedModel(t *testing.T, j JudgeFunc) (*Model, *driver.Driver, *strings.Builder) {
+func armedModel(t *testing.T) (*Model, *driver.Driver, *strings.Builder) {
 	t.Helper()
 	var sent strings.Builder
-	m := New(nil, Config{Countdown: 30 * time.Second, Judge: j})
+	m := New(nil, Config{Countdown: 30 * time.Second})
 	drv := driver.NewWithWriter(driver.Options{}, nopCloser{&sent})
 	return &m, drv, &sent
 }
@@ -30,7 +29,7 @@ func armedModel(t *testing.T, j JudgeFunc) (*Model, *driver.Driver, *strings.Bui
 // Arming is the launch that starts the work, and the kickoff prompt is what starts
 // it. This pins today's behavior so the resume path below can't quietly break it.
 func TestOnDriverReadyArmingSendsTheKickoff(t *testing.T) {
-	m, drv, sent := armedModel(t, fakeJudge(judge.VerdictDone, "", nil))
+	m, drv, sent := armedModel(t)
 
 	m.onDriverReady(driverReadyMsg{drv: drv, phase: PhaseAutoRun, kickoff: true})
 
@@ -44,46 +43,48 @@ func TestOnDriverReadyArmingSendsTheKickoff(t *testing.T) {
 
 // The heart of resume: a restored auto-run is already underway. Re-sending the
 // kickoff would tell a half-finished session to start the plan over, so it must
-// send nothing and instead rejoin the loop where every turn already ends — at the
-// judge.
-func TestOnDriverReadyResumedAutoRunVerifiesInsteadOfKickingOff(t *testing.T) {
-	m, drv, sent := armedModel(t, fakeJudge(judge.VerdictContinue, "", nil))
+// instead rejoin the loop where every turn already ends — by asking the session
+// itself whether it is done.
+func TestOnDriverReadyResumedAutoRunAsksInsteadOfKickingOff(t *testing.T) {
+	m, drv, sent := armedModel(t)
 	m.planBody = "the approved plan"
-
-	cmd := m.onDriverReady(driverReadyMsg{drv: drv, phase: PhaseAutoRun, kickoff: false})
-
-	if sent.String() != "" {
-		t.Fatalf("a resumed run must not be prompted; stdin got:\n%s", sent.String())
-	}
-	if !m.verifying {
-		t.Error("a resumed auto-run should hand off to the judge")
-	}
-	if cmd == nil {
-		t.Error("expected the judge command to be dispatched")
-	}
-	if m.processing {
-		t.Error("nothing was sent, so nothing is in flight")
-	}
-}
-
-// With no judge wired, a resumed auto-run falls back to the manual done-check —
-// the same fallback a live idle turn already uses.
-func TestOnDriverReadyResumedAutoRunWithoutJudgePreloads(t *testing.T) {
-	m, drv, sent := armedModel(t, nil)
+	m.turnText = "I was halfway through step two." // what the replay recovered
 
 	m.onDriverReady(driverReadyMsg{drv: drv, phase: PhaseAutoRun, kickoff: false})
 
-	if sent.String() != "" {
-		t.Fatalf("a resumed run must not be prompted; stdin got:\n%s", sent.String())
+	if strings.Contains(sent.String(), "The plan is approved") {
+		t.Fatalf("a resumed run must not be re-kicked-off; stdin got:\n%s", sent.String())
 	}
-	if !m.preloaded {
-		t.Error("expected the manual done-check to be preloaded")
+	if !strings.Contains(sent.String(), "Have we completed every step") {
+		t.Fatalf("a resumed run should be asked whether it is done; stdin got:\n%s", sent.String())
+	}
+	if !m.processing {
+		t.Error("the done-check is a real turn; the run should be working")
+	}
+	if m.rounds != 1 {
+		t.Errorf("rounds = %d, want 1 — the resume nudge spends an auto-round", m.rounds)
 	}
 }
 
-// The plan is what the judge grades against. ExitPlanMode never fires in `claude -p`,
-// so without this fallback planBody is empty and the judge is asked whether nothing
-// has been completed.
+// If the replayed final turn already carries the DONE sentinel, the run finished
+// before acy died — complete it, and send the session nothing at all.
+func TestOnDriverReadyResumedAutoRunHonorsAReplayedDone(t *testing.T) {
+	m, drv, sent := armedModel(t)
+	m.turnText = "Both files are written.\nSTATUS: DONE"
+
+	m.onDriverReady(driverReadyMsg{drv: drv, phase: PhaseAutoRun, kickoff: false})
+
+	if m.phase != PhaseComplete {
+		t.Fatalf("phase = %v, want COMPLETE — the replayed sentinel was not read", m.phase)
+	}
+	if sent.String() != "" {
+		t.Fatalf("a finished run must not be prompted; stdin got:\n%s", sent.String())
+	}
+}
+
+// The plan is the record of what the user approved: the snapshot persists it and a
+// resume shows it. ExitPlanMode never fires in `claude -p`, so without this
+// fallback planBody would be empty.
 func TestCapturePlanFallsBackToTheLastAssistantTurn(t *testing.T) {
 	m := New(nil, Config{Countdown: 30 * time.Second})
 	m.turnText = "1. do the thing\n2. do the other thing\n"

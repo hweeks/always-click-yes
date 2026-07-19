@@ -24,6 +24,7 @@ func Root() *cobra.Command {
 	runCmd := newRunCmd()
 	root.AddCommand(runCmd)
 	root.AddCommand(newHookCmd())
+	root.AddCommand(newMCPCmd())
 
 	// Default to `run` when invoked with no subcommand.
 	root.RunE = runCmd.RunE

@@ -25,16 +25,13 @@ func (m Model) Transcript() string { return m.transcript() }
 // TotalCost is what the run has spent across every claude process it launched.
 func (m Model) TotalCost() float64 { return m.totalCost() }
 
-// Rounds is how many times a CONTINUE verdict has auto-nudged the working session.
+// Rounds is how many times the completion loop has auto-nudged the working session.
 func (m Model) Rounds() int { return m.rounds }
-
-// Verifying reports whether an independent judge session is deciding completion.
-func (m Model) Verifying() bool { return m.verifying }
 
 // PendingGates is how many permission requests are counting down right now.
 func (m Model) PendingGates() int { return len(m.pending) }
 
-// PlanBody is the plan the judge grades against.
+// PlanBody is the approved plan the run was armed with.
 func (m Model) PlanBody() string { return m.planBody }
 
 // StopDriver kills the claude process without any of the tidying a clean exit would

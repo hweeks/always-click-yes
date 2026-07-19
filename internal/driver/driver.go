@@ -26,9 +26,31 @@ type Options struct {
 	ResumeID       string   // --resume <session-id> (optional)
 	SessionID      string   // --session-id <uuid> (optional)
 	IncludeHooks   bool     // --include-hook-events
-	AllowedTools   []string // --allowedTools (optional; pre-approves tools, e.g. so a read tool runs under --permission-mode plan)
+	AllowedTools   []string // --allowedTools (optional; pre-approves tools)
 	ExtraArgs      []string // any additional raw args
 	UseAPIKey      bool     // bill ANTHROPIC_API_KEY instead of the claude.ai login (see childEnv)
+
+	// Tools is --tools: the *built-in* tools claude may have at all. Empty means
+	// the full registry. Unlike --allowedTools (which pre-approves tools that
+	// exist), this decides what exists — a tool left out cannot be called, or even
+	// attempted. It is how the plan phase is made read-only, and it leaves MCP
+	// tools untouched (verified: --tools Read,Grep,Glob still yields a registry
+	// containing mcp__acy__AskUserQuestion).
+	Tools []string
+
+	// AppendSystemPrompt is --append-system-prompt. acy uses it to tell the model
+	// the things only acy knows: that it cannot arm its own run, and that a human
+	// with a keyboard is the one who ends the plan phase.
+	AppendSystemPrompt string
+
+	// MCPConfigPath is --mcp-config: registers acy as an MCP server so the model
+	// gets mcp__acy__AskUserQuestion / mcp__acy__PresentPlan.
+	MCPConfigPath string
+
+	// StrictMCP is --strict-mcp-config: use *only* our MCP config, ignoring the
+	// user's own servers. Set during PLAN, where a stray third-party server would
+	// add tools the read-only --tools registry was carefully chosen to exclude.
+	StrictMCP bool
 }
 
 // Driver owns a running claude process and surfaces its decoded event stream.
@@ -79,6 +101,18 @@ func (o Options) Args() []string {
 	if len(o.AllowedTools) > 0 {
 		args = append(args, "--allowedTools", strings.Join(o.AllowedTools, ","))
 	}
+	if len(o.Tools) > 0 {
+		args = append(args, "--tools", strings.Join(o.Tools, ","))
+	}
+	if o.AppendSystemPrompt != "" {
+		args = append(args, "--append-system-prompt", o.AppendSystemPrompt)
+	}
+	if o.MCPConfigPath != "" {
+		args = append(args, "--mcp-config", o.MCPConfigPath)
+	}
+	if o.StrictMCP {
+		args = append(args, "--strict-mcp-config")
+	}
 	args = append(args, o.ExtraArgs...)
 	return args
 }
@@ -95,8 +129,8 @@ func New(opts Options) *Driver {
 }
 
 // NewWithWriter builds a Driver whose injected messages go to w instead of a real
-// process stdin. It never launches claude, so Send/SendToolResult/Interrupt can be
-// exercised and their exact wire format inspected in tests. Events() stays empty.
+// process stdin. It never launches claude, so Send/Interrupt can be exercised and
+// their exact wire format inspected in tests. Events() stays empty.
 // Test-only; production code uses New + Start.
 func NewWithWriter(opts Options, w io.WriteCloser) *Driver {
 	d := New(opts)
@@ -255,35 +289,12 @@ func (d *Driver) Send(text string) error {
 	return err
 }
 
-// SendToolResult answers a pending tool call (e.g. AskUserQuestion) by injecting
-// a user message whose content is a single tool_result block referencing the
-// tool_use id. This unblocks a turn that is waiting on client-side tool output.
-func (d *Driver) SendToolResult(toolUseID string, content any) error {
-	payload := map[string]any{
-		"type": "user",
-		"message": map[string]any{
-			"role": "user",
-			"content": []any{
-				map[string]any{
-					"type":        "tool_result",
-					"tool_use_id": toolUseID,
-					"content":     content,
-				},
-			},
-		},
-	}
-	b, err := json.Marshal(payload)
-	if err != nil {
-		return err
-	}
-	alog.Raw("TX", string(b))
-	b = append(b, '\n')
-
-	d.writeMu.Lock()
-	defer d.writeMu.Unlock()
-	_, err = d.stdin.Write(b)
-	return err
-}
+// There is deliberately no SendToolResult. Answering a tool call by injecting a
+// tool_result block on stdin was how acy planned to answer AskUserQuestion, and it
+// is wrong: the only tools acy answers are its own MCP tools, and a tools/call
+// blocks claude on the *MCP server process's* JSON-RPC reply, not on its input
+// stream. A tool_result written here would never be read and the turn would hang
+// forever. Answers go back over the ask socket — see internal/mcp.
 
 // Interrupt asks the running turn to abort (uses the interrupt_receipt_v1
 // capability advertised at init). The current turn ends with terminal_reason

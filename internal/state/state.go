@@ -34,11 +34,11 @@ type Snapshot struct {
 	Phase     string `json:"phase"` // "PLAN" | "AUTO-RUN" | "COMPLETE"
 	Model     string `json:"model,omitempty"`
 
-	// PlanBody is the approved plan. The completion judge grades against it, so a
-	// run resumed without one gets a judge with nothing to compare against.
+	// PlanBody is the approved plan — the record of what the user armed, shown when
+	// the run is resumed.
 	PlanBody string `json:"plan_body,omitempty"`
 
-	// Rounds is how many auto-continue rounds the run has already spent. Restoring
+	// Rounds is how many auto-nudge rounds the run has already spent. Restoring
 	// it is what keeps maxAutoRounds bounding the whole run instead of handing it a
 	// fresh budget on every resume.
 	Rounds int `json:"rounds"`
@@ -219,8 +219,8 @@ func All() ([]Snapshot, error) {
 
 // Latest is the most recently updated live run for cwd — what `--continue` resumes.
 // It keys on acy's own snapshots rather than claude's transcript list, which is what
-// stops --continue from landing on a session acy never drove: a bare claude session,
-// or one of the judge's one-shot sessions, has no snapshot at all.
+// stops --continue from landing on a session acy never drove: a bare claude session
+// has no snapshot at all.
 func Latest(cwd string) (Snapshot, bool, error) {
 	all, err := All()
 	if err != nil {

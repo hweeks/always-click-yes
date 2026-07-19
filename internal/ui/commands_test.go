@@ -33,8 +33,8 @@ func TestParseCommand(t *testing.T) {
 }
 
 // The picker mixes sessions acy supervised with sessions it merely knows about
-// (a bare `claude` run, or one of the judge's one-shot sessions). The label is how
-// you tell them apart, so an unsupervised session must render as nothing at all.
+// (a bare `claude` run). The label is how you tell them apart, so an unsupervised
+// session must render as nothing at all.
 func TestSnapLabel(t *testing.T) {
 	tests := []struct {
 		name string

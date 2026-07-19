@@ -7,6 +7,7 @@ import (
 
 	"github.com/hweeks/always-click-yes/internal/alog"
 	"github.com/hweeks/always-click-yes/internal/gate"
+	"github.com/hweeks/always-click-yes/internal/mcp"
 )
 
 // --- gate event plumbing ---
@@ -14,6 +15,11 @@ import (
 type gateMsg struct{ p *gate.Pending }
 type gateClosedMsg struct{}
 type tickMsg time.Time
+
+// askMsg carries a question claude is blocked on, arriving from acy's own MCP
+// server over the ask socket.
+type askMsg struct{ p *mcp.Pending }
+type askClosedMsg struct{}
 
 // waitGate blocks on the next incoming permission request.
 func waitGate(ch <-chan *gate.Pending) tea.Cmd {
@@ -26,6 +32,20 @@ func waitGate(ch <-chan *gate.Pending) tea.Cmd {
 			return gateClosedMsg{}
 		}
 		return gateMsg{p}
+	}
+}
+
+// waitAsk blocks on the next incoming question.
+func waitAsk(ch <-chan *mcp.Pending) tea.Cmd {
+	return func() tea.Msg {
+		if ch == nil {
+			return nil
+		}
+		p, ok := <-ch
+		if !ok {
+			return askClosedMsg{}
+		}
+		return askMsg{p}
 	}
 }
 
@@ -46,9 +66,21 @@ func tickCmd() tea.Cmd {
 // render races, leaving a countdown ticking invisibly until it auto-approved a
 // duplicate execution of a tool the user had already answered.
 func (m *Model) enqueue(p *gate.Pending) {
-	if intercepted[baseToolName(p.Input.ToolName)] {
+	tool := baseToolName(p.Input.ToolName)
+	if intercepted[tool] {
 		p.Resolve(gate.Decision{Behavior: gate.Allow, Reason: "handled by acy"})
 		alog.Printf("gate: pass-through tool=%s (intercepted by acy)", p.Input.ToolName)
+		return
+	}
+	// PLAN is a research phase with a human watching, and it now runs with the hook
+	// wired (it no longer uses --permission-mode plan, which refuses MCP tool calls
+	// and would make the question picker unreachable). Its safety comes from the
+	// --tools registry instead: Write, Edit and friends do not exist there at all.
+	// Bash is the one mutation vector that survives, so it keeps its countdown; a
+	// countdown on every Read and Grep would just train the user to stop looking.
+	if m.phase == PhasePlan && tool != "Bash" {
+		p.Resolve(gate.Decision{Behavior: gate.Allow, Reason: "read-only tool during planning"})
+		alog.Printf("gate: pass-through tool=%s (plan phase, read-only)", p.Input.ToolName)
 		return
 	}
 	it := &gateItem{p: p}

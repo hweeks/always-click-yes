@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/hweeks/always-click-yes/internal/driver"
-	"github.com/hweeks/always-click-yes/internal/judge"
 	"github.com/hweeks/always-click-yes/internal/state"
 )
 
@@ -58,7 +57,6 @@ func resumeModel(t *testing.T, snap state.Snapshot, hasSnap bool, evs []driver.E
 		Ctx:       context.Background(),
 		Countdown: 30 * time.Second,
 		Cwd:       "/proj",
-		Judge:     fakeJudge(judge.VerdictContinue, "", nil),
 		Launcher: func(context.Context, LaunchSpec) (*driver.Driver, error) {
 			return driver.New(driver.Options{}), nil // never started; these tests don't run the cmd
 		},
@@ -92,11 +90,11 @@ func TestApplyResumeReplaysBothSidesOfTheConversation(t *testing.T) {
 	}
 }
 
-// turnText is what startVerification hands the judge as the working session's last
-// message. After a replay it must hold the *final* assistant turn — not the first,
+// turnText is what the resumed run's completion check reads for the STATUS
+// sentinel. After a replay it must hold the *final* assistant turn — not the first,
 // and not every turn concatenated. This is the assertion most likely to rot
 // silently, because nothing else would visibly break if it did.
-func TestApplyResumeLeavesOnlyTheFinalAssistantTurnForTheJudge(t *testing.T) {
+func TestApplyResumeLeavesOnlyTheFinalAssistantTurn(t *testing.T) {
 	evs := []driver.Event{
 		userEvent("first prompt"),
 		assistantEvent("FIRST answer"),
@@ -108,7 +106,7 @@ func TestApplyResumeLeavesOnlyTheFinalAssistantTurnForTheJudge(t *testing.T) {
 	m.applyResume(resumeMsg{id: "sess-1", events: evs})
 
 	if strings.Contains(m.turnText, "FIRST") {
-		t.Errorf("turnText carries an earlier turn; the judge would grade against stale text:\n%q", m.turnText)
+		t.Errorf("turnText carries an earlier turn; the completion check would read stale text:\n%q", m.turnText)
 	}
 	if !strings.Contains(m.turnText, "SECOND") {
 		t.Errorf("turnText = %q, want the final assistant turn", m.turnText)
@@ -317,43 +315,31 @@ func TestAdoptSessionIsANoOpWhenTheIDIsUnchanged(t *testing.T) {
 
 // --- regressions ---------------------------------------------------------------
 
-// The judge's only evidence of what happened is the working session's last message.
-// onDriverReady clears turnText on every launch — but a resumed auto-run is the one
-// launch where the replay deliberately put the final assistant turn there. Clearing
-// it asks the judge whether an empty plan is complete, and it will keep saying
-// CONTINUE, re-doing work that was already finished.
-func TestResumedAutoRunGivesTheJudgeTheLastMessage(t *testing.T) {
-	var gotPlan, gotLast string
-	spy := func(_ context.Context, plan, lastMsg string) (judge.Result, error) {
-		gotPlan, gotLast = plan, lastMsg
-		return judge.Result{Verdict: judge.VerdictDone}, nil
-	}
-	m := New(nil, Config{Ctx: context.Background(), Countdown: 30 * time.Second, Judge: spy})
+// The completion check's only evidence of what happened is the working session's
+// last message. onDriverReady clears turnText on every launch — but a resumed
+// auto-run is the one launch where the replay deliberately put the final assistant
+// turn there. Clearing it would erase a STATUS: DONE the session had already said
+// and nudge a finished run back into motion.
+func TestResumedAutoRunReadsTheReplayedLastMessage(t *testing.T) {
+	var sent strings.Builder
+	m := New(nil, Config{Ctx: context.Background(), Countdown: 30 * time.Second})
 	m.planBody = "the approved plan"
-	m.turnText = "I finished both files." // what the replay recovered
+	m.turnText = "I finished both files.\nSTATUS: DONE" // what the replay recovered
 
-	drv := driver.NewWithWriter(driver.Options{}, nopCloser{&strings.Builder{}})
+	drv := driver.NewWithWriter(driver.Options{}, nopCloser{&sent})
 	m.onDriverReady(driverReadyMsg{drv: drv, phase: PhaseAutoRun, kickoff: false})
 
-	// The launch must not have eaten the evidence on its way past.
-	if m.turnText != "I finished both files." {
-		t.Fatalf("turnText = %q after the resumed launch — the judge has nothing to grade against", m.turnText)
+	if m.phase != PhaseComplete {
+		t.Fatalf("phase = %s, want COMPLETE — the launch ate the evidence on its way past", m.phase)
 	}
-
-	// And what startVerification hands the judge is exactly that.
-	verifyCmd(m.ctx, m.judge, m.gen, m.planBody, m.turnText)()
-
-	if gotLast != "I finished both files." {
-		t.Errorf("the judge got lastMsg = %q, want the final assistant turn the replay recovered", gotLast)
-	}
-	if gotPlan != "the approved plan" {
-		t.Errorf("the judge got plan = %q", gotPlan)
+	if sent.String() != "" {
+		t.Errorf("a run that already said DONE must not be prompted; stdin got:\n%s", sent.String())
 	}
 }
 
 // Arming still starts a fresh turn, so it must still clear the last turn's text.
 func TestArmingClearsTheLastTurn(t *testing.T) {
-	m := New(nil, Config{Countdown: 30 * time.Second, Judge: fakeJudge(judge.VerdictDone, "", nil)})
+	m := New(nil, Config{Countdown: 30 * time.Second})
 	m.turnText = "chatter from the planning conversation"
 
 	drv := driver.NewWithWriter(driver.Options{}, nopCloser{&strings.Builder{}})
@@ -396,12 +382,12 @@ func TestApplyResumeAbandonsTheOldSession(t *testing.T) {
 func TestApplyResumeRevivesAnEndedSession(t *testing.T) {
 	m, _ := resumeModel(t, state.Snapshot{}, false, nil)
 	m.ended = true
-	m.verifying = true
+	m.processing = true
 
 	m.applyResume(resumeMsg{id: "sess-1"})
 
-	if m.ended || m.verifying {
-		t.Fatalf("ended=%v verifying=%v — a resumed run must come back usable", m.ended, m.verifying)
+	if m.ended || m.processing {
+		t.Fatalf("ended=%v processing=%v — a resumed run must come back usable", m.ended, m.processing)
 	}
 }
 

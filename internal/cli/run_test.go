@@ -7,20 +7,39 @@ import (
 	"github.com/hweeks/always-click-yes/internal/state"
 )
 
-// Plan mode has no gate wired in, so a tool missing from --plan-tools never runs
-// while planning. Dropping AskUserQuestion from the default would not fail
-// anything loudly — claude would just stop offering the tool, and the ask panel
-// (ui/ask.go) would go quietly unreachable. Pin the default so that regression
-// has to be deliberate.
-func TestRunPlanToolsDefault(t *testing.T) {
+// --plan-tools is claude's whole built-in registry during PLAN (--tools), not an
+// allowlist on top of one. Since acy no longer plans under --permission-mode plan —
+// that mode refuses every MCP tool call, which would kill the question picker — the
+// *absence* of the writing tools from this list is the only thing keeping the plan
+// phase read-only. Adding Write here would silently hand a planning session the
+// ability to edit the repo, and nothing else would complain.
+func TestRunPlanToolsExcludeWriters(t *testing.T) {
 	got, err := newRunCmd().Flags().GetStringSlice("plan-tools")
 	if err != nil {
 		t.Fatalf("plan-tools flag: %v", err)
 	}
-	for _, want := range []string{"Monitor", "AskUserQuestion"} {
-		if !slices.Contains(got, want) {
-			t.Errorf("--plan-tools default = %v, want it to contain %q", got, want)
+	for _, banned := range []string{"Write", "Edit", "NotebookEdit", "Task"} {
+		if slices.Contains(got, banned) {
+			t.Errorf("--plan-tools default contains %q — the plan phase could then modify the repo", banned)
 		}
+	}
+	// Read has to be there or planning is blind.
+	if !slices.Contains(got, "Read") {
+		t.Errorf("--plan-tools default = %v, want it to contain Read", got)
+	}
+}
+
+// Bash survives into the plan registry (you cannot plan well without running the
+// tests), which makes it the one mutation vector left while planning — and so the
+// one tool the gate must still put a countdown on. ui.enqueue keys on exactly this
+// name; the two have to agree.
+func TestRunPlanToolsKeepBashGated(t *testing.T) {
+	got, err := newRunCmd().Flags().GetStringSlice("plan-tools")
+	if err != nil {
+		t.Fatalf("plan-tools flag: %v", err)
+	}
+	if !slices.Contains(got, "Bash") {
+		t.Skip("Bash is no longer in the plan registry; the gate's plan-phase exception is moot")
 	}
 }
 
@@ -53,8 +72,8 @@ func TestResumeTargetColdStart(t *testing.T) {
 }
 
 // --continue keys on acy's own snapshots, not on claude's transcript list. That is
-// what stops it from resuming a session acy never drove — a bare `claude` run, or
-// one of the judge's one-shot sessions, has no snapshot at all.
+// what stops it from resuming a session acy never drove — a bare `claude` run has
+// no snapshot at all.
 func TestResumeTargetContinuePicksTheLatestSupervisedRun(t *testing.T) {
 	t.Setenv(state.EnvDir, t.TempDir())
 

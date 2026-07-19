@@ -121,8 +121,8 @@ func (m *Model) startResume(arg string) tea.Cmd {
 }
 
 // loadSnaps pairs each listed session with acy's state for it, where there is any.
-// The list is claude's — it includes sessions acy never drove (a bare `claude` run,
-// or one of the judge's one-shot sessions), and those simply have no snapshot.
+// The list is claude's — it includes sessions acy never drove (a bare `claude`
+// run), and those simply have no snapshot.
 func (m *Model) loadSnaps(list []session.Info) map[string]state.Snapshot {
 	if m.loadState == nil {
 		return nil

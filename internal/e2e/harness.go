@@ -4,7 +4,7 @@
 // moving at once.
 //
 // Nothing here runs by default, and none of it can run in CI. Every test is gated
-// on ACY_LIVE=1 (the same switch the live driver, gate and judge tests use) because
+// on ACY_LIVE=1 (the same switch the live driver and gate tests use) because
 // each one spends real tokens and takes real minutes:
 //
 //	ACY_LIVE=1 go test ./internal/e2e/ -v -timeout 20m
@@ -94,7 +94,7 @@ type options struct {
 }
 
 // newHarness wires a real supervisor — real gate socket, real hook settings, real
-// claude launcher, real judge, real state files — and runs its Bubble Tea model
+// claude launcher, real state files — and runs its Bubble Tea model
 // headlessly, so a test can send keys and read the transcript without a terminal.
 //
 // It deliberately does not use tea.NewProgram: a Program wants a TTY and owns its

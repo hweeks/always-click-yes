@@ -175,20 +175,13 @@ func (m Model) update(msg tea.Msg) (Model, tea.Cmd) {
 		if msg.ev.IsInit() || msg.ev.IsTurnEnd() {
 			m.persist()
 		}
-		if c := m.onTurnEnd(msg.ev); c != nil {
-			cmds = append(cmds, c)
-		}
+		m.onTurnEnd(msg.ev)
 		m.rebuild()
 		cmds = append(cmds, waitEvent(m.drv.Events(), m.gen))
 
 	case resumeMsg:
 		cmds = append(cmds, m.applyResume(msg))
 		m.rebuild()
-
-	case verdictMsg:
-		m.onVerdict(msg)
-		m.rebuild()
-		return m, nil
 
 	case streamClosedMsg:
 		if msg.gen != m.gen {
@@ -197,7 +190,7 @@ func (m Model) update(msg tea.Msg) (Model, tea.Cmd) {
 		m.ended = true
 		m.status = "session ended"
 		// Nothing is left to answer, and an open panel would swallow every key.
-		m.ask = nil
+		m.abandonAsk()
 		m.appendEntry(entry{kind: eTurn, body: "──── session ended ────"})
 		m.rebuild()
 		return m, nil
@@ -220,11 +213,21 @@ func (m Model) update(msg tea.Msg) (Model, tea.Cmd) {
 		// no more gates will arrive; nothing to re-arm
 		return m, nil
 
+	case askMsg:
+		m.openAsk(msg.p)
+		m.rebuild()
+		cmds = append(cmds, waitAsk(m.askReqs))
+
+	case askClosedMsg:
+		// no more questions will arrive; nothing to re-arm
+		return m, nil
+
 	case tickMsg:
 		m.now = time.Time(msg)
 		m.spinFrame++ // animates the footer/header spinner; View() re-renders each tick
 		m.expireDue()
-		if len(m.pending) > 0 {
+		m.expireAsk()
+		if len(m.pending) > 0 || m.ask != nil {
 			m.rebuild()
 		}
 		return m, tickCmd()

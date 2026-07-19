@@ -1,12 +1,10 @@
 package ui
 
 import (
-	"math"
 	"strings"
 	"testing"
 
 	"github.com/hweeks/always-click-yes/internal/driver"
-	"github.com/hweeks/always-click-yes/internal/judge"
 )
 
 func resultEvent(cost float64) driver.Event {
@@ -43,17 +41,6 @@ func TestCostSurvivesADriverSwap(t *testing.T) {
 
 	if got := m.totalCost(); got != 0.55 {
 		t.Errorf("totalCost() = %v, want 0.55 (plan + auto-run)", got)
-	}
-}
-
-// The judge runs in a process of its own; its spend is real and must be counted.
-func TestJudgeCostIsCounted(t *testing.T) {
-	m := New(nil, Config{})
-	m.ingest(resultEvent(0.40))
-	m.onVerdict(verdictMsg{gen: m.gen, v: judge.VerdictContinue, cost: 0.02})
-
-	if got := m.totalCost(); math.Abs(got-0.42) > 1e-9 {
-		t.Errorf("totalCost() = %v, want 0.42 (session + judge)", got)
 	}
 }
 

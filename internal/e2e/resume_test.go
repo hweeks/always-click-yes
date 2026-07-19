@@ -59,7 +59,7 @@ func TestE2EResumeAnArmedRunAfterACrash(t *testing.T) {
 		t.Errorf("snapshot phase = %q, want AUTO-RUN — a resume would come back disarmed", snap.Phase)
 	}
 	if strings.TrimSpace(snap.PlanBody) == "" {
-		t.Error("the snapshot has no plan — the judge would resume with nothing to grade against")
+		t.Error("the snapshot has no plan — a resume would restore a run with no record of what was approved")
 	}
 	if snap.CostSettled <= 0 {
 		t.Error("the snapshot has no cost — the tally would restart at zero")
@@ -95,14 +95,16 @@ func TestE2EResumeAnArmedRunAfterACrash(t *testing.T) {
 		// once. A second copy is the bug — that would be acy sending it again.
 		if n := strings.Count(m.Transcript(), kickoffPromptText); n != 1 {
 			t.Errorf("the kickoff prompt appears %d times, want exactly 1 (the replayed original); "+
-				"a second copy means the resumed run was re-kicked-off instead of rejoining at the judge", n)
+				"a second copy means the resumed run was re-kicked-off instead of rejoining the completion loop", n)
 		}
 	})
 
-	// Rejoining at the judge is the whole mechanism: a resumed auto-run is an idle
-	// auto-run, so it re-enters the loop where every turn already ends.
-	second.waitFor("the resumed run to consult the judge", 3*time.Minute, func(m ui.Model) bool {
-		return m.Verifying() || strings.Contains(m.Transcript(), "independent session")
+	// Rejoining the loop is the whole mechanism: a resumed auto-run is an idle
+	// auto-run, so acy asks the session itself whether it is done — the nudge that
+	// spends the first auto-round — or, if the replayed turn already said DONE,
+	// completes on the spot.
+	second.waitFor("the resumed run to pick itself back up", 3*time.Minute, func(m ui.Model) bool {
+		return m.Rounds() > 0 || m.Phase() == ui.PhaseComplete
 	})
 
 	// And now the payoff: nobody touches the keyboard, and it finishes.
