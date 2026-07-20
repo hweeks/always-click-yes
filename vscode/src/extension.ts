@@ -6,6 +6,7 @@
 
 import * as fs from 'fs';
 import * as vscode from 'vscode';
+import { buildConfigSeed, renderConfigSeed, type Defaults } from './config';
 import { resolveBinary, runArgs } from './launch';
 
 const TERMINAL_NAME = 'acy';
@@ -14,9 +15,17 @@ const RELEASES_URL = 'https://github.com/hweeks/always-click-yes/releases/latest
 let terminal: vscode.Terminal | undefined;
 
 export function activate(context: vscode.ExtensionContext): void {
+  const statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 0);
+  statusBar.text = '$(check-all) acy';
+  statusBar.tooltip = 'acy: Plan & Run — supervise a Claude Code task';
+  statusBar.command = 'acy.run';
+  statusBar.show();
+
   context.subscriptions.push(
+    statusBar,
     vscode.commands.registerCommand('acy.run', () => launch(context, false)),
     vscode.commands.registerCommand('acy.continue', () => launch(context, true)),
+    vscode.commands.registerCommand('acy.initConfig', () => initConfig()),
     vscode.window.onDidCloseTerminal((t) => {
       if (t === terminal) {
         terminal = undefined;
@@ -86,6 +95,34 @@ async function launch(context: vscode.ExtensionContext, continuePrior: boolean):
     iconPath: new vscode.ThemeIcon('check-all'),
   });
   terminal.show();
+}
+
+/**
+ * Creates .acy.json in the chosen folder, seeded from the acy.defaults.*
+ * settings, and opens it. An existing file is opened, never overwritten —
+ * the file, not the settings, is the source of truth once it exists.
+ */
+async function initConfig(): Promise<void> {
+  const folder = await pickFolder();
+  if (!folder) {
+    return;
+  }
+  const target = vscode.Uri.joinPath(folder.uri, '.acy.json');
+
+  let exists = true;
+  try {
+    await vscode.workspace.fs.stat(target);
+  } catch {
+    exists = false;
+  }
+  if (exists) {
+    void vscode.window.showInformationMessage('.acy.json already exists — opened it instead.');
+  } else {
+    const defaults = vscode.workspace.getConfiguration('acy').get<Defaults>('defaults') ?? {};
+    const body = renderConfigSeed(buildConfigSeed(defaults));
+    await vscode.workspace.fs.writeFile(target, Buffer.from(body, 'utf8'));
+  }
+  await vscode.window.showTextDocument(target);
 }
 
 async function pickFolder(): Promise<vscode.WorkspaceFolder | undefined> {

@@ -6,6 +6,11 @@ run:
 linters:
   default: standard # errcheck, govet, ineffassign, staticcheck, unused
   exclusions:
+    paths:
+      # The flatted npm package ships Go source; a local `npm install` in
+      # vscode/ would otherwise put it in ./...'s path. CI never sees it (the
+      # Go jobs run on a checkout without node_modules) — this is for dev runs.
+      - vscode/node_modules
     rules:
       # Test helpers routinely ignore cleanup errors (srv.Close, etc.).
       - path: _test\.go

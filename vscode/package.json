@@ -35,6 +35,17 @@
         "command": "acy.continue",
         "title": "Continue Last Run",
         "category": "ACY"
+      },
+      {
+        "command": "acy.initConfig",
+        "title": "Create .acy.json",
+        "category": "ACY"
+      }
+    ],
+    "jsonValidation": [
+      {
+        "fileMatch": ".acy.json",
+        "url": "./schemas/acy.schema.json"
       }
     ],
     "configuration": {
@@ -45,6 +56,44 @@
           "default": "",
           "markdownDescription": "Path to the `acy` binary. Leave empty to use the binary bundled with a platform-specific build of this extension, or `acy` from your `PATH`.",
           "scope": "machine-overridable"
+        },
+        "acy.defaults": {
+          "type": "object",
+          "markdownDescription": "Seed values for **ACY: Create .acy.json**. Only values set here make it into the file — and once the file exists, *it* is the source of truth: these settings are never consulted at launch.",
+          "additionalProperties": false,
+          "properties": {
+            "model": {
+              "type": "string",
+              "description": "Model alias or name (e.g. sonnet, opus)."
+            },
+            "claudeBin": {
+              "type": "string",
+              "description": "Path to the claude binary."
+            },
+            "countdown": {
+              "type": "string",
+              "description": "Auto-approve delay per gated tool, as a Go duration string (e.g. 20s)."
+            },
+            "log": {
+              "type": "string",
+              "description": "Debug log file path."
+            },
+            "maxLines": {
+              "type": "integer",
+              "description": "Max lines shown per tool call/result/thinking block."
+            },
+            "planTools": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The built-in tools claude may use while planning."
+            },
+            "useApiKey": {
+              "type": "boolean",
+              "description": "Bill ANTHROPIC_API_KEY instead of the claude.ai login."
+            }
+          }
         }
       }
     }
