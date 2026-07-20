@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -122,14 +123,15 @@ type Model struct {
 	ctx         context.Context
 	launcher    Launcher
 	phase       Phase
-	gen         int    // current driver generation
-	turnText    string // assistant text accumulated for the current turn
-	planBody    string // approved plan text, captured at ExitPlanMode
-	preloaded   bool   // done-check prompt is sitting in the input, awaiting send
-	rounds      int    // auto-nudge rounds taken in this run
-	processing  bool   // a turn is in flight (model working)
-	interrupted bool   // user interrupted the current turn; don't auto-nudge
-	spinFrame   int    // advances every tick to animate the "working…" spinner
+	gen         int       // current driver generation
+	turnText    string    // assistant text accumulated for the current turn
+	planBody    string    // approved plan text, captured at ExitPlanMode
+	preloaded   bool      // done-check prompt is sitting in the input, awaiting send
+	rounds      int       // auto-nudge rounds taken in this run
+	processing  bool      // a turn is in flight (model working)
+	interrupted bool      // user interrupted the current turn; don't auto-nudge
+	spinFrame   int       // advances every tick to animate the "working…" spinner
+	turnStart   time.Time // when the in-flight turn began, for the elapsed display
 }
 
 // New builds the initial model bound to a started driver.
@@ -235,17 +237,24 @@ func (m Model) Init() tea.Cmd {
 // appendEntry adds a structured entry to the transcript.
 func (m *Model) appendEntry(e entry) { m.entries = append(m.entries, e) }
 
-// transcript returns the plain-text concatenation of all entries (used by tests).
+// transcript returns the plain-text concatenation of all entries (used by tests
+// and the e2e suite). Tool bodies carry syntax-highlighting ANSI; strip it so
+// callers can match plain substrings.
 func (m *Model) transcript() string {
 	var b strings.Builder
 	for _, e := range m.entries {
 		b.WriteString(e.title)
 		b.WriteByte(' ')
-		b.WriteString(e.body)
+		b.WriteString(stripAnsi(e.body))
 		b.WriteByte('\n')
 	}
 	return b.String()
 }
+
+// ansiRE matches SGR escape sequences (the only kind chroma and lipgloss emit).
+var ansiRE = regexp.MustCompile("\x1b\\[[0-9;]*m")
+
+func stripAnsi(s string) string { return ansiRE.ReplaceAllString(s, "") }
 
 // rebuild re-renders the transcript at the current width and scrolls to bottom.
 func (m *Model) rebuild() {
@@ -394,7 +403,8 @@ func (m *Model) ingestToolUse(b driver.ContentBlock) {
 	case mcp.ToolAsk:
 		return // rendered by openAsk, which owns the answer
 	}
-	m.appendEntry(entry{kind: eTool, title: b.Name, body: toolBody(b.Name, b.Input)})
+	name := baseToolName(b.Name)
+	m.appendEntry(entry{kind: eTool, title: b.Name, body: toolBody(name, b.Input), styled: styledTools[name]})
 }
 
 // --- small formatting helpers ---
@@ -451,18 +461,27 @@ func toolBody(name string, raw json.RawMessage) string {
 	}
 	str := func(k string) string { s, _ := obj[k].(string); return s }
 
+	path := str("file_path")
+	if path == "" {
+		path = str("path")
+	}
 	switch name {
 	case "Bash":
-		return str("command")
+		return highlight(str("command"), "bash")
 	case "Write":
-		return headed(fileHeader(obj), str("content"))
+		return headed(fileHeader(obj), highlightFile(str("content"), path))
 	case "Edit":
-		return headed(fileHeader(obj), diffPreview(str("old_string"), str("new_string")))
+		return headed(fileHeader(obj), highlight(diffPreview(str("old_string"), str("new_string")), "diff"))
 	case "Read":
 		return fileHeader(obj)
 	}
 	return toolArgs(raw)
 }
+
+// styledTools are the tools whose toolBody comes back syntax-highlighted, so
+// their transcript entries must not be re-styled at render time — an outer
+// foreground would fight the ANSI already in the text.
+var styledTools = map[string]bool{"Bash": true, "Write": true, "Edit": true}
 
 // fileHeader builds a "path (offset N, limit M)" line from a tool input, using
 // file_path or path and any Read range fields.

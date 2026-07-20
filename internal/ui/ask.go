@@ -227,7 +227,6 @@ func (m *Model) submitAsk(skipped bool) tea.Cmd {
 	if !skipped {
 		m.appendEntry(entry{kind: eYou, body: "↳ answered:\n" + answer})
 	}
-	m.status = "working…"
-	m.processing = true
+	m.beginTurn()
 	return nil
 }

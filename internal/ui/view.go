@@ -177,19 +177,16 @@ func (m Model) askView() string {
 	return title + "\n" + prompt + "\n\n" + strings.Join(rows, "\n")
 }
 
-// headerView is the top status bar: phase badge, name, live status, and cost.
+// headerView is the top status bar: a full-width strip in the phase's color, so
+// the mode is legible from across the room. A dark chip carries the phase name;
+// the live status, session and cost sit right-aligned on the same strip.
 func (m Model) headerView() string {
-	phaseColors := map[Phase]lipgloss.Color{
-		PhasePlan:     colPlan,
-		PhaseAutoRun:  colClaude,
-		PhaseComplete: colGood,
-	}
-	col, ok := phaseColors[m.phase]
-	if !ok {
-		col = colDim
-	}
-	left := badge(m.phase.String(), col) + " " +
-		lipgloss.NewStyle().Bold(true).Foreground(colClaude).Render("always-click-yes")
+	col := phaseColor(m.phase)
+	bar := lipgloss.NewStyle().Background(col).Foreground(colInk)
+
+	chip := lipgloss.NewStyle().Bold(true).Foreground(col).Background(colInk).
+		Render(" " + m.phase.String() + " ")
+	left := chip + bar.Bold(true).Render(" always-click-yes ")
 
 	meta := []string{m.status}
 	if m.sessionID != "" {
@@ -199,23 +196,29 @@ func (m Model) headerView() string {
 	if b := m.billing(); b != "" {
 		meta = append(meta, b)
 	}
-	right := ""
+	rightText := strings.Join(meta, " · ")
 	if m.processing {
-		right = spinner(m.spinFrame) + " "
+		rightText = spinGlyph(m.spinFrame) + " " + rightText
 	}
-	right += lipgloss.NewStyle().Foreground(colDim).Render(strings.Join(meta, " · "))
+	// Everything must fit the single header row; shrink the meta before it wraps.
+	if avail := m.width - lipgloss.Width(left) - 2; avail >= 0 {
+		rightText = truncate(rightText, avail)
+	} else {
+		rightText = ""
+	}
+	right := bar.Render(" " + rightText + " ")
 
-	return left + "  " + right
+	gap := max(m.width-lipgloss.Width(left)-lipgloss.Width(right), 0)
+	return left + bar.Render(strings.Repeat(" ", gap)) + right
 }
 
 // inputView renders the framed message box plus a context-sensitive hint line.
-// The box has a top and bottom rule (no side borders) that brightens while a
-// turn is in flight.
+// The box has a top and bottom rule (no side borders) in the phase's color, and
+// while a turn is in flight the large working indicator sits above it.
 func (m Model) inputView() string {
-	var hint, spin string
+	var hint string
 	switch {
 	case m.processing:
-		spin = spinner(m.spinFrame) + " "
 		hint = "working… · Esc to interject · Ctrl+C to quit"
 	case m.planReady && m.phase == PhasePlan:
 		hint = "📋 plan ready above · Ctrl+G to arm & run · or keep chatting to refine"
@@ -227,21 +230,63 @@ func (m Model) inputView() string {
 		hint = "Enter to send · Ctrl+C to quit"
 	}
 	hintStyle := lipgloss.NewStyle().Foreground(colDim)
-	if m.planReady && m.phase == PhasePlan {
+	switch {
+	case m.planReady && m.phase == PhasePlan:
 		hintStyle = lipgloss.NewStyle().Bold(true).Foreground(colPlan)
+	case m.phase == PhaseComplete && !m.processing:
+		hintStyle = lipgloss.NewStyle().Foreground(colGood)
 	}
 
-	borderColor := colDim
-	if m.processing {
-		borderColor = colClaude
-	}
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder(), true, false).
-		BorderForeground(borderColor).
+		BorderForeground(phaseColor(m.phase)).
 		Width(max(m.width-2, 20)).
 		Render(m.input.View())
 
-	return box + "\n" + spin + hintStyle.Render(hint)
+	out := box + "\n" + hintStyle.Render(hint)
+	if m.processing {
+		out = m.workingView() + "\n" + out
+	}
+	return out
+}
+
+// workingView is the large in-flight indicator: a phase-colored WORKING chip with
+// the elapsed time, and an animated sweep bar filling the rest of the row. It
+// animates off spinFrame, which the 120ms tick already advances.
+func (m Model) workingView() string {
+	col := phaseColor(m.phase)
+	label := lipgloss.NewStyle().Bold(true).Foreground(colInk).Background(col).Padding(0, 1).
+		Render(spinGlyph(m.spinFrame) + " WORKING")
+
+	elapsed := ""
+	if !m.turnStart.IsZero() {
+		if d := m.now.Sub(m.turnStart); d > 0 {
+			elapsed = fmt.Sprintf(" %ds", int(d.Seconds()))
+		}
+	}
+	et := lipgloss.NewStyle().Bold(true).Foreground(col).Render(elapsed)
+
+	barWidth := m.width - lipgloss.Width(label) - lipgloss.Width(et) - 2
+	return label + et + " " + sweep(barWidth, m.spinFrame, col)
+}
+
+// sweep draws a width-cell track with a bright segment bouncing across it — the
+// indeterminate progress bar for "a turn is running, no ETA".
+func sweep(width, frame int, col lipgloss.Color) string {
+	if width < 8 {
+		return ""
+	}
+	span := max(width/5, 4)
+	period := max(width-span, 1)
+	pos := frame % (2 * period)
+	if pos >= period {
+		pos = 2*period - pos
+	}
+	track := lipgloss.NewStyle().Foreground(colDim).Faint(true)
+	lit := lipgloss.NewStyle().Bold(true).Foreground(col)
+	return track.Render(strings.Repeat("╌", pos)) +
+		lit.Render(strings.Repeat("━", span)) +
+		track.Render(strings.Repeat("╌", width-span-pos))
 }
 
 // gateView renders the permission countdown panel shown while gates are pending.
