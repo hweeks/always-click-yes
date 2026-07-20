@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -184,6 +185,14 @@ func (m *Model) preloadDoneCheck() {
 	m.appendEntry(entry{kind: eTurn, body: "──── idle · press Enter to ask “are we done?” ────"})
 }
 
+// beginTurn marks a turn in flight: the header and working indicator flip on,
+// and the elapsed clock starts.
+func (m *Model) beginTurn() {
+	m.processing = true
+	m.turnStart = time.Now()
+	m.status = "working…"
+}
+
 // sendInput dispatches the current input box to claude.
 func (m *Model) sendInput() {
 	text := strings.TrimSpace(m.input.Value())
@@ -194,8 +203,7 @@ func (m *Model) sendInput() {
 	m.interrupted = false
 	m.turnText = ""
 	_ = m.drv.Send(text)
-	m.processing = true
-	m.status = "working…"
+	m.beginTurn()
 	m.appendEntry(entry{kind: eYou, body: text})
 	m.input.Reset()
 }
@@ -260,8 +268,7 @@ func (m *Model) nudge(prompt string) {
 	if m.drv != nil {
 		_ = m.drv.Send(prompt)
 	}
-	m.processing = true
-	m.status = "working…"
+	m.beginTurn()
 	m.appendEntry(entry{kind: eYou, body: prompt})
 }
 
@@ -324,8 +331,7 @@ func (m *Model) onDriverReady(msg driverReadyMsg) tea.Cmd {
 		if msg.kickoff {
 			// Arming: this prompt is what sets the work going.
 			_ = m.drv.Send(kickoffPrompt)
-			m.processing = true
-			m.status = "working…"
+			m.beginTurn()
 			m.appendEntry(entry{kind: eYou, body: kickoffPrompt})
 		} else {
 			// Resumed mid-run. A resumed auto-run *is* an idle auto-run, so it rejoins

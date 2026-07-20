@@ -19,7 +19,10 @@ var (
 
 // mdStyle is glamour's dark theme with the document margin/indent zeroed so
 // prose sits flush under the "claude" badge instead of glamour's default
-// 2-space margin and leading blank line.
+// 2-space margin and leading blank line. Fenced code blocks are pinned to the
+// same chroma theme syntax.go uses for tool-call code, so highlighted code looks
+// identical whether Claude wrote it in prose or ran it as a tool. Glamour only
+// honors Theme when its inline Chroma palette is nil (see glamour/ansi/codeblock.go).
 func mdStyle() ansi.StyleConfig {
 	s := styles.DarkStyleConfig
 	zero := uint(0)
@@ -27,6 +30,8 @@ func mdStyle() ansi.StyleConfig {
 	s.Document.Indent = &zero
 	s.Document.BlockPrefix = ""
 	s.Document.BlockSuffix = ""
+	s.CodeBlock.Chroma = nil
+	s.CodeBlock.Theme = chromaTheme
 	return s
 }
 

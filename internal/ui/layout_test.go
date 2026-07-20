@@ -83,6 +83,27 @@ func TestComposerShowsTheWholeMessageAsItWraps(t *testing.T) {
 	}
 }
 
+// The working indicator adds a footer line while a turn is in flight; the frame
+// must still be exactly terminal-height, in and out of the working state.
+func TestFrameHeightIsStableWhileWorking(t *testing.T) {
+	const height = 30
+	m := New(nil, Config{})
+	tm, _ := m.Update(tea.WindowSizeMsg{Width: 60, Height: height})
+	m = tm.(Model)
+
+	m.processing = true
+	m.layout()
+	if got := lipgloss.Height(m.View()); got != height {
+		t.Fatalf("working frame is %d lines, want %d", got, height)
+	}
+
+	m.processing = false
+	m.layout()
+	if got := lipgloss.Height(m.View()); got != height {
+		t.Fatalf("idle frame is %d lines, want %d", got, height)
+	}
+}
+
 // Growth is capped, so a very long message can't squeeze the transcript away.
 func TestComposerGrowthIsCapped(t *testing.T) {
 	m := New(nil, Config{})
