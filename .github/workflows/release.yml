@@ -160,6 +160,40 @@ jobs:
             npx vsce package --skip-license -o "acy_${TAG}_universal.vsix"
           fi
 
+      # A .vsix that lost its binary — or shipped it unrunnable — only fails at
+      # the user's first launch, one release too late. The permission string
+      # zipinfo prints is the whole point: it is what the install unpacks from.
+      - name: verify vsix contents
+        working-directory: vscode
+        env:
+          TAG: ${{ needs.release-please.outputs.tag }}
+        run: |
+          vsix="acy_${TAG}_${{ matrix.target }}.vsix"
+          if [ "${{ matrix.target }}" = "universal" ]; then
+            # A bin/ left over from a platform build would ship the wrong
+            # platform's binary to everyone who installs the fallback.
+            if unzip -Z1 "$vsix" | grep -q '^extension/bin/'; then
+              echo "::error::universal .vsix contains extension/bin/ — the universal build must carry no binary"
+              exit 1
+            fi
+          else
+            entry=extension/bin/acy
+            [ "${{ matrix.goos }}" = "windows" ] && entry=extension/bin/acy.exe
+            line=$(unzip -Z "$vsix" "$entry" 2>/dev/null | grep " $entry\$") || true
+            if [ -z "$line" ]; then
+              echo "::error::${{ matrix.target }} .vsix is missing $entry"
+              exit 1
+            fi
+            echo "$line"
+            case "${line%% *}" in
+              *x*) ;;
+              *)
+                echo "::error::${{ matrix.target }} .vsix records $entry without an execute bit: ${line%% *}"
+                exit 1
+                ;;
+            esac
+          fi
+
       - name: upload to release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -10,7 +10,7 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 import { findClaude, prependDir, type ResolvedClaude } from './claude';
 import { buildConfigSeed, renderConfigSeed, type Defaults } from './config';
-import { resolveBinary, runArgs } from './launch';
+import { needsChmod, resolveBinary, runArgs } from './launch';
 
 const TERMINAL_NAME = 'acy';
 const RELEASES_URL = 'https://github.com/hweeks/always-click-yes/releases/latest';
@@ -93,6 +93,14 @@ async function launch(context: vscode.ExtensionContext, continuePrior: boolean):
     return;
   }
 
+  // VS Code's install path drops the executable bit off files unpacked from a
+  // .vsix, so a bundled binary can arrive unrunnable however vsce recorded it.
+  // Only bundled binaries: a setting or a PATH hit is the user's own file, and
+  // we have no business changing its mode.
+  if (bin.source === 'bundled' && process.platform !== 'win32' && !ensureExecutable(bin.path)) {
+    return;
+  }
+
   // acy has nothing to supervise without claude, and since it is spawned with
   // no shell the failure would surface as a dead terminal, not a message.
   const claude = await resolveClaude(folder);
@@ -128,6 +136,26 @@ async function launch(context: vscode.ExtensionContext, continuePrior: boolean):
         : undefined,
   });
   terminal.show();
+}
+
+/**
+ * Restores the executable bit VS Code's unpack may have stripped, reporting
+ * false if it could not. A failure has to stop the launch: the terminal is the
+ * binary itself, so launching regardless would replace this message with a
+ * window that vanishes on a bare EACCES.
+ */
+function ensureExecutable(binPath: string): boolean {
+  try {
+    if (needsChmod(fs.statSync(binPath).mode)) {
+      fs.chmodSync(binPath, 0o755);
+    }
+    return true;
+  } catch {
+    void vscode.window.showErrorMessage(
+      `acy's bundled binary is not executable and could not be fixed: ${binPath} — run \`chmod +x ${binPath}\`, or set "acy.binaryPath" to a copy you can run.`,
+    );
+    return false;
+  }
 }
 
 /**

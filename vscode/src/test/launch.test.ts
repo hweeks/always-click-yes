@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import * as path from 'path';
-import { bundledBinaryPath, exeName, findOnPath, resolveBinary, runArgs } from '../launch';
+import { bundledBinaryPath, exeName, findOnPath, needsChmod, resolveBinary, runArgs } from '../launch';
 
 const never = (_p: string) => false;
 
@@ -66,6 +66,20 @@ test('windows PATH uses semicolons and acy.exe', () => {
 test('empty PATH entries are skipped, and a miss is undefined', () => {
   assert.equal(findOnPath('::/nowhere:', 'linux', never), undefined);
   assert.equal(findOnPath(undefined, 'linux', never), undefined);
+});
+
+test('needsChmod fires only when no execute bit survives', () => {
+  assert.equal(needsChmod(0o644), true);
+  assert.equal(needsChmod(0o666), true);
+  assert.equal(needsChmod(0o000), true);
+  assert.equal(needsChmod(0o755), false);
+  assert.equal(needsChmod(0o700), false); // owner-only is enough
+  assert.equal(needsChmod(0o111), false);
+});
+
+test('needsChmod ignores the file-type bits a raw stat mode carries', () => {
+  assert.equal(needsChmod(0o100755), false); // S_IFREG | 0755
+  assert.equal(needsChmod(0o100644), true); // S_IFREG | 0644
 });
 
 test('runArgs carries only the invocation, never settings', () => {
