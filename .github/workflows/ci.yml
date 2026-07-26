@@ -63,11 +63,50 @@ jobs:
           fi
       - name: go vet
         run: go vet ./...
+      # The release matrix ships windows binaries but no CI runner exercises that
+      # GOOS — a compile-only check here keeps a broken windows build from
+      # surfacing for the first time inside a release job.
+      - name: cross-compile windows
+        env:
+          GOOS: windows
+          GOARCH: amd64
+          CGO_ENABLED: "0"
+        run: go build ./...
       - name: golangci-lint
         run: |
           curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh \
             | sh -s -- -b "$(go env GOPATH)/bin" v2.12.2
           "$(go env GOPATH)/bin/golangci-lint" run ./...
+
+  # The VS Code extension: lint, typecheck, unit tests, and a universal .vsix
+  # built on every PR so an installable artifact is one click away.
+  vscode:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: vscode
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: vscode/package-lock.json
+      - name: install
+        run: npm ci
+      - name: lint
+        run: npm run lint
+      - name: typecheck
+        run: npm run typecheck
+      - name: test
+        run: npm test
+      - name: package
+        run: npm run package
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vsix
+          path: vscode/*.vsix
+          if-no-files-found: error
 
   test:
     # internal/term's flushInput is per-GOOS — TIOCFLUSH (int*) on darwin, TCFLSH

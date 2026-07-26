@@ -115,6 +115,42 @@ acy run                    # in the project directory you want Claude to work in
 acy run --model opus --countdown 20s
 ```
 
+## VS Code
+
+The `vscode/` extension runs the same TUI in an integrated terminal: **ACY:
+Plan & Run**, **ACY: Continue Last Run**, and a `▶ acy` status-bar button, with
+one supervisor terminal per window (a second run reveals it, never
+double-launches). Each release attaches per-platform `.vsix` packages with the
+acy binary bundled (`darwin-arm64`, `darwin-x64`, `linux-x64`, `linux-arm64`,
+`win32-x64` — the last experimental and untested at runtime) plus a `universal`
+one that uses `acy` from your `PATH`; install via **Extensions: Install from
+VSIX…**. See [`vscode/README.md`](vscode/README.md).
+
+## Configuration file: `.acy.json`
+
+A project can pin its run settings in a `.acy.json` at its root, so a bare
+`acy run` — or the VS Code extension, which passes no flags at all — needs no
+arguments:
+
+```json
+{
+  "model": "opus",
+  "claudeBin": "claude",
+  "countdown": "20s",
+  "log": "acy-debug.log",
+  "maxLines": 15,
+  "planTools": ["Read", "Grep", "Glob", "Bash"],
+  "useApiKey": false
+}
+```
+
+Every key is optional and maps to the flag of the same meaning; `countdown` is
+a Go duration string, and an explicit `"log": ""` disables logging. Precedence
+is defaults < `.acy.json` < explicit flags. Parsing is strict on purpose: an
+unknown key, a bare-number duration, or malformed JSON aborts the run rather
+than silently falling back to defaults the project tried to override. The
+transcript's opening lines say which file the settings came from.
+
 ## Local development
 
 Working on `acy` itself? The Makefile keeps the dogfood loop one command away:

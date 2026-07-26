@@ -53,7 +53,10 @@ for long-running tasks. Flow:
   subcommand (`client.go`) connects, forwards the tool request, and blocks for an
   allow/deny `Decision`. `Pending.Resolve` answers it.
 - `internal/config` — generates the `--settings` JSON that registers the PreToolUse hook
-  pointing at `<self> hook --socket <path>` (the binary is its own hook).
+  pointing at `<self> hook --socket <path>` (the binary is its own hook). Also loads the
+  project's `.acy.json` (`file.go`): strict parsing (unknown keys and bare-number durations
+  are errors), precedence defaults < file < explicit flags, decided per flag via pflag's
+  `Changed` (`applyFileConfig` in `cli/run.go`).
 - `internal/ui` — the Bubble Tea model. `model.go` (state + ingest), `update.go` (event
   routing + keys), `view.go` (header/footer/gate panel + help/resume/ask overlays),
   `render.go` (structured transcript entries → lipgloss, incl. `clampBlock` line-capped
@@ -73,6 +76,13 @@ for long-running tasks. Flow:
   it can never run in CI.
 - `internal/cli` — Cobra commands: `run` (the TUI) and the hidden `hook`.
 - `internal/alog` — process-wide debug logger (off until `Open`); the `--log` flag drives it.
+- `vscode/` — the VS Code extension, a deliberate thin launcher: it resolves the acy binary
+  (`acy.binaryPath` setting → `bin/acy` bundled in a platform build → PATH) and runs it *as*
+  the terminal shell (no user shell, no quoting, the terminal dies with the supervisor).
+  Run settings travel in `.acy.json`, never flags, so CLI and extension can't disagree. The
+  decision logic lives vscode-free in `src/launch.ts` / `src/config.ts` and is tested with
+  plain `node --test` (`npm test` in `vscode/`); `npm run package` builds an installable
+  `.vsix`. One supervisor terminal per window — a second run reveals, never relaunches.
 
 ## Hard-won facts about `claude` stream-json (verified live, ~v2.1.207)
 
@@ -216,3 +226,13 @@ Releases are automatic: merging to `main` makes release-please open or update a
 commit, writes `CHANGELOG.md`, and `.github/workflows/release.yml` attaches the
 cross-compiled binaries. Don't tag by hand; `.release-please-manifest.json` tracks the
 current version and hand-tagging desyncs it.
+
+A release carries three artifact families: tarballs for darwin/linux (amd64+arm64), a zip
+for windows/amd64 (compiles cleanly behind the existing build tags, but the gate's unix
+sockets are unverified there — treat it as experimental), and `.vsix` packages for the VS
+Code extension — one per platform target with the matching binary bundled at `bin/`, plus
+a `universal` one with no binary. The vsix version is stamped from the tag at package time
+(`npm version` in the workflow), the same philosophy as the binaries' ldflags stamp:
+`vscode/package.json` stays at `0.0.0` in git and release-please never touches it. CI
+cross-compiles `GOOS=windows` on every PR so a broken windows build can't first surface
+inside a release job.

@@ -27,14 +27,15 @@ import (
 
 // Config holds the wiring the model needs beyond the driver.
 type Config struct {
-	Ctx       context.Context      // cancels driver processes on shutdown
-	Launcher  Launcher             // starts a claude driver for a given phase
-	GateReqs  <-chan *gate.Pending // nil if no gate is active
-	AskReqs   <-chan *mcp.Pending  // questions from acy's MCP server (nil = disabled)
-	Countdown time.Duration        // auto-approve delay per gated tool, and per question in AUTO-RUN
-	LogPath   string               // debug log file path (shown in the UI), if any
-	MaxLines  int                  // per-block line cap in the transcript (default 10)
-	Cwd       string               // the project this run belongs to (snapshot key)
+	Ctx        context.Context      // cancels driver processes on shutdown
+	Launcher   Launcher             // starts a claude driver for a given phase
+	GateReqs   <-chan *gate.Pending // nil if no gate is active
+	AskReqs    <-chan *mcp.Pending  // questions from acy's MCP server (nil = disabled)
+	Countdown  time.Duration        // auto-approve delay per gated tool, and per question in AUTO-RUN
+	LogPath    string               // debug log file path (shown in the UI), if any
+	ConfigPath string               // .acy.json the run's settings came from (shown in the UI), if any
+	MaxLines   int                  // per-block line cap in the transcript (default 10)
+	Cwd        string               // the project this run belongs to (snapshot key)
 
 	// Sessions lists resumable sessions for the /resume picker (nil = disabled).
 	Sessions func() ([]session.Info, error)
@@ -192,6 +193,9 @@ func New(drv *driver.Driver, cfg Config) Model {
 	} else {
 		m.appendEntry(entry{kind: eMeta, body: "Plan your task with Claude below. When the plan is ready, press Ctrl+G"})
 		m.appendEntry(entry{kind: eMeta, body: "to arm — auto-run then approves each step after a countdown."})
+	}
+	if cfg.ConfigPath != "" {
+		m.appendEntry(entry{kind: eMeta, body: "settings from " + cfg.ConfigPath})
 	}
 	if m.logPath != "" {
 		m.appendEntry(entry{kind: eMeta, body: "logging to " + m.logPath})

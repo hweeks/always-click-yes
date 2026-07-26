@@ -43,6 +43,10 @@ jobs:
           - { goos: darwin, goarch: amd64 }
           - { goos: linux, goarch: amd64 }
           - { goos: linux, goarch: arm64 }
+          # Windows compiles cleanly (the unix-only ioctls are behind build tags)
+          # but has never been run in anger: the gate's unix sockets exist on
+          # Windows 10+, unverified here. Shipped as experimental.
+          - { goos: windows, goarch: amd64 }
     steps:
       - uses: actions/checkout@v4
         with:
@@ -61,21 +65,103 @@ jobs:
           CGO_ENABLED: "0"
           TAG: ${{ needs.release-please.outputs.tag }}
         run: |
+          bin=acy
+          [ "$GOOS" = "windows" ] && bin=acy.exe
           go build -trimpath \
             -ldflags "-s -w -X github.com/hweeks/always-click-yes/internal/version.stamped=${TAG}" \
-            -o acy .
-          ./acy --version || true  # only runs on the native target; informational
+            -o "$bin" .
+          [ -x ./acy ] && ./acy --version || true  # only runs on the native target; informational
 
+      # Windows gets a zip (its native archive); everything else keeps tar.gz.
       - name: package
         env:
           TAG: ${{ needs.release-please.outputs.tag }}
         run: |
-          archive="acy_${TAG}_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz"
-          tar czf "$archive" acy README.md
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            archive="acy_${TAG}_${{ matrix.goos }}_${{ matrix.goarch }}.zip"
+            zip "$archive" acy.exe README.md
+          else
+            archive="acy_${TAG}_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz"
+            tar czf "$archive" acy README.md
+          fi
           shasum -a 256 "$archive" > "$archive.sha256"
+          echo "ARCHIVE=$archive" >> "$GITHUB_ENV"
 
       - name: upload to release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ needs.release-please.outputs.tag }}
-        run: gh release upload "$TAG" acy_*.tar.gz acy_*.sha256 --clobber
+        run: gh release upload "$TAG" "$ARCHIVE" "$ARCHIVE.sha256" --clobber
+
+  # Packages the VS Code extension: one platform-specific .vsix per target with
+  # the matching acy binary bundled at vscode/bin/, plus a universal .vsix with
+  # no binary (it resolves acy via the setting or PATH). The version is stamped
+  # at package time from the tag — the same philosophy as the ldflags stamp
+  # above, and it keeps release-please out of vscode/package.json entirely.
+  # This target matrix is the exact layout the Marketplace's platform-specific
+  # extension support expects, so publishing later is one `vsce publish` away.
+  vsix:
+    needs: release-please
+    if: needs.release-please.outputs.released == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: darwin-arm64, goos: darwin, goarch: arm64 }
+          - { target: darwin-x64, goos: darwin, goarch: amd64 }
+          - { target: linux-x64, goos: linux, goarch: amd64 }
+          - { target: linux-arm64, goos: linux, goarch: arm64 }
+          - { target: win32-x64, goos: windows, goarch: amd64 }
+          - { target: universal }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-please.outputs.tag }}
+      - uses: actions/setup-go@v5
+        if: matrix.goos != ''
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: vscode/package-lock.json
+
+      - name: build bundled binary
+        if: matrix.goos != ''
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+          TAG: ${{ needs.release-please.outputs.tag }}
+        run: |
+          bin=acy
+          [ "$GOOS" = "windows" ] && bin=acy.exe
+          mkdir -p vscode/bin
+          go build -trimpath \
+            -ldflags "-s -w -X github.com/hweeks/always-click-yes/internal/version.stamped=${TAG}" \
+            -o "vscode/bin/$bin" .
+
+      - name: package vsix
+        working-directory: vscode
+        env:
+          TAG: ${{ needs.release-please.outputs.tag }}
+        run: |
+          npm ci
+          npm version --no-git-tag-version "${TAG#v}"
+          npm run compile
+          if [ "${{ matrix.target }}" != "universal" ]; then
+            npx vsce package --skip-license --target "${{ matrix.target }}" -o "acy_${TAG}_${{ matrix.target }}.vsix"
+          else
+            npx vsce package --skip-license -o "acy_${TAG}_universal.vsix"
+          fi
+
+      - name: upload to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.release-please.outputs.tag }}
+        run: gh release upload "$TAG" vscode/acy_*.vsix --clobber

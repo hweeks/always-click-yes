@@ -1,0 +1,118 @@
+{
+  "name": "always-click-yes",
+  "displayName": "Always Click Yes (acy)",
+  "description": "Supervise long-running Claude Code tasks: plan, arm, and let acy approve each permission prompt on a countdown — right in a VS Code terminal.",
+  "version": "0.0.0",
+  "publisher": "hweeks",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hweeks/always-click-yes.git",
+    "directory": "vscode"
+  },
+  "engines": {
+    "vscode": "^1.90.0",
+    "node": ">=20"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "claude",
+    "claude-code",
+    "agent",
+    "supervisor",
+    "acy"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "acy.run",
+        "title": "Plan & Run",
+        "category": "ACY"
+      },
+      {
+        "command": "acy.continue",
+        "title": "Continue Last Run",
+        "category": "ACY"
+      },
+      {
+        "command": "acy.initConfig",
+        "title": "Create .acy.json",
+        "category": "ACY"
+      }
+    ],
+    "jsonValidation": [
+      {
+        "fileMatch": ".acy.json",
+        "url": "./schemas/acy.schema.json"
+      }
+    ],
+    "configuration": {
+      "title": "Always Click Yes (acy)",
+      "properties": {
+        "acy.binaryPath": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Path to the `acy` binary. Leave empty to use the binary bundled with a platform-specific build of this extension, or `acy` from your `PATH`.",
+          "scope": "machine-overridable"
+        },
+        "acy.defaults": {
+          "type": "object",
+          "markdownDescription": "Seed values for **ACY: Create .acy.json**. Only values set here make it into the file — and once the file exists, *it* is the source of truth: these settings are never consulted at launch.",
+          "additionalProperties": false,
+          "properties": {
+            "model": {
+              "type": "string",
+              "description": "Model alias or name (e.g. sonnet, opus)."
+            },
+            "claudeBin": {
+              "type": "string",
+              "description": "Path to the claude binary."
+            },
+            "countdown": {
+              "type": "string",
+              "description": "Auto-approve delay per gated tool, as a Go duration string (e.g. 20s)."
+            },
+            "log": {
+              "type": "string",
+              "description": "Debug log file path."
+            },
+            "maxLines": {
+              "type": "integer",
+              "description": "Max lines shown per tool call/result/thinking block."
+            },
+            "planTools": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The built-in tools claude may use while planning."
+            },
+            "useApiKey": {
+              "type": "boolean",
+              "description": "Bill ANTHROPIC_API_KEY instead of the claude.ai login."
+            }
+          }
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src",
+    "test": "tsc -p tsconfig.test.json && node --test \"out-test/test/*.test.js\"",
+    "package": "npm run compile && vsce package --skip-license"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/vscode": "^1.90.0",
+    "@vscode/vsce": "^3.0.0",
+    "esbuild": "^0.25.0",
+    "eslint": "^9.0.0",
+    "typescript": "^5.5.0",
+    "typescript-eslint": "^8.0.0"
+  }
+}

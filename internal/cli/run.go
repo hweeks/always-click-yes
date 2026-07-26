@@ -42,6 +42,41 @@ type Flags struct {
 
 	Cwd     string // working directory for claude; "" = acy's own
 	HookBin string // binary the PreToolUse hook re-invokes; "" = this executable
+
+	// ConfigPath is the .acy.json the settings were overlaid from, "" if none.
+	// Not a flag: runSupervisor stamps it so the UI can say where its settings
+	// came from.
+	ConfigPath string
+}
+
+// applyFileConfig overlays a .acy.json onto the flags. Precedence is
+// defaults < file < explicit flags: a field only moves when the file sets it
+// AND the corresponding flag was not given on the command line. `changed`
+// answers by flag name — cobra's FlagSet.Changed — so the overlay can tell a
+// defaulted flag from an explicit one.
+func applyFileConfig(f *Flags, c config.File, changed func(string) bool) {
+	if c.Model != "" && !changed("model") {
+		f.Model = c.Model
+	}
+	if c.ClaudeBin != "" && !changed("claude-bin") {
+		f.Bin = c.ClaudeBin
+	}
+	if c.Countdown != nil && !changed("countdown") {
+		f.Countdown = time.Duration(*c.Countdown)
+	}
+	if c.Log != nil && !changed("log") {
+		f.LogPath = *c.Log
+	}
+	if c.MaxLines != nil && !changed("max-lines") {
+		f.MaxLines = *c.MaxLines
+	}
+	if c.PlanTools != nil && !changed("plan-tools") {
+		f.PlanTools = c.PlanTools
+	}
+	if c.UseAPIKey != nil && !changed("use-api-key") {
+		f.UseAPIKey = *c.UseAPIKey
+	}
+	f.ConfigPath = c.Path
 }
 
 // defaultPlanTools is the built-in registry the plan phase runs with (--tools).
@@ -62,7 +97,10 @@ func newRunCmd() *cobra.Command {
 		Use:   "run",
 		Short: "Launch the supervisor TUI",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runSupervisor(cmd.Context(), f)
+			// root re-exposes this command's flags via AddFlagSet — the same
+			// pflag instances — so Changed is accurate no matter which command
+			// actually parsed the line.
+			return runSupervisor(cmd.Context(), f, cmd.Flags().Changed)
 		},
 	}
 	cmd.Flags().StringVar(&f.Model, "model", "", "model to use (e.g. sonnet, opus); default = claude's default")
@@ -156,6 +194,9 @@ func NewSupervisor(ctx context.Context, f Flags) (*Supervisor, error) {
 			logPath = p
 			closers = append(closers, alog.Close)
 			alog.Printf("=== always-click-yes run: model=%q countdown=%s ===", f.Model, f.Countdown)
+			if f.ConfigPath != "" {
+				alog.Printf("config: loaded %s", f.ConfigPath)
+			}
 		}
 	}
 
@@ -254,30 +295,48 @@ func NewSupervisor(ctx context.Context, f Flags) (*Supervisor, error) {
 	}
 
 	model := ui.New(nil, ui.Config{
-		Ctx:       ctx,
-		Launcher:  launcher,
-		GateReqs:  srv.Requests(),
-		AskReqs:   bridge.Requests(),
-		Countdown: f.Countdown,
-		LogPath:   logPath,
-		MaxLines:  f.MaxLines,
-		Cwd:       cwd,
-		Resume:    resumeID,
-		LoadState: state.Load,
-		SaveState: state.Save,
-		Replay:    func(id string) ([]driver.Event, error) { return session.Replay(cwd, id) },
-		Sessions:  func() ([]session.Info, error) { return session.List(cwd) },
+		Ctx:        ctx,
+		Launcher:   launcher,
+		GateReqs:   srv.Requests(),
+		AskReqs:    bridge.Requests(),
+		Countdown:  f.Countdown,
+		LogPath:    logPath,
+		ConfigPath: f.ConfigPath,
+		MaxLines:   f.MaxLines,
+		Cwd:        cwd,
+		Resume:     resumeID,
+		LoadState:  state.Load,
+		SaveState:  state.Save,
+		Replay:     func(id string) ([]driver.Event, error) { return session.Replay(cwd, id) },
+		Sessions:   func() ([]session.Info, error) { return session.List(cwd) },
 	})
 
 	return &Supervisor{Model: model, Close: closeAll}, nil
 }
 
-func runSupervisor(ctx context.Context, f Flags) error {
+func runSupervisor(ctx context.Context, f Flags, changed func(string) bool) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+
+	// Overlay the project's .acy.json before wiring anything: the settings it
+	// carries (log path, countdown, model …) shape the supervisor itself. A file
+	// that exists but doesn't parse aborts the run — an unattended tool must not
+	// quietly fall back to defaults its project tried to override.
+	cwd := f.Cwd
+	if cwd == "" {
+		var err error
+		if cwd, err = os.Getwd(); err != nil {
+			return fmt.Errorf("cwd: %w", err)
+		}
+	}
+	if file, found, err := config.LoadFile(cwd); err != nil {
+		return err
+	} else if found {
+		applyFileConfig(&f, file, changed)
+	}
 
 	sup, err := NewSupervisor(ctx, f)
 	if err != nil {
