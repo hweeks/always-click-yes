@@ -152,11 +152,13 @@ acy run --model opus --countdown 20s
 The `vscode/` extension runs the same TUI in an integrated terminal: **ACY:
 Plan & Run**, **ACY: Continue Last Run**, and a `▶ acy` status-bar button, with
 one supervisor terminal per window (a second run reveals it, never
-double-launches). Each release attaches per-platform `.vsix` packages with the
-acy binary bundled (`darwin-arm64`, `darwin-x64`, `linux-x64`, `linux-arm64`,
-`win32-x64` — the last experimental and untested at runtime) plus a `universal`
-one that uses `acy` from your `PATH`; install via **Extensions: Install from
-VSIX…**. See [`vscode/README.md`](vscode/README.md).
+double-launches). Install it from the VS Code Marketplace (`ext install
+hweeks.always-click-yes`), which hands you the package built for your platform.
+Each release also attaches those `.vsix` packages with the acy binary bundled
+(`darwin-arm64`, `darwin-x64`, `linux-x64`, `linux-arm64`, `win32-x64` — the
+last experimental and untested at runtime) plus a `universal` one that uses
+`acy` from your `PATH`, installable via **Extensions: Install from VSIX…**. See
+[`vscode/README.md`](vscode/README.md).
 
 ## Configuration file: `.acy.json`
 

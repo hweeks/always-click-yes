@@ -108,8 +108,15 @@ and let the interface enforce the rest.
 - `vscode/` — the VS Code extension, a deliberate thin launcher: it resolves the acy binary
   (`acy.binaryPath` setting → `bin/acy` bundled in a platform build → PATH) and runs it *as*
   the terminal shell (no user shell, no quoting, the terminal dies with the supervisor).
+  It also discovers the `claude` CLI (`src/claude.ts`: `.acy.json` `claudeBin` → the
+  `acy.defaults.claudeBin` setting → `PATH` → well-known install dirs) and warns at startup
+  when there is none — acy has nothing to supervise without it, so the alternative is a run
+  that dies on its first turn. A claude found off `PATH` gets its directory prepended to the
+  terminal's `PATH`: the shell-less acy inherits that environment verbatim and could not
+  exec it otherwise.
   Run settings travel in `.acy.json`, never flags, so CLI and extension can't disagree. The
-  decision logic lives vscode-free in `src/launch.ts` / `src/config.ts` and is tested with
+  decision logic lives vscode-free in `src/launch.ts` / `src/config.ts` / `src/claude.ts`
+  and is tested with
   plain `node --test` (`npm test` in `vscode/`); `npm run package` builds an installable
   `.vsix`. One supervisor terminal per window — a second run reveals, never relaunches.
 
@@ -336,3 +343,26 @@ a `universal` one with no binary. The vsix version is stamped from the tag at pa
 `vscode/package.json` stays at `0.0.0` in git and release-please never touches it. CI
 cross-compiles `GOOS=windows` on every PR so a broken windows build can't first surface
 inside a release job.
+
+A release also **publishes those `.vsix` packages to the VS Code Marketplace**
+(`publish-marketplace`, same workflow). It downloads the assets the `vsix` job just
+uploaded instead of re-packaging, so the Marketplace and the Release page serve the same
+bytes, and it pushes every target in one `vsce publish --packagePath …` — the flag is
+variadic, and a single call means a version lands whole rather than half-published.
+
+That job depends on one-time human setup; none of it can be done from CI:
+
+1. Register the publisher **`hweeks`** at <https://marketplace.visualstudio.com/manage>,
+   with that exact ID — it must match `publisher` in `vscode/package.json`.
+2. Mint an Azure DevOps PAT scoped to **All accessible organizations** with
+   **Marketplace → Manage**. Scoping it to a single organization is the easy mistake and
+   the expensive one: it returns 401 with no useful message.
+3. Check it with `npx vsce verify-pat hweeks`.
+4. Store it as the repo secret **`VSCE_PAT`**.
+
+Until that secret exists the publish job prints a `::notice::` and exits 0 — the release
+still succeeds, it just doesn't reach the Marketplace. The guard lives in the step body
+because a `secrets` reference is not allowed in a job-level `if:`.
+
+Standing caveat: the repo has no `LICENSE` file, so packaging passes `--skip-license` and
+the Marketplace listing will read "License: Unknown" until one is added.
