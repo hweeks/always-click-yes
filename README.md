@@ -378,3 +378,8 @@ What it covers:
 The narrower live tests (`ACY_LIVE=1` in `internal/driver`, `internal/gate`,
 `internal/ui`) probe single seams: the stream-json wire format, the hook chain, and
 whether `AskUserQuestion` has become real yet.
+
+## License
+
+[WTFPL v2](LICENSE) — you just do what the fuck you want to. It ships in the release
+archives and in the extension package, so whatever you install already carries it.

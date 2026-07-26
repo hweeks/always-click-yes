@@ -364,5 +364,10 @@ Until that secret exists the publish job prints a `::notice::` and exits 0 — t
 still succeeds, it just doesn't reach the Marketplace. The guard lives in the step body
 because a `secrets` reference is not allowed in a job-level `if:`.
 
-Standing caveat: the repo has no `LICENSE` file, so packaging passes `--skip-license` and
-the Marketplace listing will read "License: Unknown" until one is added.
+The project is licensed **WTFPL v2**. The `LICENSE` file lives twice — once at the repo
+root, once at `vscode/LICENSE` — because `vsce` looks for it in the *extension* root, not
+the repo root, and the copy is what puts the license on the Marketplace listing. Keep them
+identical, and keep `"license": "WTFPL"` in `vscode/package.json` (a valid SPDX id; vsce
+warns without it and the listing reads it). Packaging skips no license check: if
+`vsce package` starts complaining about the license, the copy has gone missing — silencing
+the check would only hide it.

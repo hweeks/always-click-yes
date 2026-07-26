@@ -4,6 +4,7 @@
   "description": "Supervise long-running Claude Code tasks: plan, arm, and let acy approve each permission prompt on a countdown — right in a VS Code terminal.",
   "version": "0.0.0",
   "publisher": "hweeks",
+  "license": "WTFPL",
   "repository": {
     "type": "git",
     "url": "https://github.com/hweeks/always-click-yes.git",
@@ -127,7 +128,7 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint src",
     "test": "tsc -p tsconfig.test.json && node --test \"out-test/test/*.test.js\"",
-    "package": "npm run compile && vsce package --skip-license"
+    "package": "npm run compile && vsce package"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

@@ -71,3 +71,7 @@ acy is an experiment in total trust: you make contact at the plan and at the
 end, and in between the machine runs unattended, approving its own way to the
 finish. Read the [project README](https://github.com/hweeks/always-click-yes)
 before leaving it alone with anything you love. The veto key is `s`.
+
+## License
+
+[WTFPL v2](LICENSE) — you just do what the fuck you want to.
