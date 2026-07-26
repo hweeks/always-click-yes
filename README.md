@@ -251,6 +251,7 @@ Type these in the message box (they're handled by `acy`, not forwarded to Claude
 | `/clear` | clear the transcript view |
 | `/log` | show the debug-log path |
 | `/tokens` | the token ledger: current context size, cache reads and cost, split parent vs children. This is the number to watch — the parent's line should stay flat while the children's climbs |
+| `/tasks` | the delegated-task ledger: one row per task with its outcome, cost and cache reads. `/tokens` says what the run spent; this says what it spent it *on* |
 | `/done` | end the run by hand, if the session stopped without calling `Finish` |
 | `/quit` | quit (same as `Ctrl+C`) |
 
