@@ -29,6 +29,14 @@ type File struct {
 	PlanTools []string  `json:"planTools,omitempty"`
 	UseAPIKey *bool     `json:"useApiKey,omitempty"`
 
+	// Child knobs: a dispatched task is a separate process doing the actual
+	// work, so it can be priced and paced separately from the session you talk
+	// to. childModel is usually the most effective one — children do the bulk
+	// of the tokens.
+	ChildModel  string   `json:"childModel,omitempty"`
+	ChildEffort string   `json:"childEffort,omitempty"`
+	TaskBudget  *float64 `json:"taskBudget,omitempty"`
+
 	// Path is where the file was read from, for the "loaded config" line.
 	Path string `json:"-"`
 }

@@ -8,6 +8,9 @@ export interface Defaults {
   log?: string;
   maxLines?: number;
   planTools?: string[];
+  childModel?: string;
+  childEffort?: string;
+  taskBudget?: number;
   useApiKey?: boolean;
 }
 

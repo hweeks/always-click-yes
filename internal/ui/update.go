@@ -11,6 +11,7 @@ import (
 
 	"github.com/hweeks/always-click-yes/internal/alog"
 	"github.com/hweeks/always-click-yes/internal/gate"
+	"github.com/hweeks/always-click-yes/internal/mcp"
 )
 
 // transcriptKeyMap restricts the viewport to deliberate scroll keys. The bubbles
@@ -146,18 +147,9 @@ func (m Model) update(msg tea.Msg) (Model, tea.Cmd) {
 		// not redundant — a resume knows the session id before its process exists, and
 		// arming into that gap would launch a second claude for the same session.
 		if msg.Type == tea.KeyCtrlG && m.phase == PhasePlan && m.sessionID != "" && m.drv != nil {
-			m.capturePlan()
-			m.appendEntry(entry{kind: eGood, body: "▶ arming — resuming session in auto-run…"})
-			m.planReady = false
-			m.status = "arming…"
-			m.persist()
+			m.arm()
 			m.rebuild()
-			return m, launchCmd(m.ctx, m.launcher, LaunchSpec{
-				Phase:    PhaseAutoRun,
-				ResumeID: m.sessionID,
-				Model:    m.nextModel,
-				Kickoff:  true, // arming is the one launch that starts the work
-			})
+			return m, nil
 		}
 		if msg.Type == tea.KeyEnter {
 			cmd := m.handleEnter()
@@ -214,9 +206,22 @@ func (m Model) update(msg tea.Msg) (Model, tea.Cmd) {
 		return m, nil
 
 	case askMsg:
-		m.openAsk(msg.p)
+		// One socket, two very different waits: a question blocks on a human, a
+		// dispatch blocks on a whole child process running a task.
+		if msg.p.Req.Tool == mcp.ToolDispatch {
+			m.startDispatch(msg.p)
+		} else {
+			m.openAsk(msg.p)
+		}
 		m.rebuild()
 		cmds = append(cmds, waitAsk(m.askReqs))
+
+	case childMsg:
+		m.ingestChild(msg.ev)
+		m.rebuild()
+		if m.dispatcher != nil {
+			cmds = append(cmds, waitChild(m.dispatcher.Events()))
+		}
 
 	case askClosedMsg:
 		// no more questions will arrive; nothing to re-arm

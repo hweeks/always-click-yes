@@ -81,6 +81,9 @@ func (m Model) helpView() string {
 		cmd("/model <name>", "set the model for the next launched/resumed session"),
 		cmd("/clear", "clear the transcript view"),
 		cmd("/log", "show the debug-log path"),
+		cmd("/tokens", "token ledger: context size, cache reads and cost by spender"),
+		cmd("/tasks", "delegated-task ledger: outcome, cost and cache reads per task"),
+		cmd("/done", "end the run by hand, if the session stopped without calling Finish"),
 		cmd("/quit", "quit (same as Ctrl+C)"),
 		"",
 		lipgloss.NewStyle().Bold(true).Foreground(colDim).Render("keys"),
@@ -192,7 +195,10 @@ func (m Model) headerView() string {
 	if m.sessionID != "" {
 		meta = append(meta, "session "+short(m.sessionID))
 	}
-	meta = append(meta, fmt.Sprintf("$%.4f", m.totalCost()))
+	meta = append(meta, fmt.Sprintf("$%.4f", m.grandTotalCost()))
+	if t := m.tokenSummary(); t != "" {
+		meta = append(meta, t)
+	}
 	if b := m.billing(); b != "" {
 		meta = append(meta, b)
 	}
@@ -307,7 +313,14 @@ func (m Model) gateView() string {
 		state = lipgloss.NewStyle().Bold(true).Foreground(colErr).Render("⏸  PAUSED         ")
 	}
 
-	desc := badge("⚙ "+front.p.Input.ToolName, colTool) + " " +
+	// Name the task when a delegated child raised this. Approving an edit reads
+	// very differently depending on whether you asked for it or a task you
+	// dispatched ten minutes ago did.
+	desc := ""
+	if front.task != "" {
+		desc = lipgloss.NewStyle().Foreground(colPlan).Render("["+front.task+"] ") + " "
+	}
+	desc += badge("⚙ "+front.p.Input.ToolName, colTool) + " " +
 		lipgloss.NewStyle().Foreground(colDim).Render(firstLine(toolArgs(front.p.Input.ToolInput)))
 	if n := len(m.pending) - 1; n > 0 {
 		desc += lipgloss.NewStyle().Foreground(colDim).Render(fmt.Sprintf("  (+%d queued)", n))

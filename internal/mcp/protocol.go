@@ -32,9 +32,34 @@ const ServerName = "acy"
 // "mcp__<server>__" prefix in the assistant event stream; ui.baseToolName strips
 // it back off.
 const (
-	ToolAsk  = "AskUserQuestion"
-	ToolPlan = "PresentPlan"
+	ToolAsk      = "AskUserQuestion"
+	ToolPlan     = "PresentPlan"
+	ToolDispatch = "Dispatch"
+	ToolFinish   = "Finish"
 )
+
+// Role says which side of the run an `acy mcp` process is serving. It is fixed
+// at spawn time by the --role flag, because the two sides need different tools:
+// a parent delegates, a child does the work.
+//
+// Without this a child would inherit --mcp-config from its parent, gain Dispatch
+// along with everything else, and be able to spawn children of its own — an
+// unbounded tree of processes with no supervision and no budget.
+type Role string
+
+const (
+	RoleParent Role = "parent"
+	RoleChild  Role = "child"
+)
+
+// ParseRole defaults to parent: an unrecognised or absent role should produce
+// the supervised, fully-featured session rather than silently disarming it.
+func ParseRole(s string) Role {
+	if Role(s) == RoleChild {
+		return RoleChild
+	}
+	return RoleParent
+}
 
 // Qualified returns the name claude uses for one of our tools in the event stream
 // and in --allowedTools.
@@ -173,12 +198,121 @@ const PlanRecorded = "Plan recorded and shown to the human.\n\n" +
 const SupervisorGone = "(the supervisor is unavailable, so this question could not be put to " +
 	"anyone — proceed with your best judgment)"
 
-func toolDefs() []toolDef {
-	return []toolDef{
+// DispatchNotArmed is returned when the parent calls Dispatch before the human
+// has armed the run.
+//
+// It replaces about sixty words of "you cannot leave this phase, there is no
+// tool for it, do not look for one" that used to sit in the plan-phase system
+// prompt and be re-read on every single turn. The model now learns it at the
+// one moment it is relevant — when it tries — and pays nothing for it otherwise.
+const DispatchNotArmed = "Dispatch is not available yet: this run has not been armed.\n\n" +
+	"A human reads your plan and presses Ctrl+G, and that keystroke is the only thing that starts " +
+	"the work. Nothing you can do here will start it. Present your plan and stop."
+
+// DispatchUnavailable is returned when the supervisor has no dispatcher wired
+// at all. Like SupervisorGone this fails open, because the caller's turn is
+// blocked on this reply.
+const DispatchUnavailable = "(delegation is not available in this session, so this task was not run — " +
+	"say so plainly rather than reporting it as done)"
+
+const dispatchDescription = "Hand one task to a fresh engineer and block until they report back. " +
+	"They have the full toolset — editing, shell, tests — and they begin with no memory of this " +
+	"conversation: they cannot see the plan, the user's messages, or any earlier report, so the task " +
+	"has to stand on its own. They work, verify, return a structured report, and their session ends. " +
+	"Scope each task so its report can honestly say 'completed', and read that report before you " +
+	"dispatch the next one."
+
+func toolDefs(role Role) []toolDef {
+	defs := []toolDef{
 		{Name: ToolAsk, Description: askDescription, InputSchema: json.RawMessage(askSchema)},
-		{Name: ToolPlan, Description: planDescription, InputSchema: json.RawMessage(planSchema)},
 	}
+	if role == RoleChild {
+		// A child asks questions and does work. It does not plan, and it very
+		// deliberately does not delegate.
+		return defs
+	}
+	return append(defs,
+		toolDef{Name: ToolPlan, Description: planDescription, InputSchema: json.RawMessage(planSchema)},
+		toolDef{Name: ToolDispatch, Description: dispatchDescription, InputSchema: json.RawMessage(DispatchSchema)},
+		toolDef{Name: ToolFinish, Description: finishDescription, InputSchema: json.RawMessage(finishSchema)},
+	)
 }
+
+const finishDescription = "End the run: the approved work is done and you have seen it verified. " +
+	"This hands control back to the human, who reviews the work in this same session — so say what " +
+	"you actually confirmed, not what you assume. If work remains, do not call this."
+
+const finishSchema = `{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["outcome", "summary"],
+  "properties": {
+    "outcome": {
+      "type": "string",
+      "enum": ["completed", "abandoned"],
+      "description": "completed — the approved work is done and verified. abandoned — the run is stopping without finishing; say why in summary."
+    },
+    "summary": {
+      "type": "string",
+      "maxLength": 800,
+      "description": "What the run achieved and what the human should look at first. Name anything you could not verify."
+    }
+  }
+}`
+
+// FinishRecorded is what Finish returns to the parent. Answered locally by the
+// `acy mcp` child: the supervisor reads the outcome out of the ordinary tool_use
+// event, exactly as it does for PresentPlan, so there is no socket to wedge on.
+//
+// This replaces the STATUS sentinel — seven lines of the old auto-run prompt
+// asking the model to end every reply with a magic string, read back by a
+// substring match that would fire if the model merely *mentioned* it. A tool
+// call cannot be accidentally matched, and cannot be missed; it can only not be
+// made, and the answer to that is a human, not another billed turn.
+const FinishRecorded = "Run marked finished. The human has been handed control and is reviewing " +
+	"your work in this session. Stop here; if they want more, they will say so."
+
+// DispatchSchema is the parameter shape the parent sees for Dispatch. It lives
+// here, with the rest of the wire contract, and internal/orchestrator decodes
+// against it.
+//
+// The descriptions carry the contract rather than the system prompt, because
+// this is the one place the parent reads at the moment it matters — as against
+// a prompt, which it re-reads on every turn whether relevant or not. "They begin
+// with no memory of this conversation" belongs here in particular: it is the
+// fact that makes a vague instruction fail, and this is where instructions get
+// written.
+const DispatchSchema = `{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["title", "instruction"],
+  "properties": {
+    "title": {
+      "type": "string",
+      "maxLength": 60,
+      "description": "A few words naming the task, for the human watching. For example: add the token ledger"
+    },
+    "instruction": {
+      "type": "string",
+      "description": "What to do, written to stand alone. The engineer who receives this has the full toolset and no memory of your conversation: they cannot see the plan, the user's messages, or any earlier report. State the change, where it goes, and any constraint that is not obvious from the code."
+    },
+    "context": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {"type": "string"},
+      "description": "Paths worth reading first. A shortcut, not a restriction — they can read anything."
+    },
+    "success": {
+      "type": "string",
+      "maxLength": 400,
+      "description": "How they will know it worked: the test to run, the behaviour to check. Without this they will decide for themselves what done means."
+    },
+    "budget_usd": {
+      "type": "number",
+      "description": "Optional spend ceiling for this one task. Omit unless you have a reason; the default is the supervisor's."
+    }
+  }
+}`
 
 func serverInfo() map[string]any {
 	return map[string]any{"name": ServerName, "version": version.String()}
@@ -190,6 +324,7 @@ func serverInfo() map[string]any {
 type Request struct {
 	Tool      string          `json:"tool"`        // bare name, e.g. AskUserQuestion
 	ToolUseID string          `json:"tool_use_id"` // correlates with the tool_use event
+	Role      Role            `json:"role"`        // which side of the run is asking
 	Args      json.RawMessage `json:"args"`
 }
 

@@ -87,7 +87,27 @@
               "items": {
                 "type": "string"
               },
-              "description": "The built-in tools claude may use while planning."
+              "description": "The built-in tool registry for the supervising session, in both phases (default: Read, Grep, Glob). Anything left out cannot be called at all — that is what keeps the session you talk to unable to change your code. Dispatched children always get the full set."
+            },
+            "childModel": {
+              "type": "string",
+              "description": "Model for dispatched tasks; empty means the same as model. Often the biggest saving available, since children do the bulk of the tokens."
+            },
+            "childEffort": {
+              "type": "string",
+              "enum": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max"
+              ],
+              "description": "Reasoning effort for dispatched tasks."
+            },
+            "taskBudget": {
+              "type": "number",
+              "minimum": 0,
+              "description": "Spend ceiling in USD for a single dispatched task (0 = none). A runaway child stops instead of running until you notice."
             },
             "useApiKey": {
               "type": "boolean",

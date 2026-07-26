@@ -120,3 +120,43 @@ func TestDurationRoundTrips(t *testing.T) {
 		t.Errorf("round trip: %v != %v", back, d)
 	}
 }
+
+// The child knobs are what let a run be priced: children do the bulk of the
+// tokens, so being able to point them at a cheaper model or cap them is the
+// main lever a user has after the architecture itself.
+func TestLoadFileReadsChildKnobs(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, `{"childModel":"sonnet","childEffort":"low","taskBudget":2.5}`)
+
+	got, found, err := LoadFile(dir)
+	if err != nil || !found {
+		t.Fatalf("LoadFile: found=%v err=%v", found, err)
+	}
+	if got.ChildModel != "sonnet" {
+		t.Errorf("ChildModel = %q, want sonnet", got.ChildModel)
+	}
+	if got.ChildEffort != "low" {
+		t.Errorf("ChildEffort = %q, want low", got.ChildEffort)
+	}
+	if got.TaskBudget == nil || *got.TaskBudget != 2.5 {
+		t.Errorf("TaskBudget = %v, want 2.5", got.TaskBudget)
+	}
+}
+
+// A zero budget is meaningful — it means "no ceiling" — so the field is a
+// pointer and an explicit 0 must survive as one.
+func TestTaskBudgetZeroIsExplicit(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, `{"taskBudget":0}`)
+
+	got, _, err := LoadFile(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.TaskBudget == nil {
+		t.Fatal("an explicit 0 should decode as a set value, not absent")
+	}
+	if *got.TaskBudget != 0 {
+		t.Errorf("TaskBudget = %v, want 0", *got.TaskBudget)
+	}
+}

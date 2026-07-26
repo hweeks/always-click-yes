@@ -88,7 +88,6 @@ func (m *Model) applyResume(msg resumeMsg) tea.Cmd {
 	// the composer refuse to send for the rest of the run.
 	m.ended = false
 	m.processing = false
-	m.preloaded = false
 	m.interrupted = false
 	m.planReady = false
 	m.ask = nil
@@ -98,9 +97,14 @@ func (m *Model) applyResume(msg resumeMsg) tea.Cmd {
 	m.entries = nil
 	m.turnText = ""
 	m.planBody = ""
-	m.rounds = 0
 	m.costSettled = 0
 	m.costCurrent = 0
+	m.parentTokens = state.Tokens{}
+	m.childTokens = state.Tokens{}
+	m.childCost = 0
+	m.dispatches = 0
+	m.tasks = nil
+	m.lastContext = 0
 
 	for _, ev := range msg.events {
 		m.ingestReplay(ev)
@@ -111,8 +115,14 @@ func (m *Model) applyResume(msg resumeMsg) tea.Cmd {
 	phase := PhasePlan
 	if msg.hasSnap {
 		m.planBody = msg.snap.PlanBody
-		m.rounds = msg.snap.Rounds
 		m.costSettled = msg.snap.CostSettled // a resumed process restarts its own total at zero
+		// Tokens carry over verbatim: they were counted per turn, so there is no
+		// per-process figure to reconcile — only a tally to keep going.
+		m.parentTokens = msg.snap.ParentTokens
+		m.childTokens = msg.snap.ChildTokens
+		m.childCost = msg.snap.ChildCost
+		m.dispatches = msg.snap.Dispatches
+		m.tasks = msg.snap.Tasks
 		m.lineage = msg.snap.Lineage
 		phase = parsePhase(msg.snap.Phase)
 
@@ -140,8 +150,10 @@ func (m *Model) applyResume(msg resumeMsg) tea.Cmd {
 		"↩ resumed session %s · %s · %d entries replayed%s",
 		short(msg.id), phase, replayed, costSuffix(m.totalCost()))})
 
-	alog.Printf("resume: id=%s phase=%s entries=%d rounds=%d cost=%.4f snapshot=%v",
-		msg.id, phase, replayed, m.rounds, m.totalCost(), msg.hasSnap)
+	alog.Printf("resume: id=%s phase=%s entries=%d tasks=%d cost=%.4f snapshot=%v",
+		msg.id, phase, replayed, m.dispatches, m.totalCost(), msg.hasSnap)
+
+	m.noteInterruptedTasks()
 
 	// Take the phase now, not when the driver lands. Launching claude takes a second
 	// or two, and until the phase moves the run still looks like a plan session with
@@ -154,9 +166,56 @@ func (m *Model) applyResume(msg resumeMsg) tea.Cmd {
 		Phase:    phase,
 		ResumeID: msg.id,
 		Model:    m.nextModel,
-		// Kickoff stays false, always: a resumed run is already underway. Arming is
-		// the only launch that starts work; this one rejoins it (see onDriverReady).
 	})
+}
+
+// noteInterruptedTasks marks any task that was still running when the run died.
+//
+// A child process is killed with its supervisor, mid-edit and mid-thought, so
+// its work may be half-applied to the working tree. That is the one situation
+// where a tool built to run unattended must not guess: re-dispatching could
+// redo work already done, and skipping it could leave the tree broken. So the
+// tasks are named, and the decision is handed to the session with the resume
+// prompt below.
+func (m *Model) noteInterruptedTasks() {
+	var stuck []string
+	for i := range m.tasks {
+		if !m.tasks[i].Unfinished() {
+			continue
+		}
+		m.tasks[i].Outcome = "interrupted"
+		m.tasks[i].EndedAt = m.tasks[i].StartedAt
+		stuck = append(stuck, fmt.Sprintf("%s (%s)", m.tasks[i].ID, m.tasks[i].Title))
+	}
+	if len(stuck) == 0 {
+		return
+	}
+	m.interruptedTasks = stuck
+	m.appendEntry(entry{kind: eWarn, body: fmt.Sprintf(
+		"⚠ %d task(s) were interrupted by the restart and never reported: %s\n"+
+			"Their work may be partly applied — check before building on it.",
+		len(stuck), strings.Join(stuck, ", "))})
+}
+
+// resumePrompt is the single message a restored auto-run is sent.
+//
+// This is not the nudge loop coming back. That loop fired after *every* idle
+// turn, up to ten times, re-billing the whole conversation each time to ask "are
+// you done yet?" — and it was the most expensive habit acy had. This fires once,
+// in response to the human explicitly asking to resume an armed run, which is
+// the difference between honouring a request and guessing.
+func (m *Model) resumePrompt() string {
+	var b strings.Builder
+	b.WriteString("This run was interrupted and has been restored. ")
+	if len(m.interruptedTasks) > 0 {
+		b.WriteString("These tasks were still running when it died and never reported: ")
+		b.WriteString(strings.Join(m.interruptedTasks, ", "))
+		b.WriteString(". Their work may be partly applied, so check the current state of those files ")
+		b.WriteString("before deciding whether to re-dispatch them. ")
+	}
+	b.WriteString("Take stock of what is actually done, then carry on with the approved plan. ")
+	b.WriteString("Call Finish when it is all complete and verified.")
+	return b.String()
 }
 
 // sameDir compares two project paths the way state.Latest does.
@@ -251,9 +310,15 @@ func (m *Model) snapshot() state.Snapshot {
 		Phase:       m.phase.String(),
 		Model:       m.model,
 		PlanBody:    m.planBody,
-		Rounds:      m.rounds,
 		CostSettled: m.totalCost(), // bank the running session too: on resume it restarts at zero
-		Lineage:     m.lineage,
+
+		ParentTokens: m.parentTokens,
+		ChildTokens:  m.childTokens,
+		ChildCost:    m.childCost,
+		Dispatches:   m.dispatches,
+		Tasks:        state.TrimTasks(m.tasks),
+
+		Lineage: m.lineage,
 	}
 }
 

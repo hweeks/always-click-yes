@@ -31,7 +31,8 @@ type entry struct {
 	kind   ekind
 	title  string // e.g. a tool name
 	body   string
-	styled bool // body already carries ANSI (syntax highlighting); render it verbatim
+	styled bool   // body already carries ANSI (syntax highlighting); render it verbatim
+	task   string // the delegated task this came from ("" = the parent itself)
 }
 
 // palette
@@ -102,6 +103,7 @@ func renderEntries(entries []entry, width, maxLines int) string {
 func renderEntry(e entry, width, maxLines int) string {
 	// entryBox border + padding eat four columns; wrap the content inside them.
 	inner := max(width-6, 10)
+	tag := taskTag(e)
 	switch e.kind {
 	case eMeta:
 		return lipgloss.NewStyle().Foreground(colDim).Render(e.body)
@@ -111,7 +113,7 @@ func renderEntry(e entry, width, maxLines int) string {
 		return badge("you", colYou) + "\n" + entryBox(body, colYou, width)
 
 	case eClaude:
-		return badge("claude", colClaude) + "\n" + entryBox(renderMarkdown(e.body, inner), colClaude, width)
+		return badge(tag+"claude", colClaude) + "\n" + entryBox(renderMarkdown(e.body, inner), colClaude, width)
 
 	case eThinking:
 		label := lipgloss.NewStyle().Foreground(colDim).Italic(true).Render("∴ thinking")
@@ -122,7 +124,7 @@ func renderEntry(e entry, width, maxLines int) string {
 		return label + "\n" + body
 
 	case eTool:
-		head := badge("⚙ "+e.title, colTool)
+		head := badge(tag+"⚙ "+e.title, colTool)
 		style := lipgloss.NewStyle().Foreground(colDim)
 		if e.styled {
 			style = lipgloss.NewStyle() // the body is already ANSI-highlighted code
@@ -136,14 +138,14 @@ func renderEntry(e entry, width, maxLines int) string {
 	case eToolOK:
 		body := clampLines(e.body, inner, maxLines, lipgloss.NewStyle().Foreground(colDim))
 		if body == "" {
-			return lipgloss.NewStyle().Foreground(colGood).Render("  ↳ (ok)")
+			return lipgloss.NewStyle().Foreground(colGood).Render("  " + tag + "↳ (ok)")
 		}
 		return entryBox(body, colGood, width)
 
 	case eToolErr:
 		body := clampLines(e.body, inner, maxLines, lipgloss.NewStyle().Foreground(colErr))
 		if body == "" {
-			return lipgloss.NewStyle().Foreground(colErr).Render("  ✗ (error)")
+			return lipgloss.NewStyle().Foreground(colErr).Render("  " + tag + "✗ (error)")
 		}
 		return entryBox(body, colErr, width)
 
@@ -166,6 +168,17 @@ func renderEntry(e entry, width, maxLines int) string {
 		return lipgloss.NewStyle().Foreground(colErr).Render(e.body)
 	}
 	return e.body
+}
+
+// taskTag marks an entry as belonging to a delegated task rather than to the
+// conversation you are having. Without it a child's tool calls read as though
+// the parent were making them, which is exactly the confusion the whole design
+// is trying to remove.
+func taskTag(e entry) string {
+	if e.task == "" {
+		return ""
+	}
+	return e.task + " · "
 }
 
 // renderPlan draws the proposed plan in a bordered box with a prominent arm hint.
