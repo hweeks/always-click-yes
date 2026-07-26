@@ -66,6 +66,36 @@ func TestE2EPlanArmAutoApproveComplete(t *testing.T) {
 		if m.TotalCost() <= 0 {
 			t.Error("a completed run should have a cost")
 		}
+		// The whole architecture in one assertion: the supervising session
+		// cannot write, so the only way that file exists is that it delegated
+		// the work to a child process.
+		if m.Dispatches() == 0 {
+			t.Error("the file appeared but nothing was dispatched — " +
+				"the parent should have no way to write it itself")
+		}
+		if m.ChildTokens().Volume() == 0 {
+			t.Error("no child token usage recorded; the ledger cannot prove where the work happened")
+		}
+		// The point of delegating: the parent pays for a short report, not for
+		// everything the child read on its way to writing the file.
+		if pt, ct := m.ParentTokens(), m.ChildTokens(); pt.CacheRead > ct.CacheRead*4 {
+			t.Errorf("parent cache reads (%d) dwarf the child's (%d); "+
+				"the parent is carrying work it was supposed to delegate", pt.CacheRead, ct.CacheRead)
+		}
+		// Token accounting is the instrument this project is being measured
+		// with, so a live run has to prove it actually reads the wire — a
+		// decoder that silently reports zero would make every later
+		// before/after comparison meaningless.
+		tok := m.ParentTokens()
+		if tok.Output <= 0 {
+			t.Error("a completed run should have recorded output tokens")
+		}
+		if tok.CacheRead <= 0 && tok.CacheCreate <= 0 {
+			t.Error("a completed run should have recorded cache usage")
+		}
+		if m.LastContext() <= 0 {
+			t.Error("the last turn should report the context it carried")
+		}
 	})
 }
 

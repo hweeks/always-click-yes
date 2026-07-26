@@ -103,7 +103,63 @@ type Event struct {
 	Result         string  `json:"result"`
 	NumTurns       int     `json:"num_turns"`
 
+	// Usage is this turn's token count. ModelUsage is the process's running
+	// total, per model. They mean opposite things — see the Usage doc comment.
+	Usage      *Usage                `json:"usage"`
+	ModelUsage map[string]ModelUsage `json:"modelUsage"`
+
+	// StructuredOutput is the validated object claude produces when the process
+	// was started with --json-schema. Absent otherwise. The string Result holds
+	// the same JSON, but this is already parsed and is what callers should read.
+	StructuredOutput json.RawMessage `json:"structured_output"`
+
 	Raw json.RawMessage `json:"-"`
+}
+
+// Usage is the token count for a single turn.
+//
+// It is *per turn*, so a running tally must ADD each result's Usage. This is the
+// opposite of TotalCostUSD, which is the process's cumulative spend and must be
+// assigned. Verified against real transcripts: three turns of one process
+// reported cache_read 474322, 306083, 251393 while the process-cumulative
+// modelUsage reported 474322, 780405, 1031798.
+//
+// CacheReadInputTokens dominates every long session and is what acy exists to
+// drive down: re-reading an ever-growing context is ~98% of a run's token volume.
+type Usage struct {
+	InputTokens              int `json:"input_tokens"`
+	OutputTokens             int `json:"output_tokens"`
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+}
+
+// ModelUsage is one model's cumulative usage within a single claude process,
+// keyed in Event.ModelUsage by model id. A turn may touch more than one model
+// (a small model does some internal work), so this is the only place a
+// per-model breakdown exists.
+//
+// Cumulative, so it is ASSIGNED, never added — and it resets to zero when a
+// --resume starts a new process, exactly like TotalCostUSD. Its value here is
+// ContextWindow (available nowhere else) and as a cross-check on the per-turn
+// accumulator.
+type ModelUsage struct {
+	InputTokens              int     `json:"inputTokens"`
+	OutputTokens             int     `json:"outputTokens"`
+	CacheReadInputTokens     int     `json:"cacheReadInputTokens"`
+	CacheCreationInputTokens int     `json:"cacheCreationInputTokens"`
+	CostUSD                  float64 `json:"costUSD"`
+	ContextWindow            int     `json:"contextWindow"`
+}
+
+// ContextSize is how much context this turn actually carried: everything the
+// request had to present to the model, cached or not. It is a point-in-time
+// reading, not a total, and it is the number that reveals a context growing
+// without bound.
+func (u *Usage) ContextSize() int {
+	if u == nil {
+		return 0
+	}
+	return u.InputTokens + u.CacheCreationInputTokens + u.CacheReadInputTokens
 }
 
 // Decode parses one NDJSON line into an Event, preserving the raw bytes.

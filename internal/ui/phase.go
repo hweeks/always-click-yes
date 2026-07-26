@@ -40,12 +40,6 @@ type LaunchSpec struct {
 	Phase    Phase  // PhasePlan (interactive, ungated) or PhaseAutoRun (hooks + gated)
 	ResumeID string // --resume <session-id>; set to continue a captured/prior session
 	Model    string // --model override for this launch; empty = launcher default
-
-	// Kickoff sends kickoffPrompt once the session is up. Arming sets it — that
-	// prompt is what starts the work. A *resumed* auto-run must not: the run is
-	// already underway, and telling it "the plan is approved, begin implementing it"
-	// would start it over. Opt-in, so the zero value is the harmless one.
-	Kickoff bool
 }
 
 // Launcher starts a claude driver for a launch spec. For PhaseAutoRun the
@@ -53,115 +47,63 @@ type LaunchSpec struct {
 // plan mode without hooks. ResumeID continues an existing session in either mode.
 type Launcher func(ctx context.Context, spec LaunchSpec) (*driver.Driver, error)
 
-// PlanSystemPrompt is appended to claude's system prompt during PLAN.
+// ParentSystemPrompt is appended to the supervising session's system prompt.
 //
-// It has to carry more than it looks like it does. acy no longer launches the plan
-// phase with --permission-mode plan — that mode refuses to execute *any* MCP tool
-// call ("Cannot call mcp__acy__AskUserQuestion while in plan mode"), even with
-// --allowedTools, which would make acy's own question picker unreachable in the one
-// phase where a human is actually sitting there to answer it. So PLAN runs in
-// `default` mode over a read-only --tools registry, and this prompt supplies the
-// planning contract that plan mode used to inject — plus the two things only acy
-// can tell the model: it cannot start its own work, and a human ends this phase.
-var PlanSystemPrompt = strings.Join([]string{
-	"You are in the PLAN phase of always-click-yes (acy), which supervises this session.",
+// There is exactly one of these now, where there used to be two. Arming no
+// longer launches a new process — it flips a phase on the session already
+// running — so a prompt chosen at startup has to serve the whole run, and the
+// difference between the phases is carried by the tools instead: Dispatch
+// refuses, in its own words, until the run is armed.
+//
+// It is about a third the length of the plan prompt it replaces, because most
+// of that prompt was describing constraints that are now structurally true.
+// "Do NOT implement it" needs no words when there is no tool that could; "you
+// cannot leave this phase" needs none when the tool that would says so itself.
+var ParentSystemPrompt = strings.Join([]string{
+	"You are the lead on a supervised run. You have Read, Grep and Glob: you can understand this",
+	"codebase, and you cannot change it.",
 	"",
-	"Research the request and produce an implementation plan. Do NOT implement it: the tools",
-	"that would let you write anything are not in your registry, and attempting them wastes a turn.",
+	"Work happens by delegation. " + mcp.Qualified(mcp.ToolDispatch) + " hands one task to a fresh",
+	"engineer with the full toolset and blocks until they report back. They begin with no memory of",
+	"this conversation, so a task has to stand alone: what to change, where, and how they will know",
+	"it worked. One task per call, scoped so that a report can honestly say \"completed\". Read each",
+	"report before you dispatch the next one.",
 	"",
-	"You cannot leave this phase. There is no ExitPlanMode tool here and no way for you to",
-	"approve your own plan or start the work — do not look for one. A HUMAN ends the plan phase,",
-	"by reading your plan and pressing Ctrl+G, which arms the run and resumes this session with",
-	"full tools. That keystroke is the only thing that starts the work.",
-	"",
-	"Two tools exist for talking to that human:",
-	"  - " + mcp.Qualified(mcp.ToolAsk) + " — put a real choice to them and block for an answer.",
-	"    Use it for any genuine fork: an ambiguous requirement, a decision between approaches.",
-	"    Asking in prose instead surfaces no prompt and gets you no reply.",
-	"  - " + mcp.Qualified(mcp.ToolPlan) + " — hand over the finished plan. Call it exactly once,",
-	"    when the plan is done. It does not exit the phase; it only shows them the plan.",
-	"",
-	"After presenting the plan, STOP. Do not re-plan, do not summarize it again, and do not ask",
-	"whether to proceed — nobody is waiting to answer that. If they want changes, they will say so.",
+	mcp.Qualified(mcp.ToolPlan) + " shows the human a finished plan.",
+	mcp.Qualified(mcp.ToolAsk) + " puts a real choice to them and blocks for an answer.",
+	mcp.Qualified(mcp.ToolFinish) + " ends the run, once the work is done and you have seen it verified.",
 }, "\n")
 
-// AutoRunSystemPrompt is appended during AUTO-RUN. The point of acy is that the
-// human has walked away, so the model must know two things: a question is a last
-// resort that will time out rather than wait, and the STATUS line it ends each
-// reply with is what drives the run — acy reads it in this same session instead of
-// paying a second process to judge completion.
-var AutoRunSystemPrompt = strings.Join([]string{
-	"You are in the AUTO-RUN phase of always-click-yes (acy). Your plan was approved; work through",
-	"it to completion. Permission prompts are auto-approved on a countdown, so nobody is vetting",
-	"each step.",
+// ChildSystemPrompt is what a dispatched child runs under.
+//
+// It is short because almost everything the old auto-run prompt spelled out is
+// now structurally true instead of instructed: there is no STATUS sentinel to
+// remember (--json-schema validates the report), no completion loop to explain,
+// and no plan to stay inside. What is left is the one thing a child cannot
+// discover for itself — that its transcript is about to be thrown away, so the
+// report is the only thing that will ever be read.
+var ChildSystemPrompt = strings.Join([]string{
+	"You are implementing one task for a supervised run. Nobody is watching: tool permissions",
+	"auto-approve on a countdown, so decide and proceed.",
 	"",
-	"The human has very likely walked away. " + mcp.Qualified(mcp.ToolAsk) + " still exists, but a",
-	"question auto-skips after the countdown and returns 'proceed with your best judgment'. So use",
-	"it only where a wrong guess would be expensive or hard to undo. Otherwise decide, proceed, and",
-	"say what you assumed.",
+	"Do the task, verify it yourself — run the tests, read the file back — and return the report.",
+	"That report is the only thing your caller will ever see: your transcript, your reasoning and",
+	"this session all disappear when you finish. An honest 'partial' with a clear reason is worth",
+	"more than a 'completed' that isn't, because the caller will build on whatever you tell them.",
 	"",
-	"End EVERY reply with a line that is exactly one of:",
-	"  STATUS: DONE      — every step of the approved plan is complete",
-	"  STATUS: CONTINUE  — work remains",
-	"acy reads that line each time you stop. CONTINUE (or a missing line) gets you nudged to keep",
-	"going; DONE ends the run and hands your work back to the human to review. Do not claim DONE",
-	"until it is true.",
+	"Do not take on work beyond your task. Anything else you notice goes in followups.",
 }, "\n")
 
-// verdict classifies the STATUS sentinel an auto-run turn ends with.
-type verdict int
-
-const (
-	verdictUnclear  verdict = iota // no sentinel found
-	verdictDone                    // every step reported complete
-	verdictContinue                // work remains
-)
-
-// parseVerdict scans a turn's text for the STATUS sentinel. DONE wins ties.
-func parseVerdict(text string) verdict {
-	up := strings.ToUpper(text)
-	if strings.Contains(up, "STATUS: DONE") || strings.Contains(up, "STATUS:DONE") {
-		return verdictDone
-	}
-	if strings.Contains(up, "STATUS: CONTINUE") || strings.Contains(up, "STATUS:CONTINUE") {
-		return verdictContinue
-	}
-	return verdictUnclear
-}
-
-// doneCheckPrompt asks the working session itself whether the plan is done. It is
-// auto-sent when an idle turn carries no STATUS sentinel, and preloaded for the
-// user to send by hand once the auto-round budget is spent.
-const doneCheckPrompt = "Have we completed every step of the approved plan? " +
-	"If every step is done, reply with exactly: STATUS: DONE. " +
-	"Otherwise keep working on the remaining steps, and end your reply with STATUS: CONTINUE."
-
-// kickoffPrompt is injected when the user arms the run.
-const kickoffPrompt = "The plan is approved. Begin implementing it now, working " +
-	"through every step to completion."
-
-// continuePrompt nudges the working session onward after it stops with work still
-// remaining (a STATUS: CONTINUE turn).
-const continuePrompt = "Keep working through the remaining steps of the approved plan. " +
-	"When every step is complete, stop and end your reply with exactly: STATUS: DONE."
-
-// maxAutoRounds caps how many times the loop will auto-nudge the working session
-// before handing control back to the user.
-const maxAutoRounds = 10
+// kickoffPrompt is sent when the user arms the run. Unlike before, it goes to
+// the session already in front of them rather than to a freshly resumed process.
+const kickoffPrompt = "The plan is approved. Begin now: dispatch the work one task at a time, " +
+	"reading each report before the next. Call Finish when it is all done and verified."
 
 // --- launch plumbing ---
 
 type driverReadyMsg struct {
-	drv     *driver.Driver
-	phase   Phase
-	kickoff bool
-}
-
-// resumedAutoRun reports an armed run coming back to life rather than starting.
-// Arming is the only launch that kicks off work, so an auto-run arriving without a
-// kickoff is one that was already underway.
-func (m driverReadyMsg) resumedAutoRun() bool {
-	return m.phase == PhaseAutoRun && !m.kickoff
+	drv   *driver.Driver
+	phase Phase
 }
 
 type errMsg struct{ err error }
@@ -172,17 +114,8 @@ func launchCmd(ctx context.Context, l Launcher, spec LaunchSpec) tea.Cmd {
 		if err != nil {
 			return errMsg{err}
 		}
-		return driverReadyMsg{drv: d, phase: spec.Phase, kickoff: spec.Kickoff}
+		return driverReadyMsg{drv: d, phase: spec.Phase}
 	}
-}
-
-// preloadDoneCheck drops the completion prompt into the input, ready to send.
-func (m *Model) preloadDoneCheck() {
-	m.input.SetValue(doneCheckPrompt)
-	m.input.CursorEnd()
-	m.preloaded = true
-	m.status = "idle — press Enter to verify completion"
-	m.appendEntry(entry{kind: eTurn, body: "──── idle · press Enter to ask “are we done?” ────"})
 }
 
 // beginTurn marks a turn in flight: the header and working indicator flip on,
@@ -199,7 +132,6 @@ func (m *Model) sendInput() {
 	if text == "" || m.ended || m.drv == nil || m.processing {
 		return // ignore sends while a turn is in flight (Esc to interject first)
 	}
-	m.preloaded = false
 	m.interrupted = false
 	m.turnText = ""
 	_ = m.drv.Send(text)
@@ -214,6 +146,11 @@ func (m *Model) interject() bool {
 	if m.drv == nil || !m.processing {
 		return false
 	}
+	// Children first. The parent is blocked on a tool_result while a task runs,
+	// so interrupting only the parent would leave an orphan burning tokens on
+	// work whose answer now has nowhere to go — and cancelling a task is what
+	// unblocks the parent's turn in the first place.
+	m.cancelDispatches("interrupted by the user")
 	m.interrupted = true
 	_ = m.drv.Interrupt()
 	m.status = "interrupting…"
@@ -221,10 +158,15 @@ func (m *Model) interject() bool {
 	return true
 }
 
-// onTurnEnd runs when a turn completes. In auto-run the working session judges its
-// own completion: the system prompt has it end every reply with a STATUS sentinel,
-// and this reads it — no second process, no second context. The session that did
-// the work already knows what it has done.
+// onTurnEnd runs when a turn completes.
+//
+// It no longer drives anything. The old loop read a STATUS sentinel out of the
+// turn's text and, on anything short of DONE, sent another prompt — up to ten
+// more full-context turns per run, each one re-billing the entire accumulated
+// conversation just to ask "are you done yet?". That loop existed because a
+// sentinel can be missed. A tool call cannot: the run ends when the session
+// calls Finish, and if it stops without doing so the right response is a human,
+// not another billed turn.
 func (m *Model) onTurnEnd(ev driver.Event) {
 	if !ev.IsTurnEnd() || m.phase != PhaseAutoRun || len(m.pending) > 0 {
 		return
@@ -234,42 +176,14 @@ func (m *Model) onTurnEnd(ev driver.Event) {
 		m.status = "interrupted — type to redirect, then Enter"
 		return
 	}
-	m.checkCompletion()
-}
-
-// checkCompletion applies the auto-run loop to the last assistant turn: finish on
-// DONE, otherwise nudge the same session onward.
-func (m *Model) checkCompletion() {
-	switch parseVerdict(m.turnText) {
-	case verdictDone:
-		m.markComplete()
-	case verdictContinue:
-		m.nudge(continuePrompt)
-	default: // no sentinel: ask the session itself whether it is done
-		m.nudge(doneCheckPrompt)
-	}
-}
-
-// nudge keeps the run moving by prompting the working session. Each nudge spends
-// one auto-round; past maxAutoRounds the loop stops driving itself and hands the
-// done-check to the user instead.
-func (m *Model) nudge(prompt string) {
-	m.rounds++
-	defer m.persist() // rounds moved; a crash must not hand the run a fresh budget
-	if m.rounds > maxAutoRounds {
-		alog.Printf("autorun: round cap reached (%d)", maxAutoRounds)
-		m.appendEntry(entry{kind: eWarn, body: fmt.Sprintf(
-			"still not done after %d auto-rounds — pausing; press Enter to verify manually", maxAutoRounds)})
-		m.preloadDoneCheck()
+	// A task still running is the normal case: the parent is blocked on its
+	// report and will carry on by itself when it arrives.
+	if m.dispatcher != nil && m.dispatcher.Active() > 0 {
+		m.status = "waiting on a task"
 		return
 	}
-	alog.Printf("autorun: nudge (round=%d)", m.rounds)
-	m.turnText = ""
-	if m.drv != nil {
-		_ = m.drv.Send(prompt)
-	}
-	m.beginTurn()
-	m.appendEntry(entry{kind: eYou, body: prompt})
+	m.status = "idle — no task running · type to continue, or /done to finish"
+	m.appendEntry(entry{kind: eTurn, body: "──── idle · nothing running · type to continue ────"})
 }
 
 // capturePlan makes sure the run is armed with a plan — the record of what the user
@@ -287,19 +201,11 @@ func (m *Model) capturePlan() {
 	m.planBody = strings.TrimSpace(m.turnText)
 }
 
-// markComplete transitions the run to the COMPLETE phase: the session stays up,
-// and the composer goes back to being a normal chat so the user can vet the work.
-func (m *Model) markComplete() {
-	m.phase = PhaseComplete
-	m.status = "complete — vet the work below"
-	total := m.totalCost()
-	alog.Printf("phase: COMPLETE (cost=$%.4f, billing=%s)", total, m.billingNote())
-	m.appendEntry(entry{kind: eComplete, body: fmt.Sprintf(
-		"✅ plan complete · $%.4f total · %s — chat below to vet the work", total, m.billingNote())})
-	m.persist()
-}
-
-// onDriverReady swaps in a freshly launched driver for a new phase.
+// onDriverReady swaps in a freshly launched driver.
+//
+// Much smaller than it was, because arming no longer comes through here. A
+// launch is now only ever a cold start or a /resume — never a phase change —
+// so there is no kickoff to send and no completion state to preserve across it.
 func (m *Model) onDriverReady(msg driverReadyMsg) tea.Cmd {
 	if m.drv != nil {
 		m.drv.Stop() // stale generation; its events will be ignored
@@ -308,15 +214,7 @@ func (m *Model) onDriverReady(msg driverReadyMsg) tea.Cmd {
 	m.drv = msg.drv
 	m.phase = msg.phase
 	m.gen++
-
-	// turnText is the working session's last message — what checkCompletion reads.
-	// A launch normally starts a fresh turn and has none. A *resumed* auto-run is
-	// the exception: the replay went to the trouble of recovering the final
-	// assistant turn precisely so the completion check below has something to read,
-	// and clearing it would erase a STATUS: DONE the session may already have said.
-	if !msg.resumedAutoRun() {
-		m.turnText = ""
-	}
+	m.turnText = ""
 
 	// Any question still on screen belongs to the driver we just stopped. Its mcp
 	// child died with that process group, so nothing is listening — but resolve it
@@ -326,22 +224,74 @@ func (m *Model) onDriverReady(msg driverReadyMsg) tea.Cmd {
 	alog.Printf("phase: %s (gen=%d)", msg.phase, m.gen)
 
 	cmds := []tea.Cmd{waitEvent(m.drv.Events(), m.gen)}
+
+	// A launch into AUTO-RUN can only be a restored run: arming no longer comes
+	// through here. Send exactly one prompt to pick the work back up.
+	//
+	// Deleting the nudge loop deleted this with it, and a crashed run stopped
+	// being resumable at all — it came back armed and then sat there forever.
+	// The loop's fault was firing after every idle turn; firing once, because a
+	// human explicitly asked to resume, is a different thing.
 	if msg.phase == PhaseAutoRun {
-		m.preloaded = false
-		if msg.kickoff {
-			// Arming: this prompt is what sets the work going.
-			_ = m.drv.Send(kickoffPrompt)
-			m.beginTurn()
-			m.appendEntry(entry{kind: eYou, body: kickoffPrompt})
-		} else {
-			// Resumed mid-run. A resumed auto-run *is* an idle auto-run, so it rejoins
-			// the loop at the point every turn already ends at: read the last thing the
-			// session said. If the work finished before acy died, the DONE sentinel is
-			// sitting right there; otherwise the nudge picks the run back up.
-			m.checkCompletion()
-		}
+		prompt := m.resumePrompt()
+		_ = m.drv.Send(prompt)
+		m.beginTurn()
+		m.appendEntry(entry{kind: eYou, body: prompt})
+		m.interruptedTasks = nil
 	}
+
 	m.persist()
 	m.rebuild()
 	return tea.Batch(cmds...)
+}
+
+// arm is Ctrl+G: the human has read the plan and approved it.
+//
+// It used to spawn a second claude process with --resume, which meant a second
+// system prompt, a second cache warm-up, and a window in which a run had a
+// session id but no driver. Now that the parent's tools are the same in both
+// phases there is nothing to relaunch: the phase is a fact about what acy will
+// allow, not about what process is running. Dispatch starts refusing to refuse.
+func (m *Model) arm() {
+	if m.drv == nil {
+		// Ctrl+G already checks this, but arming is the one action that must not
+		// half-happen: flipping the phase without sending the kickoff would leave
+		// a run that looks armed and is doing nothing.
+		m.appendEntry(entry{kind: eWarn, body: "cannot arm yet — no session is running"})
+		return
+	}
+	m.capturePlan()
+	m.phase = PhaseAutoRun
+	m.planReady = false
+	m.interrupted = false
+	alog.Printf("phase: AUTO-RUN (armed in place, gen=%d)", m.gen)
+	m.appendEntry(entry{kind: eGood, body: "▶ armed — delegating from here; Esc stops a running task"})
+
+	_ = m.drv.Send(kickoffPrompt)
+	m.beginTurn()
+	m.appendEntry(entry{kind: eYou, body: kickoffPrompt})
+	m.persist()
+}
+
+// finish ends the run because the session called Finish. The session stays up:
+// the point is that the human vets the work in the very session that did it.
+func (m *Model) finish(outcome, summary string) {
+	if m.phase == PhaseComplete {
+		return
+	}
+	m.phase = PhaseComplete
+	m.status = "complete — vet the work below"
+	if outcome == "abandoned" {
+		m.status = "abandoned — see the summary below"
+	}
+	total := m.grandTotalCost()
+	alog.Printf("phase: COMPLETE outcome=%s cost=$%.4f billing=%s", outcome, total, m.billingNote())
+
+	body := fmt.Sprintf("✅ run %s · $%.4f total · %s", outcome, total, m.billingNote())
+	if summary != "" {
+		body += "\n\n" + summary
+	}
+	body += "\n\nchat below to vet the work"
+	m.appendEntry(entry{kind: eComplete, body: body})
+	m.persist()
 }

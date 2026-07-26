@@ -11,7 +11,7 @@ import (
 )
 
 // snapLabel is the acy state shown against a session in the resume picker: which
-// phase it stopped in, how many auto-rounds it had spent, what it had cost. A
+// phase it stopped in, how many tasks it delegated, what it had cost. A
 // session acy never supervised has no snapshot and shows nothing, which is how you
 // tell the two apart in the list.
 func snapLabel(s state.Snapshot, ok bool) string {
@@ -19,8 +19,8 @@ func snapLabel(s state.Snapshot, ok bool) string {
 		return ""
 	}
 	parts := []string{s.Phase}
-	if s.Rounds > 0 {
-		parts = append(parts, fmt.Sprintf("%d rounds", s.Rounds))
+	if s.Dispatches > 0 {
+		parts = append(parts, fmt.Sprintf("%d tasks", s.Dispatches))
 	}
 	if s.CostSettled > 0 {
 		parts = append(parts, fmt.Sprintf("$%.2f", s.CostSettled))
@@ -87,6 +87,24 @@ func (m *Model) runCommand(name, args string) tea.Cmd {
 			p = "(disabled)"
 		}
 		m.appendEntry(entry{kind: eMeta, body: "debug log: " + p})
+	case "tokens", "cost":
+		m.appendEntry(entry{kind: eMeta, body: m.tokenReport()})
+	case "tasks":
+		// Deliberately reads the model's own ledger rather than re-syncing from the
+		// orchestrator: after a /resume the rows come from the snapshot while the
+		// orchestrator has never run a task, so syncing here would erase them.
+		m.appendEntry(entry{kind: eMeta, body: m.taskReport()})
+	case "done", "finish":
+		// The manual counterpart to the Finish tool, for when the session stops
+		// without calling it. There is deliberately no automatic version: a run
+		// that goes quiet is a question for a human, not a reason to spend
+		// another full-context turn asking "are you done yet?".
+		if m.phase == PhaseComplete {
+			m.appendEntry(entry{kind: eMeta, body: "this run is already finished"})
+			break
+		}
+		m.cancelDispatches("the run was finished by hand")
+		m.finish("completed", strings.TrimSpace(args))
 	case "resume":
 		return m.startResume(args)
 	default:
@@ -113,11 +131,45 @@ func (m *Model) startResume(arg string) tea.Cmd {
 		m.appendEntry(entry{kind: eMeta, body: "no past sessions found for this project"})
 		return nil
 	}
+	snaps := m.loadSnaps(list)
+	list = hideChildSessions(list, snaps)
+	if len(list) == 0 {
+		m.appendEntry(entry{kind: eMeta, body: "no past sessions found for this project"})
+		return nil
+	}
 	m.sessionList = list
-	m.sessionSnaps = m.loadSnaps(list)
+	m.sessionSnaps = snaps
 	m.pickIdx = 0
 	m.picking = true
 	return nil
+}
+
+// hideChildSessions drops dispatched children from the picker.
+//
+// Children are persisted like any other session — deliberately, because when one
+// does something unexplained its transcript is the only record of why — but a
+// twenty-task run would otherwise bury the run itself under twenty rows you can
+// never usefully resume. The ledger in each snapshot says which ids were
+// children, so this needs no naming convention and no second source of truth.
+func hideChildSessions(list []session.Info, snaps map[string]state.Snapshot) []session.Info {
+	children := map[string]bool{}
+	for _, snap := range snaps {
+		for _, t := range snap.Tasks {
+			if t.SessionID != "" {
+				children[t.SessionID] = true
+			}
+		}
+	}
+	if len(children) == 0 {
+		return list
+	}
+	out := make([]session.Info, 0, len(list))
+	for _, s := range list {
+		if !children[s.ID] {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // loadSnaps pairs each listed session with acy's state for it, where there is any.

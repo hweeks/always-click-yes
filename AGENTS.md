@@ -26,23 +26,47 @@ fix it rather than working around it by hand.
 ## What this is
 
 A Go TUI (Cobra + Bubble Tea + Lipgloss) that supervises a **Claude Code** session
-for long-running tasks. Flow:
+for long-running tasks. It is built around one measurement.
 
-1. **PLAN** — you chat with Claude over a read-only `--tools` registry to build a plan.
-2. **Ctrl+G arms it** — a fresh `claude` process **resumes the same session** with the
-   PreToolUse hook wired in and `--permission-mode default`, and gets a kickoff message.
-3. **AUTO-RUN** — every gated tool triggers a countdown; it auto-approves after N seconds
-   unless you veto (`s`), approve now (`a`), or pause (`p`). `Esc` interrupts a running turn.
-4. **Idle** → the auto-run system prompt has the working session end **every reply** with
-   `STATUS: DONE` / `STATUS: CONTINUE`, and each turn end reads that sentinel from the
-   turn's own text (`parseVerdict` in `internal/ui/phase.go`). DONE → COMPLETE, which is a
-   normal chat again — the user vets the work in the session that did it. CONTINUE (or no
-   sentinel) auto-nudges the **same session** (up to `maxAutoRounds`) so the run finishes
-   hands-free; the resumed context is prompt-cached, so each check costs a single cheap
-   turn rather than a fresh judge process. Past the cap it falls back to the manual
-   preloaded "are we done?" check (press Enter to send it into the working session).
-   (An independent per-check judge session existed once — `internal/judge`, removed — and
-   was the tool's biggest token sink: every idle check paid a full uncached context.)
+### The measurement everything follows from
+
+One real run of acy on this repo, read out of its own `acy-debug.log`:
+
+| | tokens |
+|---|---|
+| cache_read | **8,697,690** |
+| cache_creation | 454,900 |
+| output | 75,011 |
+| input (uncached) | 188 |
+| **cost** | **$16.04** |
+
+98% of the token volume was **re-reading a context that only ever grew**. The model
+was not writing too much; a single session was carrying every file it had ever read
+into every turn that followed. That is what the architecture below exists to stop.
+
+### Flow
+
+1. **PLAN** — you chat with the supervising session over a `Read, Grep, Glob` registry.
+   It can understand the codebase and it cannot change it.
+2. **Ctrl+G arms it** — this *flips a phase on the session already running*. It does
+   not launch anything. (It used to `--resume` a second process; that meant a second
+   system prompt and a second cache warm-up for no gain.)
+3. **AUTO-RUN** — the session delegates. `mcp__acy__Dispatch` hands one task to a
+   **fresh `claude` child process** with the full toolset, and blocks until it reports.
+   The child works, returns a `--json-schema`-validated report, and exits — taking its
+   entire context with it. The parent's conversation grows by one ~300-token report.
+4. **Done** — the session calls `mcp__acy__Finish`. There is **no completion loop and
+   no auto-nudge**: a run that goes quiet is a question for a human, not a reason to
+   spend another full-context turn asking "are you done yet?".
+
+### Why the parent cannot write
+
+Not a permission setting. `Write`, `Edit`, `Bash` and `Task` are **not in its
+`--tools` registry at all**, which is a guarantee no prompt can talk its way past.
+It is also why the system prompt no longer says "do not implement" — there is
+nothing to implement with. The prompts shrank ~350 words → ~110 (parent) and
+~180 → ~85 (child) on exactly this principle: state what is not discoverable,
+and let the interface enforce the rest.
 
 ## Architecture (package map)
 
@@ -57,6 +81,11 @@ for long-running tasks. Flow:
   project's `.acy.json` (`file.go`): strict parsing (unknown keys and bare-number durations
   are errors), precedence defaults < file < explicit flags, decided per flag via pflag's
   `Changed` (`applyFileConfig` in `cli/run.go`).
+- `internal/orchestrator` — owns the disposable children. `Task`/`Child`/`Spawn`,
+  a queue (`limit = 1`), the ledger, and the report schema. A leaf package: it
+  imports `driver`/`mcp`/`alog` and nothing of the UI. Children deliberately do
+  **not** go through `ui.Model.drv` — that stays the parent-only singleton with
+  its generation counter.
 - `internal/ui` — the Bubble Tea model. `model.go` (state + ingest), `update.go` (event
   routing + keys), `view.go` (header/footer/gate panel + help/resume/ask overlays),
   `render.go` (structured transcript entries → lipgloss, incl. `clampBlock` line-capped
@@ -84,7 +113,7 @@ for long-running tasks. Flow:
   plain `node --test` (`npm test` in `vscode/`); `npm run package` builds an installable
   `.vsix`. One supervisor terminal per window — a second run reveals, never relaunches.
 
-## Hard-won facts about `claude` stream-json (verified live, ~v2.1.207)
+## Hard-won facts about `claude` stream-json (verified live, v2.1.207–2.1.220)
 
 - Flags: `-p --input-format stream-json --output-format stream-json --verbose`. Output
   stream-json **requires** `--verbose`. Hook lifecycle needs `--include-hook-events`.
@@ -147,6 +176,39 @@ for long-running tasks. Flow:
   stored as `-private-var-…`) and maps *every* character outside `[A-Za-z0-9-]` to a dash
   (`/tmp/my.dotted_dir` → `-tmp-my-dotted-dir`). Guessing this wrong silently finds no
   sessions, so `session.Replay` also falls back to globbing every project dir for the id.
+- **The `result` event carries a full `usage` object** and acy ignored it for months.
+  `input_tokens`, `output_tokens`, `cache_creation_input_tokens`,
+  `cache_read_input_tokens`, plus per-model `modelUsage` with `costUSD` and
+  `contextWindow`. Decode it; cost in dollars alone cannot tell you *why* a run was
+  expensive.
+- **`usage` is per TURN; `modelUsage` is per PROCESS and cumulative.** They are
+  accumulated in opposite ways — usage ADDS, modelUsage (like `total_cost_usd`)
+  is ASSIGNED — and getting it backwards is silent, because both keep producing
+  plausible numbers. Proven in `internal/driver/testdata/result_events.jsonl`, five
+  real turns spanning a `--resume`: per-turn cache reads 474322 / 306083 / 251393
+  sum exactly to that process's cumulative 1031798, and then turn 4 **resets** the
+  cumulative to its own value because a new process started — *while the session id
+  never changes*. A session id therefore cannot tell you where a process began.
+- **`--json-schema '<schema>'` works with `--output-format stream-json`**, and the
+  `result` event then carries BOTH `result` (the JSON as a string) and a parsed
+  `structured_output` object. This is what makes a child's report unfakeable, and it
+  is what replaced the old STATUS sentinel (whose substring match would fire if a
+  reply merely *mentioned* `STATUS: DONE`).
+- **`--tools ""` gives a ~3.6k-token context floor.** Whether it also suppresses MCP
+  tools is **unverified** — a one-shot probe showed the MCP server still `pending` at
+  init, which is a probe artifact, not an answer. The parent uses `Read,Grep,Glob`,
+  which sidesteps it. Verify before ever relying on `--tools ""`.
+- **`system/init` reports MCP servers as `status:"pending"`.** The registry snapshot
+  in that event is taken *before* they connect, so init's `tools` array is not the
+  final word on what the model can call. (This is probably what the old note about a
+  "fixed 30-tool registry" was really seeing.)
+- Useful flags acy now relies on: `--json-schema`, `--max-budget-usd`, `--session-id`,
+  `--effort`, and `--exclude-dynamic-system-prompt-sections` (moves per-machine
+  sections out of the system prompt so many short children share one cache entry —
+  free, and it composes with `--append-system-prompt`).
+- **`--permission-mode default` is no longer in claude's documented choices**
+  (2.1.220 lists `acceptEdits, auto, bypassPermissions, manual, dontAsk, plan`) but
+  is still accepted. Watch it.
 - No official Go SDK; Claude Code is Node/TypeScript.
 
 ## Gotchas we already hit (don't reintroduce)
@@ -167,14 +229,41 @@ for long-running tasks. Flow:
 - **A resumed run must clear `ended` / `processing`.** They describe a session that no
   longer exists. `sendInput` refuses to send while `ended` or `processing` is set, so
   resuming after "session ended" would otherwise leave the composer permanently dead.
-- **`onDriverReady` clears `turnText` — except for a resumed auto-run.** That is the one launch
-  where the replay deliberately left the final assistant turn there, because it is what the
-  completion check reads for the STATUS sentinel. Clearing it would erase a replayed
-  `STATUS: DONE` and nudge a finished run back into motion.
+- **`onDriverReady` clears `turnText`, always.** It used to make an exception for a
+  resumed auto-run, because the completion check read that text for a STATUS
+  sentinel. There is no such check any more; a resumed run is picked back up by an
+  explicit prompt instead.
 - **A resume takes its phase immediately, not when the driver lands.** Launching claude takes
   a second or two; until the phase moves, a restored run looks like a plan session with a
   session id — exactly what `Ctrl+G` arms from. Arming in that window launches a *second*
   process for the same session and kicks off work that is already half done.
+- **The gate's bypass keys on ORIGIN, not phase.** It used to be
+  `if m.phase == PhasePlan && tool != "Bash"` → allow, which was sound only because
+  the plan registry had no Write or Edit. A dispatched child carries the *full*
+  registry and shares the same gate socket, so phase stops identifying who is
+  asking: keying on it would wave through every child edit with no countdown, in
+  the phase where nobody is watching. `readOnlyParentTools` is an allowlist so a
+  tool nobody anticipated counts down rather than sailing through. Note this had
+  **zero test coverage** before — every existing gate test used `Bash`, which was
+  excluded under both rules.
+- **A child inherits `--mcp-config`.** Without the `--role parent|child` split it
+  would gain `Dispatch` too and could spawn grandchildren without limit. Two config
+  files are written per run, differing only in that flag.
+- **`mcp.Serve` is strictly serial** — `handle` runs inline in the read loop, so a
+  second `tools/call` is not read off stdin until the first answers. One task at a
+  time is therefore a property of the transport, not a rule someone has to remember.
+  Raising the concurrency limit requires making `Serve` concurrent first.
+- **Stop the child before resolving the parent's blocked call.** Resolving first
+  tells the parent the task is over while the process may still be alive and writing
+  to the working tree.
+- **Always resolve a cancelled dispatch.** The `acy mcp` process waiting on the
+  socket belongs to the *parent's* process group, so killing the child does not
+  release it — a missed `Resolve` hangs the parent's turn forever.
+- **Deleting the nudge loop deletes crash recovery if you are not careful.** The
+  loop's job was two things wearing one coat: re-asking "are you done?" after every
+  idle turn (pure waste, gone) and picking a *restored* run back up (a real product
+  promise — `TestE2EResumeAnArmedRunAfterACrash`). A resumed AUTO-RUN gets exactly
+  one prompt, sent because a human explicitly asked to resume.
 - **The viewport's default keymap steals typing.** bubbles `viewport.DefaultKeyMap` binds
   `j/k/d/u/f/b` and space to scrolling, and `Update` forwards key events to both the input and
   the viewport — so typing those letters scrolled the transcript. `transcriptKeyMap()` in

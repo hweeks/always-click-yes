@@ -91,6 +91,10 @@ type options struct {
 	Continue  bool          // resume the newest run in Cwd
 	Countdown time.Duration // gate countdown; short, so tests don't wait 30s per tool
 	Model     string
+
+	// ParentTools is the supervising session's --tools registry. Empty means
+	// the product default, which is what a test of real behaviour wants.
+	ParentTools []string
 }
 
 // newHarness wires a real supervisor — real gate socket, real hook settings, real
@@ -116,6 +120,14 @@ func newHarness(t *testing.T, opt options) *harness {
 	if opt.Countdown == 0 {
 		opt.Countdown = 2 * time.Second // long enough to veto in a test, short enough not to bore one
 	}
+	// An empty --tools list means the FULL registry, not the default one, so the
+	// default has to be applied here: the harness builds cli.Flags directly and
+	// never sees cobra's flag defaults. Getting this wrong would hand the
+	// supervising session Write and Edit and quietly invalidate every test that
+	// asserts it delegates.
+	if opt.ParentTools == nil {
+		opt.ParentTools = cli.DefaultParentTools
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -127,7 +139,12 @@ func newHarness(t *testing.T, opt options) *harness {
 		Model:     opt.Model,
 		Countdown: opt.Countdown,
 		MaxLines:  10,
-		PlanTools: []string{"Monitor"},
+		// The real parent registry, not a stub. It used to be a deliberately
+		// useless single tool, which was fine when the plan phase only had to
+		// avoid writing — but the supervising session's registry is now the
+		// thing under test: it is what stops the parent doing the work itself
+		// and makes it delegate instead.
+		PlanTools: opt.ParentTools,
 		LogPath:   filepath.Join(t.TempDir(), "acy-debug.log"),
 		Resume:    opt.Resume,
 		Continue:  opt.Continue,

@@ -40,6 +40,10 @@ type Config struct {
 	// Sessions lists resumable sessions for the /resume picker (nil = disabled).
 	Sessions func() ([]session.Info, error)
 
+	// Dispatcher runs delegated tasks in child processes (nil = disabled, and a
+	// Dispatch call is then refused rather than half-served).
+	Dispatcher Dispatcher
+
 	// Resume is a session id to restore at startup: --resume/--continue set it, and
 	// Init then rebuilds the run instead of cold-starting a plan session.
 	Resume string
@@ -54,9 +58,32 @@ type Config struct {
 	Replay    func(id string) ([]driver.Event, error)
 }
 
+// readOnlyParentTools are the tools that get no countdown when the supervising
+// session itself calls them.
+//
+// Bash is deliberately absent. It is the one mutation vector that survives a
+// read-only registry — `bash -c 'rm -rf'` is not a read — so it keeps its
+// countdown. Everything here can only look.
+//
+// This is an allowlist rather than a denylist on purpose: a tool nobody thought
+// about should count down, not sail through.
+var readOnlyParentTools = map[string]bool{
+	"Read": true, "Grep": true, "Glob": true,
+	"WebFetch": true, "WebSearch": true,
+	"ToolSearch": true, "TaskList": true, "TaskGet": true,
+}
+
+// answerTools are the tools a model uses to *return* something rather than to
+// do something. They cannot touch the working tree, and a countdown on one buys
+// no safety while costing the delay on every dispatched task.
+var answerTools = map[string]bool{
+	"StructuredOutput": true,
+}
+
 // gateItem is a permission request the UI is counting down.
 type gateItem struct {
 	p         *gate.Pending
+	task      string        // the delegated task that raised it ("" = the parent)
 	deadline  time.Time     // when it auto-approves (valid when not paused)
 	remaining time.Duration // frozen time left (valid when paused)
 }
@@ -94,6 +121,28 @@ type Model struct {
 	costSettled  float64 // banked: previous driver generations
 	costCurrent  float64 // the running session's latest total_cost_usd
 
+	// Tokens need none of that banking, because claude reports usage per turn
+	// rather than per process — so these just accumulate, and go on accumulating
+	// straight through a --resume.
+	//
+	// The split by spender is the point: work delegated to a child process costs
+	// tokens, but it costs them over there, and parentTokens staying flat while
+	// childTokens climbs is the whole thesis of the orchestrator made visible.
+	parentTokens state.Tokens
+	childTokens  state.Tokens
+	childCost    float64
+	dispatches   int
+	tasks        []state.Task // the ledger, for the snapshot and the resume notice
+
+	// interruptedTasks names tasks a restart caught mid-flight, so the resume
+	// prompt can hand the decision to the session rather than guessing.
+	interruptedTasks []string
+
+	// lastContext is the most recent turn's context size — a reading, not a
+	// total. It is what shows a context growing without bound.
+	lastContext   int
+	contextWindow int // from modelUsage; 0 until a result event reports it
+
 	// slash-command / overlay state
 	nextModel     string // --model override applied to the next launched session (/model)
 	showHelp      bool   // the /help overlay is open
@@ -112,6 +161,9 @@ type Model struct {
 	saveState func(s state.Snapshot) error
 	replay    func(id string) ([]driver.Event, error)
 
+	// delegation. nil disables it: the tool is refused rather than half-served.
+	dispatcher Dispatcher
+
 	// gate / countdown state
 	gateReqs  <-chan *gate.Pending
 	askReqs   <-chan *mcp.Pending
@@ -127,8 +179,6 @@ type Model struct {
 	gen         int       // current driver generation
 	turnText    string    // assistant text accumulated for the current turn
 	planBody    string    // approved plan text, captured at ExitPlanMode
-	preloaded   bool      // done-check prompt is sitting in the input, awaiting send
-	rounds      int       // auto-nudge rounds taken in this run
 	processing  bool      // a turn is in flight (model working)
 	interrupted bool      // user interrupted the current turn; don't auto-nudge
 	spinFrame   int       // advances every tick to animate the "working…" spinner
@@ -180,6 +230,7 @@ func New(drv *driver.Driver, cfg Config) Model {
 		maxLines:  cfg.MaxLines,
 
 		sessionLister: cfg.Sessions,
+		dispatcher:    cfg.Dispatcher,
 
 		cwd:       cfg.Cwd,
 		resumeID:  cfg.Resume,
@@ -225,6 +276,9 @@ func waitEvent(ch <-chan driver.Event, gen int) tea.Cmd {
 
 func (m Model) Init() tea.Cmd {
 	cmds := []tea.Cmd{textarea.Blink, waitGate(m.gateReqs), waitAsk(m.askReqs), tickCmd()}
+	if m.dispatcher != nil {
+		cmds = append(cmds, waitChild(m.dispatcher.Events()))
+	}
 	switch {
 	case m.drv != nil:
 		cmds = append(cmds, waitEvent(m.drv.Events(), m.gen))
@@ -311,12 +365,54 @@ func (m *Model) ingest(ev driver.Event) {
 	case driver.TypeResult:
 		// Assigned, not added: total_cost_usd is this process's running total.
 		m.costCurrent = ev.TotalCostUSD
+		// Added, not assigned: usage is this *turn's* count. Getting these two
+		// the wrong way round is silent — both keep producing plausible numbers.
+		m.parentTokens.Add(tokensOf(ev.Usage))
+		m.lastContext = ev.Usage.ContextSize()
+		m.noteContextWindow(ev.ModelUsage)
 		m.processing = false
 		m.status = "idle"
 		m.appendEntry(entry{kind: eTurn, body: fmt.Sprintf(
-			"──── turn complete · stop=%s · $%.4f ────", ev.StopReason, m.totalCost())})
+			"──── turn complete · stop=%s · %s · $%.4f ────",
+			ev.StopReason, ctxNote(m.lastContext, m.contextWindow), m.totalCost())})
 	}
 }
+
+// tokensOf converts a turn's usage into the tally type. The conversion lives
+// here rather than in state so that package state keeps depending on nothing.
+func tokensOf(u *driver.Usage) state.Tokens {
+	if u == nil {
+		return state.Tokens{}
+	}
+	return state.Tokens{
+		Input:       int64(u.InputTokens),
+		Output:      int64(u.OutputTokens),
+		CacheCreate: int64(u.CacheCreationInputTokens),
+		CacheRead:   int64(u.CacheReadInputTokens),
+	}
+}
+
+// noteContextWindow records the largest context window any model in the turn
+// reported. A turn can touch several models (a small one does some internal
+// work), and it is the main model's window that bounds the conversation.
+func (m *Model) noteContextWindow(mu map[string]driver.ModelUsage) {
+	for _, u := range mu {
+		if u.ContextWindow > m.contextWindow {
+			m.contextWindow = u.ContextWindow
+		}
+	}
+}
+
+// allTokens is the run's total across the parent and every child it dispatched.
+func (m Model) allTokens() state.Tokens {
+	t := m.parentTokens
+	t.Add(m.childTokens)
+	return t
+}
+
+// grandTotalCost includes child processes, which report their spend to the
+// orchestrator rather than through this model's driver.
+func (m Model) grandTotalCost() float64 { return m.totalCost() + m.childCost }
 
 // totalCost is what the run has spent so far, across every claude process it has
 // launched: the plan session and each resumed auto-run session.
@@ -367,9 +463,11 @@ func (m Model) billingNote() string {
 // ask overlay (which outranks the gate panel in both key routing and rendering) and
 // then "auto-approve" a tool acy had already answered. See enqueue in gate.go.
 var intercepted = map[string]bool{
-	"ExitPlanMode": true,
-	mcp.ToolAsk:    true,
-	mcp.ToolPlan:   true,
+	"ExitPlanMode":   true,
+	mcp.ToolAsk:      true,
+	mcp.ToolDispatch: true,
+	mcp.ToolFinish:   true,
+	mcp.ToolPlan:     true,
 }
 
 // baseToolName strips an "mcp__<server>__" prefix so an MCP-provided tool is
@@ -406,6 +504,15 @@ func (m *Model) ingestToolUse(b driver.ContentBlock) {
 		return
 	case mcp.ToolAsk:
 		return // rendered by openAsk, which owns the answer
+	case mcp.ToolDispatch:
+		return // rendered by startDispatch, which owns the task
+	case mcp.ToolFinish:
+		// The run ending, read from the tool call itself. The `acy mcp` child
+		// answers Finish locally, so this event is the only place the outcome
+		// appears — exactly the arrangement PresentPlan already uses.
+		outcome, summary := finishText(b.Input)
+		m.finish(outcome, summary)
+		return
 	}
 	name := baseToolName(b.Name)
 	m.appendEntry(entry{kind: eTool, title: b.Name, body: toolBody(name, b.Input), styled: styledTools[name]})
@@ -448,6 +555,25 @@ func planText(raw json.RawMessage) string {
 		return obj.Plan
 	}
 	return string(raw)
+}
+
+// finishText pulls the outcome and summary out of a Finish call. A malformed
+// call still ends the run: the session has said it is done, and refusing to
+// believe it over a missing field would leave the run wedged with nothing
+// driving it.
+func finishText(raw json.RawMessage) (outcome, summary string) {
+	var obj struct {
+		Outcome string `json:"outcome"`
+		Summary string `json:"summary"`
+	}
+	if len(raw) > 0 {
+		_ = json.Unmarshal(raw, &obj)
+	}
+	outcome = strings.TrimSpace(obj.Outcome)
+	if outcome == "" {
+		outcome = "completed"
+	}
+	return outcome, strings.TrimSpace(obj.Summary)
 }
 
 // toolBody renders a tool call's input as a multi-line preview for the

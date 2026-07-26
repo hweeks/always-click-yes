@@ -26,6 +26,72 @@ const SchemaVersion = 1
 // EnvDir overrides the snapshot directory. Tests set it; a user could too.
 const EnvDir = "ACY_STATE_DIR"
 
+// Tokens is a running token tally. Unlike cost — which claude reports as a
+// process-cumulative figure and which therefore has to be assigned and banked —
+// token usage arrives per turn, so this simply accumulates and needs no
+// settled/current split to survive a --resume.
+//
+// int64 because CacheRead reaches millions in a single run: one measured run
+// read 8,697,690 cached tokens against 75,011 output.
+type Tokens struct {
+	Input       int64 `json:"input,omitempty"`
+	Output      int64 `json:"output,omitempty"`
+	CacheCreate int64 `json:"cache_create,omitempty"`
+	CacheRead   int64 `json:"cache_read,omitempty"`
+}
+
+// Add accumulates one turn's usage.
+func (t *Tokens) Add(o Tokens) {
+	t.Input += o.Input
+	t.Output += o.Output
+	t.CacheCreate += o.CacheCreate
+	t.CacheRead += o.CacheRead
+}
+
+// Volume is every token the run was billed for reading or writing. Cache reads
+// are cheaper per token, not free, and they dominate the count so completely
+// that this is effectively a proxy for the bill.
+func (t Tokens) Volume() int64 { return t.Input + t.Output + t.CacheCreate + t.CacheRead }
+
+// IsZero reports whether anything has been recorded yet.
+func (t Tokens) IsZero() bool { return t == Tokens{} }
+
+// Task is one delegated unit of work, as the ledger remembers it.
+//
+// The child's own transcript is on disk under claude's projects directory, so
+// this is deliberately just the index: enough to say what was run, what it cost,
+// how it ended, and — the part that matters on a resume — whether it ended at
+// all.
+type Task struct {
+	ID        string    `json:"id"`
+	SessionID string    `json:"session_id"`
+	Title     string    `json:"title"`
+	Outcome   string    `json:"outcome,omitempty"`
+	CostUSD   float64   `json:"cost_usd,omitempty"`
+	Tokens    Tokens    `json:"tokens,omitzero"`
+	StartedAt time.Time `json:"started_at,omitzero"`
+	EndedAt   time.Time `json:"ended_at,omitzero"`
+}
+
+// Unfinished reports a task that was still running when the snapshot was taken.
+// After a crash that means a child process died mid-edit, so the working tree
+// may hold half its work — which is exactly the situation where a resume must
+// ask a human rather than guess.
+func (t Task) Unfinished() bool { return t.EndedAt.IsZero() }
+
+// maxLedgerTasks bounds the ledger so a long run's snapshot stays a small file.
+// The oldest entries are dropped; the count in Dispatches is not, so the total
+// stays honest even when the detail has been elided.
+const maxLedgerTasks = 100
+
+// TrimTasks keeps the newest tasks, oldest first.
+func TrimTasks(tasks []Task) []Task {
+	if len(tasks) <= maxLedgerTasks {
+		return tasks
+	}
+	return tasks[len(tasks)-maxLedgerTasks:]
+}
+
 // Snapshot is acy's state for one claude session.
 type Snapshot struct {
 	Version   int    `json:"version"`
@@ -38,15 +104,33 @@ type Snapshot struct {
 	// the run is resumed.
 	PlanBody string `json:"plan_body,omitempty"`
 
-	// Rounds is how many auto-nudge rounds the run has already spent. Restoring
-	// it is what keeps maxAutoRounds bounding the whole run instead of handing it a
-	// fresh budget on every resume.
-	Rounds int `json:"rounds"`
+	// Rounds counted auto-nudges of the completion loop, which no longer exists
+	// — a run now ends when the session calls Finish. Kept so that snapshots
+	// written by older builds still decode, and so their /resume rows still say
+	// something; nothing writes it any more. See Dispatches.
+	Rounds int `json:"rounds,omitempty"`
 
 	// CostSettled is what every process in this run has spent so far. A resumed
 	// claude process restarts its own total_cost_usd at zero, so the tally survives
 	// a restart only because it is banked here.
 	CostSettled float64 `json:"cost_settled"`
+
+	// ParentTokens and ChildTokens split the run's token usage by who spent it.
+	// The whole point of delegating work to disposable child processes is that
+	// ParentTokens stops growing with the size of the job, so keeping the two
+	// apart is what makes that claim checkable rather than merely plausible.
+	//
+	// ChildCost is likewise separate from CostSettled, which tracks only the
+	// parent's own processes.
+	ParentTokens Tokens  `json:"parent_tokens,omitzero"`
+	ChildTokens  Tokens  `json:"child_tokens,omitzero"`
+	ChildCost    float64 `json:"child_cost,omitempty"`
+	Dispatches   int     `json:"dispatches,omitempty"`
+
+	// Tasks is the ledger: the run's receipt, the source of the /resume
+	// picker's child filter, and how a restart discovers what was in flight
+	// when it died.
+	Tasks []Task `json:"tasks,omitempty"`
 
 	// Lineage and SupersededBy track a session id changing under us. claude 2.1.207
 	// keeps the id across --resume (verified against real transcripts), so these

@@ -24,14 +24,23 @@ const maxLine = 1 << 20
 
 // Serve runs the JSON-RPC loop until in is exhausted (claude closing our stdin is
 // the normal shutdown) or an unrecoverable read error occurs.
-func Serve(in io.Reader, out io.Writer, h Handler) error {
+//
+// role decides which tools this server advertises. It is fixed at spawn time by
+// the caller's --role flag rather than negotiated, so a child cannot talk its
+// way into the parent's toolset.
+//
+// The loop is deliberately serial: handle runs inline, so a second tools/call is
+// not read off stdin until the first has answered. That is load-bearing for
+// Dispatch — it is what makes one task at a time a property of the transport
+// rather than a rule somebody has to remember.
+func Serve(in io.Reader, out io.Writer, role Role, h Handler) error {
 	br := bufio.NewReaderSize(in, maxLine)
 	enc := json.NewEncoder(out)
 
 	for {
 		line, err := br.ReadBytes('\n')
 		if len(bytes.TrimSpace(line)) > 0 {
-			if resp, ok := handle(line, h); ok {
+			if resp, ok := handle(line, role, h); ok {
 				if err := enc.Encode(resp); err != nil {
 					return err
 				}
@@ -48,7 +57,7 @@ func Serve(in io.Reader, out io.Writer, h Handler) error {
 
 // handle decodes one message and produces its response. ok is false when the
 // message must not be answered at all.
-func handle(line []byte, h Handler) (response, bool) {
+func handle(line []byte, role Role, h Handler) (response, bool) {
 	var req request
 	if err := json.Unmarshal(bytes.TrimSpace(line), &req); err != nil {
 		// No id could be recovered, so there is nobody to send an error to.
@@ -66,7 +75,7 @@ func handle(line []byte, h Handler) (response, bool) {
 	case "initialize":
 		resp.Result = initResult(req.Params)
 	case "tools/list":
-		resp.Result = map[string]any{"tools": toolDefs()}
+		resp.Result = map[string]any{"tools": toolDefs(role)}
 	case "tools/call":
 		resp.Result = callResult(req.Params, h)
 	case "ping":

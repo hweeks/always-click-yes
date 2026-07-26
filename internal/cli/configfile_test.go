@@ -30,7 +30,7 @@ func defaultFlags() Flags {
 		Countdown: 30 * time.Second,
 		LogPath:   "acy-debug.log",
 		MaxLines:  10,
-		PlanTools: defaultPlanTools,
+		PlanTools: DefaultParentTools,
 	}
 }
 

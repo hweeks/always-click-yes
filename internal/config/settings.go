@@ -50,12 +50,15 @@ func WriteHookSettings(dir, exePath, socketPath string) (string, error) {
 // exec'd directly from a command + args array — so the path must NOT be
 // shellQuoted here, or claude would try to exec a binary whose name begins with a
 // literal quote.
-func WriteMCPConfig(dir, exePath, socketPath string) (string, error) {
+// One config is written per role, and they differ only in that flag. A child
+// inherits nothing: it is launched with the child config, so it never sees
+// Dispatch and cannot spawn children of its own.
+func WriteMCPConfig(dir, exePath, socketPath string, role mcp.Role) (string, error) {
 	cfg := map[string]any{
 		"mcpServers": map[string]any{
 			mcp.ServerName: map[string]any{
 				"command": exePath,
-				"args":    []string{"mcp", "--socket", socketPath},
+				"args":    []string{"mcp", "--socket", socketPath, "--role", string(role)},
 			},
 		},
 	}
@@ -63,7 +66,7 @@ func WriteMCPConfig(dir, exePath, socketPath string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	path := filepath.Join(dir, "mcp.json")
+	path := filepath.Join(dir, "mcp-"+string(role)+".json")
 	if err := os.WriteFile(path, b, 0o600); err != nil {
 		return "", err
 	}

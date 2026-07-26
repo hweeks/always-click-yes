@@ -104,7 +104,7 @@ func TestE2EResumeAnArmedRunAfterACrash(t *testing.T) {
 	// spends the first auto-round — or, if the replayed turn already said DONE,
 	// completes on the spot.
 	second.waitFor("the resumed run to pick itself back up", 3*time.Minute, func(m ui.Model) bool {
-		return m.Rounds() > 0 || m.Phase() == ui.PhaseComplete
+		return m.Dispatches() > 0 || m.Phase() == ui.PhaseComplete
 	})
 
 	// And now the payoff: nobody touches the keyboard, and it finishes.

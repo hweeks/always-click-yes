@@ -1,5 +1,7 @@
 package ui
 
+import "github.com/hweeks/always-click-yes/internal/state"
+
 // Accessors for driving the model from outside the package — specifically the live
 // e2e suite (internal/e2e), which runs a real supervisor without a terminal and has
 // to be able to ask it what happened. They are read-only views of state the TUI
@@ -25,8 +27,21 @@ func (m Model) Transcript() string { return m.transcript() }
 // TotalCost is what the run has spent across every claude process it launched.
 func (m Model) TotalCost() float64 { return m.totalCost() }
 
-// Rounds is how many times the completion loop has auto-nudged the working session.
-func (m Model) Rounds() int { return m.rounds }
+// Dispatches is how many tasks this run has delegated to child processes. It
+// replaces Rounds, which counted auto-nudges of a loop that no longer exists.
+func (m Model) Dispatches() int { return m.dispatches }
+
+// ParentTokens is everything the supervising session itself has spent. Keeping
+// this bounded as a job grows is the point of delegating work to child
+// processes, so the e2e suite asserts on it directly.
+func (m Model) ParentTokens() state.Tokens { return m.parentTokens }
+
+// ChildTokens is the total across every dispatched child process.
+func (m Model) ChildTokens() state.Tokens { return m.childTokens }
+
+// LastContext is how much context the most recent turn carried — a reading of
+// the conversation's current size, not a running total.
+func (m Model) LastContext() int { return m.lastContext }
 
 // PendingGates is how many permission requests are counting down right now.
 func (m Model) PendingGates() int { return len(m.pending) }

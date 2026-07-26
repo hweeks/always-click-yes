@@ -71,6 +71,12 @@ func resumeModel(t *testing.T, snap state.Snapshot, hasSnap bool, evs []driver.E
 
 // The live stream never echoes the prompts acy injects, so replaying a transcript
 // through ingest alone would show Claude's answers with none of the questions.
+// nopCloser makes a strings.Builder do as a driver's stdin, so a test can see
+// what would have been sent without starting a process.
+type nopCloser struct{ *strings.Builder }
+
+func (nopCloser) Close() error { return nil }
+
 func TestApplyResumeReplaysBothSidesOfTheConversation(t *testing.T) {
 	evs := []driver.Event{
 		userEvent("add a doc comment"),
@@ -121,7 +127,7 @@ func TestApplyResumeRestoresRunState(t *testing.T) {
 		Cwd:         "/proj",
 		Phase:       "AUTO-RUN",
 		PlanBody:    "the approved plan",
-		Rounds:      3,
+		Dispatches:  3,
 		CostSettled: 1.25,
 	}
 	m, _ := resumeModel(t, snap, true, nil)
@@ -134,8 +140,8 @@ func TestApplyResumeRestoresRunState(t *testing.T) {
 	if m.planBody != "the approved plan" {
 		t.Errorf("planBody = %q", m.planBody)
 	}
-	if m.rounds != 3 {
-		t.Errorf("rounds = %d, want 3 — the auto-round budget must not reset on resume", m.rounds)
+	if m.dispatches != 3 {
+		t.Errorf("dispatches = %d, want 3 — the task ledger must survive a restart", m.dispatches)
 	}
 	if m.totalCost() != 1.25 {
 		t.Errorf("totalCost = %.2f, want 1.25 — the tally must survive the restart", m.totalCost())
@@ -232,7 +238,7 @@ func TestPersistWritesWhatResumeNeeds(t *testing.T) {
 	m.sessionID = "sess-9"
 	m.phase = PhaseAutoRun
 	m.planBody = "plan text"
-	m.rounds = 2
+	m.dispatches = 2
 	m.costSettled = 1.0
 	m.costCurrent = 0.5
 
@@ -245,7 +251,7 @@ func TestPersistWritesWhatResumeNeeds(t *testing.T) {
 	if got.Phase != "AUTO-RUN" {
 		t.Errorf("phase = %q", got.Phase)
 	}
-	if got.Rounds != 2 || got.PlanBody != "plan text" || got.Cwd != "/proj" {
+	if got.Dispatches != 2 || got.PlanBody != "plan text" || got.Cwd != "/proj" {
 		t.Errorf("snapshot = %+v", got)
 	}
 	// The running session's spend must be banked: on resume its process starts over
@@ -317,36 +323,97 @@ func TestAdoptSessionIsANoOpWhenTheIDIsUnchanged(t *testing.T) {
 
 // The completion check's only evidence of what happened is the working session's
 // last message. onDriverReady clears turnText on every launch — but a resumed
-// auto-run is the one launch where the replay deliberately put the final assistant
-// turn there. Clearing it would erase a STATUS: DONE the session had already said
-// and nudge a finished run back into motion.
-func TestResumedAutoRunReadsTheReplayedLastMessage(t *testing.T) {
+// A resumed auto-run gets exactly one prompt.
+//
+// Deleting the nudge loop briefly deleted this too, and crash recovery went with
+// it: a restored run came back armed and then sat there forever, because nothing
+// was left to pick it up. One prompt, sent because a human explicitly asked to
+// resume, is not the loop coming back — the loop fired after every idle turn.
+func TestResumedAutoRunIsPickedBackUpOnce(t *testing.T) {
 	var sent strings.Builder
 	m := New(nil, Config{Ctx: context.Background(), Countdown: 30 * time.Second})
 	m.planBody = "the approved plan"
-	m.turnText = "I finished both files.\nSTATUS: DONE" // what the replay recovered
 
 	drv := driver.NewWithWriter(driver.Options{}, nopCloser{&sent})
-	m.onDriverReady(driverReadyMsg{drv: drv, phase: PhaseAutoRun, kickoff: false})
+	m.onDriverReady(driverReadyMsg{drv: drv, phase: PhaseAutoRun})
 
-	if m.phase != PhaseComplete {
-		t.Fatalf("phase = %s, want COMPLETE — the launch ate the evidence on its way past", m.phase)
+	if !strings.Contains(sent.String(), "restored") {
+		t.Errorf("a restored run must be picked back up; stdin got:\n%s", sent.String())
 	}
-	if sent.String() != "" {
-		t.Errorf("a run that already said DONE must not be prompted; stdin got:\n%s", sent.String())
+	if strings.Count(sent.String(), "\n") > 1 {
+		t.Errorf("exactly one prompt, not a loop; stdin got:\n%s", sent.String())
+	}
+	if m.phase != PhaseAutoRun {
+		t.Errorf("phase = %s, want AUTO-RUN", m.phase)
 	}
 }
 
-// Arming still starts a fresh turn, so it must still clear the last turn's text.
-func TestArmingClearsTheLastTurn(t *testing.T) {
+// A cold plan session must not be prompted — there is nothing to resume.
+func TestColdPlanLaunchSendsNothing(t *testing.T) {
+	var sent strings.Builder
+	m := New(nil, Config{Ctx: context.Background(), Countdown: 30 * time.Second})
+
+	drv := driver.NewWithWriter(driver.Options{}, nopCloser{&sent})
+	m.onDriverReady(driverReadyMsg{drv: drv, phase: PhasePlan})
+
+	if sent.String() != "" {
+		t.Errorf("a cold start must not be prompted; stdin got:\n%s", sent.String())
+	}
+}
+
+// A task caught mid-flight by a crash may have half-applied its work, so the
+// resume must name it and hand the decision over rather than silently
+// re-dispatching it or silently skipping it.
+func TestInterruptedTasksAreNamedInTheResumePrompt(t *testing.T) {
+	snap := state.Snapshot{
+		SessionID: "sess-1", Phase: "AUTO-RUN",
+		Dispatches: 2,
+		Tasks: []state.Task{
+			{ID: "t1", Title: "add the ledger", Outcome: "completed",
+				StartedAt: time.Now(), EndedAt: time.Now()},
+			{ID: "t2", Title: "wire the header", StartedAt: time.Now()}, // never ended
+		},
+	}
+	m, _ := resumeModel(t, snap, true, nil)
+	m.applyResume(resumeMsg{id: "sess-1", snap: snap, hasSnap: true})
+
+	if got := m.resumePrompt(); !strings.Contains(got, "t2") || !strings.Contains(got, "wire the header") {
+		t.Errorf("the resume prompt must name the interrupted task, got:\n%s", got)
+	}
+	if got := m.resumePrompt(); strings.Contains(got, "t1") {
+		t.Errorf("a finished task must not be reported as interrupted, got:\n%s", got)
+	}
+	// And it must be recorded as such, not left looking live forever.
+	for _, task := range m.tasks {
+		if task.ID == "t2" && task.Outcome != "interrupted" {
+			t.Errorf("t2 outcome = %q, want interrupted", task.Outcome)
+		}
+	}
+	if !strings.Contains(m.Transcript(), "interrupted by the restart") {
+		t.Error("the user should be told a task was cut off mid-flight")
+	}
+}
+
+// Arming sends the kickoff on the session already running, rather than launching
+// a second process for it.
+func TestArmSendsTheKickoffOnTheSameDriver(t *testing.T) {
+	var sent strings.Builder
 	m := New(nil, Config{Countdown: 30 * time.Second})
+	m.sessionID = "s1"
+	m.drv = driver.NewWithWriter(driver.Options{}, nopCloser{&sent})
 	m.turnText = "chatter from the planning conversation"
+	gen := m.gen
 
-	drv := driver.NewWithWriter(driver.Options{}, nopCloser{&strings.Builder{}})
-	m.onDriverReady(driverReadyMsg{drv: drv, phase: PhaseAutoRun, kickoff: true})
+	m.arm()
 
-	if m.turnText != "" {
-		t.Errorf("turnText = %q, want it cleared for the new turn", m.turnText)
+	if !strings.Contains(sent.String(), "The plan is approved") {
+		t.Errorf("the kickoff never reached the running session; stdin got:\n%s", sent.String())
+	}
+	if m.gen != gen {
+		t.Error("arming must not swap the driver — that was a whole second process and a second context")
+	}
+	if !m.processing {
+		t.Error("arming starts a turn")
 	}
 }
 

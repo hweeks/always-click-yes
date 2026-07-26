@@ -73,7 +73,7 @@ func TestCompleteEntryNamesTheBillingAccount(t *testing.T) {
 	m := New(nil, Config{})
 	m.ingest(initEvent("none"))
 	m.ingest(resultEvent(0.75))
-	m.markComplete()
+	m.finish("completed", "")
 
 	last := m.entries[len(m.entries)-1].body
 	if !strings.Contains(last, "$0.7500") || !strings.Contains(last, "subscription (not billed)") {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -15,6 +16,7 @@ import (
 	"github.com/hweeks/always-click-yes/internal/driver"
 	"github.com/hweeks/always-click-yes/internal/gate"
 	"github.com/hweeks/always-click-yes/internal/mcp"
+	"github.com/hweeks/always-click-yes/internal/orchestrator"
 	"github.com/hweeks/always-click-yes/internal/session"
 	"github.com/hweeks/always-click-yes/internal/state"
 	"github.com/hweeks/always-click-yes/internal/term"
@@ -37,8 +39,15 @@ type Flags struct {
 	MaxLines  int
 	PlanTools []string
 	UseAPIKey bool
-	Resume    string
-	Continue  bool
+
+	// Child knobs. A dispatched child is a different kind of session from the
+	// supervising one — it does the work, unwatched, and then throws its whole
+	// context away — so it is worth being able to price and pace it separately.
+	ChildModel  string
+	ChildEffort string
+	TaskBudget  float64
+	Resume      string
+	Continue    bool
 
 	Cwd     string // working directory for claude; "" = acy's own
 	HookBin string // binary the PreToolUse hook re-invokes; "" = this executable
@@ -76,20 +85,33 @@ func applyFileConfig(f *Flags, c config.File, changed func(string) bool) {
 	if c.UseAPIKey != nil && !changed("use-api-key") {
 		f.UseAPIKey = *c.UseAPIKey
 	}
+	if c.ChildModel != "" && !changed("child-model") {
+		f.ChildModel = c.ChildModel
+	}
+	if c.ChildEffort != "" && !changed("child-effort") {
+		f.ChildEffort = c.ChildEffort
+	}
+	if c.TaskBudget != nil && !changed("task-budget") {
+		f.TaskBudget = *c.TaskBudget
+	}
 	f.ConfigPath = c.Path
 }
 
-// defaultPlanTools is the built-in registry the plan phase runs with (--tools).
-// Everything here is read-only except Bash, which earns its place because plans
-// worth trusting come from running the tests and reading the git log — and which is
-// consequently the only mutation vector left, so it is the one thing the gate still
-// puts a countdown on during PLAN (see ui.enqueue).
+// DefaultParentTools is the built-in registry the *supervising* session runs with
+// (--tools), in both phases — it is one process now, and arming does not change
+// what it can reach for.
 //
-// Write, Edit, NotebookEdit and Task are absent by design. Their absence, not a
-// permission mode, is what makes planning safe now.
-var defaultPlanTools = []string{
-	"Read", "Grep", "Glob", "Bash", "WebFetch", "WebSearch", "Skill", "ToolSearch",
-}
+// Three read-only tools, and nothing else. Not a permission setting: Write,
+// Edit, Bash and Task are not denied, they do not exist in this registry at all,
+// which is a guarantee no prompt can talk its way past. It is also what lets the
+// system prompt stop saying "do not implement" — there is nothing to implement
+// with. Real work happens in dispatched children, which do get the full set.
+//
+// Bash is the notable removal: it used to be here so a plan could be informed by
+// running the tests. It is also the one tool that can change anything from a
+// read-only registry, and its output is exactly the unbounded tool result that
+// grows a context. Dispatch a task to run things instead.
+var DefaultParentTools = []string{"Read", "Grep", "Glob"}
 
 func newRunCmd() *cobra.Command {
 	var f Flags
@@ -108,8 +130,11 @@ func newRunCmd() *cobra.Command {
 	cmd.Flags().DurationVar(&f.Countdown, "countdown", 30*time.Second, "auto-approve delay per gated tool")
 	cmd.Flags().StringVar(&f.LogPath, "log", "acy-debug.log", "debug log file (raw event stream, gate decisions, transitions); empty to disable")
 	cmd.Flags().IntVar(&f.MaxLines, "max-lines", 10, "max lines shown per tool call/result/thinking block in the transcript")
-	cmd.Flags().StringSliceVar(&f.PlanTools, "plan-tools", defaultPlanTools, "the built-in tools claude may use while planning (--tools). This is the registry, not an allowlist: anything left out cannot be called at all, which is what keeps the plan phase read-only. acy's own mcp__acy__* tools are always available.")
+	cmd.Flags().StringSliceVar(&f.PlanTools, "plan-tools", DefaultParentTools, "the built-in tool registry for the supervising session, in both phases (--tools). This is the registry, not an allowlist: anything left out cannot be called at all, which is what keeps the session you talk to unable to change your code. Dispatched children always get the full set; acy's own mcp__acy__* tools are always available.")
 	cmd.Flags().BoolVar(&f.UseAPIKey, "use-api-key", false, "bill ANTHROPIC_API_KEY instead of the claude.ai login; by default the key is stripped from claude's environment, since headless runs would otherwise use it silently")
+	cmd.Flags().StringVar(&f.ChildModel, "child-model", "", "model for dispatched tasks; empty = same as --model. A cheaper model here is often the single biggest saving, since children do the bulk of the work")
+	cmd.Flags().StringVar(&f.ChildEffort, "child-effort", "", "reasoning effort for dispatched tasks (low, medium, high, xhigh, max); empty = claude's default")
+	cmd.Flags().Float64Var(&f.TaskBudget, "task-budget", 0, "spend ceiling in USD for one dispatched task (0 = none). A runaway child stops instead of running until you notice")
 	cmd.Flags().StringVar(&f.Resume, "resume", "", "resume a prior acy session by id, restoring its transcript, phase and cost")
 	cmd.Flags().BoolVarP(&f.Continue, "continue", "c", false, "resume the most recent acy session in this directory")
 	cmd.MarkFlagsMutuallyExclusive("resume", "continue")
@@ -231,9 +256,17 @@ func NewSupervisor(ctx context.Context, f Flags) (*Supervisor, error) {
 	}
 	closers = append(closers, func() { _ = bridge.Close() })
 
-	mcpConfigPath, err := config.WriteMCPConfig(tmp, exe, bridge.SocketPath())
+	// Two configs, differing only in --role. A child is launched with the child
+	// one, so it never sees Dispatch: without that split it would inherit the
+	// parent's config, gain the ability to delegate, and spawn an unbounded tree
+	// of unsupervised processes.
+	mcpConfigPath, err := config.WriteMCPConfig(tmp, exe, bridge.SocketPath(), mcp.RoleParent)
 	if err != nil {
 		return fail(fmt.Errorf("write mcp config: %w", err))
+	}
+	mcpChildConfigPath, err := config.WriteMCPConfig(tmp, exe, bridge.SocketPath(), mcp.RoleChild)
+	if err != nil {
+		return fail(fmt.Errorf("write child mcp config: %w", err))
 	}
 
 	// launcher starts a claude driver appropriate to each phase. Both get the
@@ -262,16 +295,64 @@ func NewSupervisor(ctx context.Context, f Flags) (*Supervisor, error) {
 			MCPConfigPath:  mcpConfigPath,
 			ResumeID:       spec.ResumeID, // /resume, or arming, continues a prior session
 		}
-		switch spec.Phase {
-		case ui.PhaseAutoRun:
-			opts.AppendSystemPrompt = ui.AutoRunSystemPrompt
-		default: // PhasePlan
-			opts.Tools = f.PlanTools
-			opts.AppendSystemPrompt = ui.PlanSystemPrompt
-			// Only acy's MCP server while planning: a server from the user's own
-			// config would put tools straight back into the registry that --tools was
-			// chosen to keep out.
-			opts.StrictMCP = true
+		// The same registry and the same prompt in both phases, because both
+		// phases are now the same process. Arming changes what acy permits, not
+		// what claude is: the supervising session can only ever read, and the
+		// work is done by children it dispatches.
+		opts.Tools = f.PlanTools
+		opts.AppendSystemPrompt = ui.ParentSystemPrompt
+		// Only acy's MCP server: one from the user's own config would put tools
+		// straight back into the registry that --tools was chosen to keep out.
+		opts.StrictMCP = true
+		d := driver.New(opts)
+		if err := d.Start(ctx); err != nil {
+			return nil, err
+		}
+		return d, nil
+	}
+
+	// spawn launches a child for one delegated task. It sits beside launcher on
+	// purpose: both build a driver from the same settingsPath, and that shared
+	// line is what gives a child exactly the same PreToolUse gate the parent
+	// has. A child is not a trusted process — it is an unwatched one, which is
+	// the opposite.
+	//
+	// What makes it disposable rather than merely separate: its own session id,
+	// the full tool registry, a schema it must answer in, and a spend ceiling.
+	// When it exits, the entire context it built up goes with it.
+	spawn := func(ctx context.Context, t orchestrator.Task) (orchestrator.Child, error) {
+		opts := driver.Options{
+			Bin:                f.Bin,
+			Cwd:                f.Cwd,
+			Model:              f.Model,
+			UseAPIKey:          f.UseAPIKey,
+			PermissionMode:     "default",
+			SettingsPath:       settingsPath, // the same gate as the parent
+			IncludeHooks:       true,
+			MCPConfigPath:      mcpChildConfigPath, // Ask, but never Dispatch
+			SessionID:          t.SessionID,        // pre-assigned, so gates attribute on arrival
+			AppendSystemPrompt: ui.ChildSystemPrompt,
+			ExtraArgs: []string{
+				// The report is the child's whole return value, so claude
+				// validates it rather than acy hoping for a sentinel.
+				"--json-schema", orchestrator.ReportSchema,
+				// Many short children share one system-prompt prefix; excluding
+				// the per-machine sections lets them share its cache entry too.
+				"--exclude-dynamic-system-prompt-sections",
+			},
+		}
+		// The task's own ceiling wins over the run's, so the parent can spend
+		// more on one hard task without raising the floor for every other.
+		budget := t.BudgetUSD
+		if budget <= 0 {
+			budget = f.TaskBudget
+		}
+		if budget > 0 {
+			opts.ExtraArgs = append(opts.ExtraArgs,
+				"--max-budget-usd", strconv.FormatFloat(budget, 'f', 2, 64))
+		}
+		if f.ChildEffort != "" {
+			opts.ExtraArgs = append(opts.ExtraArgs, "--effort", f.ChildEffort)
 		}
 		d := driver.New(opts)
 		if err := d.Start(ctx); err != nil {
@@ -279,6 +360,13 @@ func NewSupervisor(ctx context.Context, f Flags) (*Supervisor, error) {
 		}
 		return d, nil
 	}
+
+	// One child at a time. See orchestrator.New: acy's MCP server handles
+	// tools/call serially, so a second Dispatch is not even read off stdin until
+	// the first returns — and two children editing one working tree would
+	// corrupt each other regardless.
+	orch := orchestrator.New(spawn, 1)
+	closers = append(closers, func() { orch.Close() })
 
 	cwd := f.Cwd
 	if cwd == "" {
@@ -305,6 +393,7 @@ func NewSupervisor(ctx context.Context, f Flags) (*Supervisor, error) {
 		MaxLines:   f.MaxLines,
 		Cwd:        cwd,
 		Resume:     resumeID,
+		Dispatcher: orch,
 		LoadState:  state.Load,
 		SaveState:  state.Save,
 		Replay:     func(id string) ([]driver.Event, error) { return session.Replay(cwd, id) },

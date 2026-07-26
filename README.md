@@ -4,13 +4,35 @@
 
 A terminal supervisor for long-running [Claude Code](https://claude.com/claude-code)
 tasks. You plan a task interactively, **arm** it, and `always-click-yes` approves
-each permission prompt after a short, interruptible countdown — then, every time the
-run goes idle, it asks the **working session itself** whether the plan is complete
-and nudges it back to work until it says so. When it does, you're dropped into a
-normal chat with the session to vet what it built.
+each permission prompt after a short, interruptible countdown. The session you talk
+to can read your codebase but cannot change it: it delegates each piece of work to a
+**fresh `claude` process** that does the job, reports back in a few hundred tokens,
+and then disappears. When the work is done it hands you back a normal chat with the
+session, to vet what it built.
 
-It exists to solve one problem: *sitting at the keyboard pressing "yes" for the
-length of a long task.*
+It exists to solve two problems: *sitting at the keyboard pressing "yes" for the
+length of a long task*, and *paying for that task twice a minute.*
+
+## Why delegation
+
+One real run, measured from acy's own debug log:
+
+| | tokens |
+|---|---|
+| cache_read | **8,697,690** |
+| cache_creation | 454,900 |
+| output | 75,011 |
+| **cost** | **$16.04** |
+
+98% of the token volume was re-reading a context that only ever grew. A single
+session carrying an entire job re-presents every file it has ever read on every turn
+that follows — so the bill scales with the *square* of the work, not the work.
+
+So the conversation you hold stops accumulating the work. The supervising session
+keeps your chat and one compact report per task; the reading, editing and testing
+happen in child processes whose context evaporates when they exit. `/tokens` shows
+the split, which is the point: the parent's line should stay flat while the
+children's climbs.
 
 ## What this actually is
 
@@ -19,13 +41,19 @@ This is an experiment in total trust, and you should read it as one.
 The bet: a human makes contact exactly twice — at the plan, and at the end — and in
 between the machine runs unattended. No approvals, no spot-checks, no one reading the
 diff as it lands. Every decision in the middle is delegated, **including the decision
-about whether the work is done**: the model that did the work grades its own homework,
-by ending every reply with a `STATUS:` line that `acy` reads. (An earlier version spawned
-an independent judge session per idle check so the worker couldn't self-certify — it was
-more honest and burned tokens like a furnace, a fresh uncached context per check. The
-trade made here is explicit: self-grading in the session that already has the context,
-and the human vet moves to the end, where COMPLETE drops you into a chat with the session
-to check its work.)
+about whether the work is done**: the supervising session declares the run finished by
+calling a tool, and the human vet moves to the end, where COMPLETE drops you into a chat
+with that session to check its work.
+
+(Two earlier designs are worth naming, because both failed in instructive ways. The first
+spawned an independent judge session per idle check so the worker could not self-certify —
+honest, and it burned tokens like a furnace: a fresh uncached context every check. The
+second had the working session end every reply with a `STATUS:` line that acy read, and
+nudged it onward up to ten times — cheaper per check, but each nudge re-billed the whole
+accumulated conversation, and the substring match would fire if a reply merely *mentioned*
+the sentinel. Now the session ends the run with a tool call, which cannot be accidentally
+matched and cannot be missed — only not made, and the answer to that is a human, not
+another billed turn.)
 
 Call the output what it is. Unsupervised codegen at volume is slop, and this tool is a
 slop pump with a countdown timer. It is built to find out what happens when you stop
@@ -52,27 +80,31 @@ approval is done with a `PreToolUse` hook: the tool wants to run → the hook bl
 → the TUI shows a countdown → it auto-approves (or you veto).
 
 ```
-PLAN ──▶ (Ctrl+G arms) ──▶ AUTO-RUN ──▶ per-tool 30s countdown ──▶ auto-approve
-  │  interactive                │  claude works        ▲   │(veto / pause / allow)
-  │  chat & plan                │                      └───┘
-  └─ session captured           ▼ idle: read the turn's STATUS line
-                                │  STATUS: DONE ──▶ COMPLETE ──▶ chat & vet the work
-                                └▶ STATUS: CONTINUE (or none) ──▶ nudge, back to AUTO-RUN
+  SUPERVISING SESSION  (one process, --tools Read,Grep,Glob)
+  ├─ PLAN ──▶ (Ctrl+G arms, in place — nothing relaunches) ──▶ AUTO-RUN
+  │
+  ├─ Dispatch{task} ─────▶ CHILD PROCESS  (fresh session, full toolset)
+  │                        edits, runs tests, reads 150k of context
+  │  ◀── report ~300 tok ──┘ …then exits, and all of that context is gone
+  │                          (each gated tool: 30s countdown ──▶ auto-approve)
+  ├─ Dispatch{next task} ─▶ …
+  │
+  └─ Finish ──▶ COMPLETE ──▶ chat & vet the work
 ```
 
-During auto-run the system prompt has the working session end **every reply** with a
-sentinel line: `STATUS: DONE` when every step of the plan is complete, `STATUS: CONTINUE`
-when work remains. Each time the run goes idle, `acy` reads that line from the turn it
-just watched. `DONE` ends at COMPLETE and the composer becomes a normal chat — same
-session, full context — for you to vet the result. `CONTINUE` (or a missing line) sends a
-nudge back into the **same session**, which is nearly free by comparison: the resumed
-context is prompt-cached, and there is no second process to feed the plan to. After 10
-auto-nudges without a `DONE`, the loop stops driving itself and preloads a manual
-"are we done?" check you send with `Enter`.
+The session you talk to has three tools — `Read`, `Grep`, `Glob` — and that is not a
+permission setting: `Write`, `Edit` and `Bash` are not in its registry at all, which is
+a guarantee no prompt can talk its way past. It is also why its system prompt never says
+"do not implement": there is nothing to implement with.
 
-Planning and auto-run are backed by two launches of the same session: planning runs over
-a read-only tool registry (nothing that can write is even loaded); arming resumes it with
-the hook wired in and the default (gated) permission mode.
+Each child is a separate `claude` process with its own session id, the same `PreToolUse`
+gate, a `--json-schema` its report is validated against, and an optional spend ceiling.
+It does the work unwatched and returns a structured report — outcome, summary, files
+changed, checks actually run. That report is the only thing that enters your
+conversation. Whatever the child read to produce it dies with the process.
+
+Arming does not relaunch anything; it flips a phase on the session already in front of
+you. Dispatch simply stops refusing.
 
 ## Install
 
@@ -139,7 +171,10 @@ arguments:
   "countdown": "20s",
   "log": "acy-debug.log",
   "maxLines": 15,
-  "planTools": ["Read", "Grep", "Glob", "Bash"],
+  "planTools": ["Read", "Grep", "Glob"],
+  "childModel": "sonnet",
+  "childEffort": "medium",
+  "taskBudget": 2.50,
   "useApiKey": false
 }
 ```
@@ -215,6 +250,8 @@ Type these in the message box (they're handled by `acy`, not forwarded to Claude
 | `/model <name>` | set the model for the next launched/resumed session |
 | `/clear` | clear the transcript view |
 | `/log` | show the debug-log path |
+| `/tokens` | the token ledger: current context size, cache reads and cost, split parent vs children. This is the number to watch — the parent's line should stay flat while the children's climbs |
+| `/done` | end the run by hand, if the session stopped without calling `Finish` |
 | `/quit` | quit (same as `Ctrl+C`) |
 
 ## Resuming
@@ -229,15 +266,18 @@ acy --resume <id>       # or name the session
 ```
 
 You come back to the transcript you were looking at, in the phase you were in. If you'd
-armed the run, it comes back **armed**: no keys, no re-approval, no re-planning. It doesn't
-restart the task — it reads the last thing the session said (a replayed `STATUS: DONE`
-completes on the spot) and otherwise asks the session where things stand, which picks the
-work back up.
+armed the run, it comes back **armed**: no keys, no re-approval, no re-planning. It gets
+exactly one prompt — take stock, then carry on — rather than restarting the task.
+
+A task caught mid-flight by the crash is named rather than silently retried. Its child
+process was killed mid-edit, so its work may be half-applied, and that is the one place a
+hands-free tool should ask instead of guessing: the session is told which tasks never
+reported and decides whether to re-dispatch them.
 
 That works because the two halves are restored from two places. The conversation is
 Claude's: `acy` replays the transcript Claude already keeps under `~/.claude/projects`.
-Everything else — which phase you were in, the plan being worked to, the auto-round count,
-the running cost — is `acy`'s own, and it isn't in Claude's file, so `acy` keeps a small
+Everything else — which phase you were in, the plan being worked to, the task ledger, the
+tokens and cost by spender — is `acy`'s own, and it isn't in Claude's file, so `acy` keeps a small
 snapshot per session (a few hundred bytes, written atomically at every transition) under
 `$ACY_STATE_DIR`, defaulting to your OS config dir (`~/Library/Application Support/acy` on
 macOS, `~/.config/acy` on Linux).
@@ -261,12 +301,15 @@ to drive, but the cost carries over, and `Ctrl+G` re-arms if you want more.
 - `--max-lines` — max lines shown per tool call/result/thinking block before a
   `… +N more lines` footer (default `10`)
 - `--claude-bin` — path to the `claude` binary (default `claude`)
-- `--plan-tools` — tools pre-approved during **plan mode** via `--allowedTools`, as exact
-  names (default `Monitor,AskUserQuestion`). Plan mode refuses non-read-only tools and has
-  no gate wired in, so a tool that isn't listed here simply never runs while you're
-  planning. Use exact tool names, MCP ones included (e.g. `mcp__<server>__Monitor`).
-  `AskUserQuestion` is kept in the default set for the day it works, but it is **inert
-  today** — `claude -p` has no such tool to allowlist (see the note above).
+- `--plan-tools` — the built-in `--tools` registry for the **supervising session**, in
+  both phases (default `Read,Grep,Glob`). This is the registry, not an allowlist:
+  anything left out cannot be called at all, which is what keeps the session you talk to
+  incapable of changing your code. Dispatched children always get the full set.
+- `--child-model` — model for dispatched tasks (default: same as `--model`). Often the
+  single biggest saving available, since children do the bulk of the tokens.
+- `--child-effort` — reasoning effort for dispatched tasks (`low`…`max`).
+- `--task-budget` — spend ceiling in USD for one dispatched task (default: none). A
+  runaway child stops instead of running until you happen to look.
 - `--use-api-key` — bill `ANTHROPIC_API_KEY` instead of your claude.ai login. By
   default the key is **stripped** from the environment `claude` runs in: a key
   merely sitting in your shell silently takes precedence over the login, and
@@ -284,13 +327,14 @@ to drive, but the cost carries over, and `Ctrl+G` re-arms if you want more.
 - `internal/gate` — the permission bridge: a unix-socket server (supervisor) and
   the `hook` client, with allow/deny decisions.
 - `internal/config` — generates the `--settings` file that registers the hook.
-- `internal/ui` — the Bubble Tea model: transcript, countdown, phase machine, the
-  STATUS-sentinel completion loop + manual done-check fallback, slash commands, and
-  the resume / AskUserQuestion pickers.
+- `internal/orchestrator` — the disposable children: task queue, child lifecycle,
+  the report schema, and the ledger.
+- `internal/ui` — the Bubble Tea model: transcript, countdown, phase machine,
+  delegation, slash commands, and the resume / AskUserQuestion pickers.
 - `internal/session` — reads claude's `~/.claude/projects/<slug>/*.jsonl` transcripts:
   lists them for the `/resume` picker, and replays one back into the transcript view.
-- `internal/state` — `acy`'s own snapshot of a run (phase, plan, rounds, cost) — the
-  part of a session claude's transcript doesn't record.
+- `internal/state` — `acy`'s own snapshot of a run (phase, plan, task ledger, tokens,
+  cost) — the part of a session claude's transcript doesn't record.
 - `internal/e2e` — the live end-to-end suite (see below).
 - `internal/cli` — Cobra commands (`run`, hidden `hook`).
 

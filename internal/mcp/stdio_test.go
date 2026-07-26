@@ -28,7 +28,7 @@ func handshake(t *testing.T) []byte {
 func replies(t *testing.T, h Handler) []response {
 	t.Helper()
 	var out bytes.Buffer
-	if err := Serve(bytes.NewReader(handshake(t)), &out, h); err != nil {
+	if err := Serve(bytes.NewReader(handshake(t)), &out, RoleParent, h); err != nil {
 		t.Fatalf("Serve: %v", err)
 	}
 	var got []response
@@ -79,8 +79,9 @@ func TestServeInitializeEchoesVersion(t *testing.T) {
 	}
 }
 
-// tools/list must advertise both tools, and each schema must be valid JSON — an
-// invalid one is rejected silently by claude and the tool just never appears.
+// tools/list must advertise the role's tools, and each schema must be valid
+// JSON — an invalid one is rejected silently by claude and the tool just never
+// appears.
 func TestServeListsTools(t *testing.T) {
 	got := replies(t, noopHandler)
 	res, ok := got[1].Result.(map[string]any)
@@ -88,8 +89,9 @@ func TestServeListsTools(t *testing.T) {
 		t.Fatalf("tools/list result is not an object: %#v", got[1].Result)
 	}
 	list, _ := res["tools"].([]any)
-	if len(list) != 2 {
-		t.Fatalf("advertised %d tools, want 2 (%s, %s)", len(list), ToolAsk, ToolPlan)
+	if len(list) != 4 {
+		t.Fatalf("advertised %d tools, want 4 (%s, %s, %s, %s)",
+			len(list), ToolAsk, ToolPlan, ToolDispatch, ToolFinish)
 	}
 	seen := map[string]bool{}
 	for _, raw := range list {
@@ -103,8 +105,46 @@ func TestServeListsTools(t *testing.T) {
 			t.Errorf("%s inputSchema did not survive as an object: %#v", name, td["inputSchema"])
 		}
 	}
-	if !seen[ToolAsk] || !seen[ToolPlan] {
-		t.Errorf("advertised tools = %v, want both %s and %s", seen, ToolAsk, ToolPlan)
+	for _, want := range []string{ToolAsk, ToolPlan, ToolDispatch, ToolFinish} {
+		if !seen[want] {
+			t.Errorf("advertised tools = %v, missing %s", seen, want)
+		}
+	}
+}
+
+// A child must not be able to delegate. It inherits an --mcp-config pointing at
+// the same binary and the same socket, so the only thing standing between one
+// child and an unbounded tree of unsupervised grandchildren is that its server
+// was started with --role child and never offers the tool.
+func TestChildRoleCannotDelegate(t *testing.T) {
+	var out bytes.Buffer
+	if err := Serve(bytes.NewReader(handshake(t)), &out, RoleChild, noopHandler); err != nil {
+		t.Fatalf("Serve: %v", err)
+	}
+	if strings.Contains(out.String(), ToolDispatch) {
+		t.Fatal("a child was offered Dispatch — it could spawn children of its own")
+	}
+	if strings.Contains(out.String(), ToolPlan) {
+		t.Error("a child was offered PresentPlan; planning is the parent's job")
+	}
+	if strings.Contains(out.String(), ToolFinish) {
+		t.Error("a child was offered Finish; only the parent ends the run")
+	}
+	if !strings.Contains(out.String(), ToolAsk) {
+		t.Error("a child should still be able to ask the human a question")
+	}
+}
+
+// An unknown or absent role must produce the supervised parent, never a session
+// that has quietly lost its tools.
+func TestParseRoleDefaultsToParent(t *testing.T) {
+	for _, in := range []string{"", "parent", "nonsense", "PARENT"} {
+		if got := ParseRole(in); got != RoleParent {
+			t.Errorf("ParseRole(%q) = %q, want %q", in, got, RoleParent)
+		}
+	}
+	if got := ParseRole("child"); got != RoleChild {
+		t.Errorf("ParseRole(\"child\") = %q, want %q", got, RoleChild)
 	}
 }
 
@@ -190,7 +230,7 @@ func TestServeUnknownMethod(t *testing.T) {
 	in := "{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"resources/list\"}\n" +
 		"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/cancelled\"}\n"
 	var out bytes.Buffer
-	if err := Serve(strings.NewReader(in), &out, noopHandler); err != nil {
+	if err := Serve(strings.NewReader(in), &out, RoleParent, noopHandler); err != nil {
 		t.Fatalf("Serve: %v", err)
 	}
 	var got []response
@@ -215,7 +255,7 @@ func TestServeUnknownMethod(t *testing.T) {
 func TestServeSurvivesGarbage(t *testing.T) {
 	in := "not json at all\n" + "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}\n"
 	var out bytes.Buffer
-	if err := Serve(strings.NewReader(in), &out, noopHandler); err != nil {
+	if err := Serve(strings.NewReader(in), &out, RoleParent, noopHandler); err != nil {
 		t.Fatalf("Serve died on a malformed line: %v", err)
 	}
 	if !strings.Contains(out.String(), ToolAsk) {

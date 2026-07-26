@@ -72,18 +72,39 @@ func (m *Model) enqueue(p *gate.Pending) {
 		alog.Printf("gate: pass-through tool=%s (intercepted by acy)", p.Input.ToolName)
 		return
 	}
-	// PLAN is a research phase with a human watching, and it now runs with the hook
-	// wired (it no longer uses --permission-mode plan, which refuses MCP tool calls
-	// and would make the question picker unreachable). Its safety comes from the
-	// --tools registry instead: Write, Edit and friends do not exist there at all.
-	// Bash is the one mutation vector that survives, so it keeps its countdown; a
-	// countdown on every Read and Grep would just train the user to stop looking.
-	if m.phase == PhasePlan && tool != "Bash" {
-		p.Resolve(gate.Decision{Behavior: gate.Allow, Reason: "read-only tool during planning"})
-		alog.Printf("gate: pass-through tool=%s (plan phase, read-only)", p.Input.ToolName)
+	// Answering is not acting. StructuredOutput is how a --json-schema session
+	// hands back its result — it is the child's report, not a side effect — and
+	// the hook matches "*", so it raised a countdown like anything else.
+	//
+	// Measured: two of them in one child, 30s each, a full minute spent guarding
+	// the model's own answer. There is nothing here a human could sensibly veto;
+	// vetoing it would only destroy the report and leave the task looking failed.
+	if answerTools[tool] {
+		p.Resolve(gate.Decision{Behavior: gate.Allow, Reason: "returning a result, not acting"})
+		alog.Printf("gate: pass-through tool=%s (result delivery)", p.Input.ToolName)
 		return
 	}
-	it := &gateItem{p: p}
+	// Who is asking, not what phase we are in.
+	//
+	// This bypass used to key on `m.phase == PhasePlan`, which was sound only
+	// because the plan registry has no Write or Edit in it. That reasoning dies
+	// the moment a child shares this socket: a child carries the *full* registry,
+	// and phase describes the parent. Keying on phase would auto-approve every
+	// child edit with no countdown at all — the exact opposite of the intent.
+	//
+	// So: a request is waved through only when it comes from the supervising
+	// session itself AND names a tool that cannot change anything. A child always
+	// counts down, whatever it is doing and whatever phase the parent is in.
+	taskID, fromChild := "", false
+	if m.dispatcher != nil {
+		taskID, fromChild = m.dispatcher.TaskFor(p.Input.SessionID)
+	}
+	if !fromChild && readOnlyParentTools[tool] {
+		p.Resolve(gate.Decision{Behavior: gate.Allow, Reason: "read-only tool in the supervising session"})
+		alog.Printf("gate: pass-through tool=%s (parent, read-only)", p.Input.ToolName)
+		return
+	}
+	it := &gateItem{p: p, task: taskID}
 	if m.paused {
 		it.remaining = m.countdown
 	} else {
