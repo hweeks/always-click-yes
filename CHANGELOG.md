@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.0.1](https://github.com/hweeks/always-click-yes/compare/v1.0.0...v1.0.1) (2026-07-26)
+
+
+### Bug Fixes
+
+* document /tasks, which shipped without reaching the README ([d47e6a9](https://github.com/hweeks/always-click-yes/commit/d47e6a988f54243749cecb94aaa95b381405756d))
+* document /tasks, which shipped without reaching the README ([6312afb](https://github.com/hweeks/always-click-yes/commit/6312afb49d59e4c5e06e8cd8d8df513d676a73a6))
+
 ## 1.0.0 (2026-07-26)
 
 
