@@ -301,14 +301,25 @@ Commit subjects **must** follow [Conventional Commits](https://www.conventionalc
 contributes nothing to the changelog:
 
 ```
-feat: let the working session report completion   -> minor bump (0.2.0)
-fix: strip ANTHROPIC_API_KEY from the child    -> patch bump (0.1.1)
-feat!: rename --countdown to --delay           -> major bump (see below)
+feat: let the working session report completion   -> minor bump (1.1.0)
+fix: strip ANTHROPIC_API_KEY from the child    -> patch bump (1.0.1)
+feat!: rename --countdown to --delay           -> MAJOR bump (2.0.0)
 docs|test|chore|refactor|perf: ...             -> no release on its own
 ```
 
-A `!` after the type (or a `BREAKING CHANGE:` footer) marks a breaking change. While the
-project is pre-1.0 that bumps the *minor*, not the major.
+A `!` after the type (or a `BREAKING CHANGE:` footer) marks a breaking change, and from
+1.0.0 onward that bumps the **major**. Plain semver, no pre-1.0 exemption — so a `feat!:`
+is a decision to ship the next major, not a free bump. If a change is breaking but you do
+not want a major yet, the answer is to make it non-breaking, not to mislabel it.
+
+**The release job needs a repo setting, not just workflow permissions.** Settings →
+Actions → General → Workflow permissions → *Allow GitHub Actions to create and approve
+pull requests* must be on. The `release-please` job already declares
+`pull-requests: write`, but that grants the token a scope the repo-level toggle can still
+veto — and when it does, the action fails with "GitHub Actions is not permitted to create
+or approve pull requests" *after* silently force-pushing its release branch, so the branch
+looks up to date while no PR exists. Every Release run from 2026-07-13 to 2026-07-26
+failed this way before anyone noticed, which is why no release had ever been cut.
 
 Releases are automatic: merging to `main` makes release-please open or update a
 `chore(release): x.y.z` PR. Nothing ships until you merge that PR — doing so tags the
