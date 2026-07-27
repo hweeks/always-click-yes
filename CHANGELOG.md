@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.1.0](https://github.com/hweeks/always-click-yes/compare/v1.0.1...v1.1.0) (2026-07-27)
+
+
+### Features
+
+* bundle the acy binary in the .vsix, detect claude, and publish to the Marketplace ([f71f106](https://github.com/hweeks/always-click-yes/commit/f71f106652a5c31f18b5878694e215e7470e6160))
+* detect a missing claude CLI before a run dies on it ([fc3be21](https://github.com/hweeks/always-click-yes/commit/fc3be219919c0e4c5ebdf1449381e2eae8ba8375))
+* publish the release .vsix packages to the VS Code Marketplace ([e5bc369](https://github.com/hweeks/always-click-yes/commit/e5bc369d503112edf5f236575b6f72d7ff0e9b76))
+
+
+### Bug Fixes
+
+* chmod the bundled acy binary before launching it ([c0bdaad](https://github.com/hweeks/always-click-yes/commit/c0bdaad79b94e9b821376504792375070f9107e9))
+
 ## [1.0.1](https://github.com/hweeks/always-click-yes/compare/v1.0.0...v1.0.1) (2026-07-26)
 
 
