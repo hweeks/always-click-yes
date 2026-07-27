@@ -40,9 +40,25 @@ Extension settings cover only what can't live in the project file:
 - `acy.defaults` — seed values for **ACY: Create .acy.json**. Once the file
   exists, the file is the source of truth; these are never consulted at launch.
 
+## Requirements
+
+acy supervises a [Claude Code](https://claude.com/claude-code) session, so the
+`claude` CLI has to be installed. The extension looks for it in the project's
+`.acy.json` (`claudeBin`), then the `acy.defaults.claudeBin` setting, then your
+`PATH`, then the usual install directories (`~/.local/bin`, `~/.claude/local`,
+Homebrew, `%APPDATA%\npm`) — a GUI-launched VS Code inherits the login
+environment rather than a shell's, so `claude` is routinely off `PATH` even when
+it works fine in your terminal. If none of those hit you get a warning at
+startup, not a run that dies on its first turn.
+
 ## Install
 
-Grab a `.vsix` from the
+Install **Always Click Yes (acy)** from the VS Code Marketplace — search for it
+in the Extensions view, or `ext install hweeks.always-click-yes`. VS Code picks
+the package built for your platform, so the acy binary comes with it. (The
+listing goes live with the first release published from CI.)
+
+Or grab a `.vsix` from the
 [latest release](https://github.com/hweeks/always-click-yes/releases/latest)
 and install it via **Extensions: Install from VSIX…**. The platform-specific
 packages (`darwin-arm64`, `darwin-x64`, `linux-x64`, `linux-arm64`,
@@ -55,3 +71,7 @@ acy is an experiment in total trust: you make contact at the plan and at the
 end, and in between the machine runs unattended, approving its own way to the
 finish. Read the [project README](https://github.com/hweeks/always-click-yes)
 before leaving it alone with anything you love. The veto key is `s`.
+
+## License
+
+[WTFPL v2](LICENSE) — you just do what the fuck you want to.

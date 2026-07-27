@@ -79,10 +79,10 @@ jobs:
         run: |
           if [ "${{ matrix.goos }}" = "windows" ]; then
             archive="acy_${TAG}_${{ matrix.goos }}_${{ matrix.goarch }}.zip"
-            zip "$archive" acy.exe README.md
+            zip "$archive" acy.exe README.md LICENSE
           else
             archive="acy_${TAG}_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz"
-            tar czf "$archive" acy README.md
+            tar czf "$archive" acy README.md LICENSE
           fi
           shasum -a 256 "$archive" > "$archive.sha256"
           echo "ARCHIVE=$archive" >> "$GITHUB_ENV"
@@ -155,9 +155,43 @@ jobs:
           npm version --no-git-tag-version "${TAG#v}"
           npm run compile
           if [ "${{ matrix.target }}" != "universal" ]; then
-            npx vsce package --skip-license --target "${{ matrix.target }}" -o "acy_${TAG}_${{ matrix.target }}.vsix"
+            npx vsce package --target "${{ matrix.target }}" -o "acy_${TAG}_${{ matrix.target }}.vsix"
           else
-            npx vsce package --skip-license -o "acy_${TAG}_universal.vsix"
+            npx vsce package -o "acy_${TAG}_universal.vsix"
+          fi
+
+      # A .vsix that lost its binary — or shipped it unrunnable — only fails at
+      # the user's first launch, one release too late. The permission string
+      # zipinfo prints is the whole point: it is what the install unpacks from.
+      - name: verify vsix contents
+        working-directory: vscode
+        env:
+          TAG: ${{ needs.release-please.outputs.tag }}
+        run: |
+          vsix="acy_${TAG}_${{ matrix.target }}.vsix"
+          if [ "${{ matrix.target }}" = "universal" ]; then
+            # A bin/ left over from a platform build would ship the wrong
+            # platform's binary to everyone who installs the fallback.
+            if unzip -Z1 "$vsix" | grep -q '^extension/bin/'; then
+              echo "::error::universal .vsix contains extension/bin/ — the universal build must carry no binary"
+              exit 1
+            fi
+          else
+            entry=extension/bin/acy
+            [ "${{ matrix.goos }}" = "windows" ] && entry=extension/bin/acy.exe
+            line=$(unzip -Z "$vsix" "$entry" 2>/dev/null | grep " $entry\$") || true
+            if [ -z "$line" ]; then
+              echo "::error::${{ matrix.target }} .vsix is missing $entry"
+              exit 1
+            fi
+            echo "$line"
+            case "${line%% *}" in
+              *x*) ;;
+              *)
+                echo "::error::${{ matrix.target }} .vsix records $entry without an execute bit: ${line%% *}"
+                exit 1
+                ;;
+            esac
           fi
 
       - name: upload to release
@@ -165,3 +199,65 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ needs.release-please.outputs.tag }}
         run: gh release upload "$TAG" vscode/acy_*.vsix --clobber
+
+  # Publishes those same .vsix files to the VS Code Marketplace. They are pulled
+  # back down from the release rather than re-packaged: a rebuild would produce a
+  # second, unverified set of packages, and what people install from the
+  # Marketplace should be byte-identical to what they can download from the
+  # Release page.
+  publish-marketplace:
+    needs: [release-please, vsix]
+    if: needs.release-please.outputs.released == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-please.outputs.tag }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: vscode/package-lock.json
+
+      - name: download vsix assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.release-please.outputs.tag }}
+        run: |
+          mkdir -p vsix
+          gh release download "$TAG" --pattern '*.vsix' --dir vsix
+          ls -l vsix
+
+      # vsce comes from the lockfile, not a floating npx download — a publish is
+      # irreversible, so the tool that performs it is pinned like everything else.
+      - name: install vsce
+        working-directory: vscode
+        run: npm ci
+
+      # VSCE_PAT is a human-minted Azure DevOps PAT (see AGENTS.md) that may not
+      # exist yet. A release that is otherwise complete must not fail over it, so
+      # a missing secret skips with a notice. The guard lives in the step body
+      # because a `secrets` reference is not allowed in a job-level `if:`.
+      #
+      # Every target goes out in one `vsce publish`: --packagePath is variadic,
+      # and a single call keeps the whole version landing together instead of
+      # leaving the Marketplace half-published when a later call fails. The token
+      # travels in the environment, which vsce reads natively — never as an
+      # argument, where it would show up in process listings.
+      - name: publish to marketplace
+        working-directory: vscode
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: |
+          if [ -z "${VSCE_PAT:-}" ]; then
+            echo "::notice::Marketplace publish skipped: VSCE_PAT is unset"
+            exit 0
+          fi
+          set -- ../vsix/*.vsix
+          if [ ! -e "$1" ]; then
+            echo "::error::no .vsix assets were downloaded from the release"
+            exit 1
+          fi
+          npx vsce publish --packagePath "$@"

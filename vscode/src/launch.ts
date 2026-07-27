@@ -80,6 +80,17 @@ export function resolveBinary(opts: ResolveOptions): ResolvedBinary | undefined 
   return undefined;
 }
 
+/**
+ * Whether a bundled binary still needs chmodding before it can be exec'd.
+ * vsce records the mode in the .vsix, but VS Code's install path has dropped
+ * the executable bit often enough that rust-analyzer and cpptools both chmod
+ * on activation — so we do too. Takes a raw stat mode: the file-type bits
+ * above 0o777 are ignored, only the three execute bits matter.
+ */
+export function needsChmod(mode: number): boolean {
+  return (mode & 0o111) === 0;
+}
+
 /** Arguments for a supervisor launch. The .acy.json carries everything else. */
 export function runArgs(continuePrior: boolean): string[] {
   return continuePrior ? ['run', '--continue'] : ['run'];
