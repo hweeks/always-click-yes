@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.2.0](https://github.com/hweeks/always-click-yes/compare/v1.1.0...v1.2.0) (2026-07-28)
+
+
+### Features
+
+* queue messages, multi-line input and file paste in the composer ([1de92cf](https://github.com/hweeks/always-click-yes/commit/1de92cffcb595c6a9f390043e591efb2267d1b7e))
+* queue messages, multi-line input and file paste in the composer ([23c074c](https://github.com/hweeks/always-click-yes/commit/23c074cb15b8b7d614a3297ae84172d0d3224977))
+* small updoot ([6e9a40f](https://github.com/hweeks/always-click-yes/commit/6e9a40fc6f0e8c6302960754076e38b37821dde6))
+* small updoot ([f5244bf](https://github.com/hweeks/always-click-yes/commit/f5244bfb2198e27e9afe5f9afcefc04a8d0a3d79))
+
 ## [1.1.0](https://github.com/hweeks/always-click-yes/compare/v1.0.1...v1.1.0) (2026-07-27)
 
 
