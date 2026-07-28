@@ -49,18 +49,13 @@ func (m Model) footerView() string {
 	hint := func(s string) string { return lipgloss.NewStyle().Foreground(colDim).Render(s) }
 	switch {
 	case m.showHelp:
-		return hint("press any key to close")
+		return hint(helpFooterHint)
 	case m.picking:
-		return hint("↑/↓ move · Enter resume · Esc cancel")
+		return hint(pickerFooterHint)
 	case m.ask != nil:
-		keys := "↑/↓ move · Enter confirm · Esc skip"
-		if m.ask.questions[m.ask.qIdx].multiSelect {
-			keys = "↑/↓ move · Space toggle · Enter confirm · Esc skip"
-		}
-		// In AUTO-RUN the question is on a clock, and a countdown nobody can see is
-		// how the gate bug happened. Say it out loud.
+		keys := askFooterHint(m.ask.questions[m.ask.qIdx].multiSelect)
 		if r := m.askRemaining(); !m.ask.deadline.IsZero() {
-			keys += fmt.Sprintf(" · auto-skip in %ds", int(r.Seconds()+0.5))
+			keys += askAutoSkipNote(r)
 		}
 		return hint(keys)
 	}
@@ -90,11 +85,10 @@ func (m Model) queueView() string {
 		return ""
 	}
 	dim := lipgloss.NewStyle().Foreground(colDim)
-	lines := []string{dim.Render(fmt.Sprintf("⏳ %d queued · sends when this turn ends", len(m.queued)))}
+	lines := []string{dim.Render(queueSummary(len(m.queued)))}
 	for i, q := range m.queued {
 		if i == queueMaxShown {
-			lines = append(lines, dim.Faint(true).Render(
-				fmt.Sprintf("   (+%d more)", len(m.queued)-queueMaxShown)))
+			lines = append(lines, dim.Faint(true).Render(queueMoreNote(len(m.queued)-queueMaxShown)))
 			break
 		}
 		lines = append(lines, dim.Render("   "+truncate(firstLine(q), max(m.width-6, 20))))
@@ -108,64 +102,23 @@ func (m Model) overlay(content string) string {
 	return lipgloss.NewStyle().Width(m.vp.Width()).Height(m.vp.Height()).Render(content)
 }
 
-// helpView lists the slash commands and key bindings.
+// helpView paints helpContent(): the sections, their titles and their rows. The
+// text itself lives in present.go so the webview can render the same rows as a
+// table instead of parsing ANSI back out of a string — this function knows only
+// how a row looks, never what it says.
 func (m Model) helpView() string {
-	title := lipgloss.NewStyle().Bold(true).Foreground(colClaude).Render("always-click-yes · help")
 	cmd := func(name, desc string) string {
 		return lipgloss.NewStyle().Foreground(colTool).Render("  "+name) + "  " +
 			lipgloss.NewStyle().Foreground(colDim).Render(desc)
 	}
-	lines := []string{
-		title,
-		"",
-		lipgloss.NewStyle().Bold(true).Foreground(colDim).Render("commands"),
-		cmd("/help", "show this help"),
-		cmd("/resume [id]", "restore a prior run — transcript, phase and cost (picker if no id)"),
-		cmd("/model <name>", "set the model for the next launched/resumed session"),
-		cmd("/queue", "list the messages waiting for the current turn to end"),
-		cmd("/queue clear", "drop them all, unsent"),
-		cmd("/clear", "clear the transcript view"),
-		cmd("/log", "show the debug-log path"),
-		cmd("/tokens", "token ledger: context size, cache reads and cost by spender"),
-		cmd("/tasks", "delegated-task ledger: outcome, cost and cache reads per task"),
-		cmd("/done", "end the run by hand, if the session stopped without calling Finish"),
-		cmd("/quit", "quit (same as Ctrl+C)"),
-		"",
-		lipgloss.NewStyle().Bold(true).Foreground(colDim).Render("while Claude is working"),
-		cmd("Enter", "queues the message; the whole queue goes out as ONE turn when the"),
-		cmd("", "turn ends — one turn, because each one re-bills the whole context"),
-		cmd("Esc", "interrupts the turn, so the queue goes out as the redirect"),
-		cmd("/queue", "see what is waiting · /queue clear drops it"),
-		cmd("note", "the queue is never saved — a crash loses it rather than delivering"),
-		cmd("", "it into whatever phase the run comes back in"),
-		"",
-		lipgloss.NewStyle().Bold(true).Foreground(colDim).Render("keys"),
-		cmd("Enter", "send the message"),
-		cmd("Ctrl+J", "newline without sending — works in every terminal"),
-		cmd("Alt+Enter", "newline without sending — works in every terminal"),
-		cmd("Shift+Enter", "newline, but ONLY where the terminal speaks the Kitty keyboard"),
-		cmd("", "protocol (Ghostty, kitty, WezTerm, iTerm2 3.5+). Anywhere else it"),
-		cmd("", "is indistinguishable from Enter and simply sends — use Ctrl+J"),
-		cmd("paste", "a multi-line paste arrives whole; it never sends"),
-		cmd("drag a file", "dropping or pasting a file path attaches it as an absolute path —"),
-		cmd("", "Claude reads it with its own Read tool, so nothing is sent until it does"),
-		cmd("Ctrl+G", "arm the plan (start auto-run)"),
-		cmd("Esc", "interject / interrupt the current turn"),
-		cmd("↑/↓ PgUp/PgDn", "scroll the transcript"),
-		cmd("Ctrl+C", "quit"),
-		"",
-		lipgloss.NewStyle().Bold(true).Foreground(colDim).Render("while a gate is counting down"),
-		cmd("Ctrl+Y", "allow the front tool now"),
-		cmd("Ctrl+X", "stop (veto) the front tool"),
-		cmd("Ctrl+R", "pause / resume every countdown"),
-		cmd("any other key", "types into the message box as usual"),
-		cmd("Esc", "does NOT interject — answer the gate first"),
-		"",
-		lipgloss.NewStyle().Bold(true).Foreground(colDim).Render("while Claude is asking a question"),
-		cmd("↑/↓ j/k", "move between options"),
-		cmd("Space", "toggle a choice (multi-select only)"),
-		cmd("Enter", "confirm and go to the next question"),
-		cmd("Esc", "skip the questions"),
+	lines := []string{lipgloss.NewStyle().Bold(true).Foreground(colClaude).Render(helpTitle)}
+	for _, sec := range helpContent() {
+		// The blank line goes *before* each section, which is what leaves one
+		// under the title and none trailing the last section.
+		lines = append(lines, "", lipgloss.NewStyle().Bold(true).Foreground(colDim).Render(sec.Title))
+		for _, r := range sec.Rows {
+			lines = append(lines, cmd(r.Keys, r.Description))
+		}
 	}
 	return strings.Join(lines, "\n")
 }
@@ -191,11 +144,10 @@ func (m Model) pickerView() string {
 		}
 		// Sessions acy supervised carry their state; the rest are just claude
 		// sessions, and show only what claude knows about them.
-		snap, ok := m.sessionSnaps[s.ID]
-		if label := snapLabel(snap, ok); label != "" {
-			summary = "[" + label + "] " + summary
+		if s.Label != "" {
+			summary = "[" + s.Label + "] " + summary
 		}
-		line := fmt.Sprintf("%s  %s  %s", short(s.ID), s.ModTime.Format("Jan 02 15:04"), summary)
+		line := fmt.Sprintf("%s  %s  %s", short(s.ID), s.modTime.Format("Jan 02 15:04"), summary)
 		line = truncate(line, max(m.vp.Width()-2, 20))
 		if i == m.pickIdx {
 			rows = append(rows, lipgloss.NewStyle().Bold(true).Foreground(colInk).Background(colPlan).Render("▸ "+line))
@@ -216,12 +168,8 @@ func (m Model) askView() string {
 	if header == "" {
 		header = "question"
 	}
-	progress := ""
-	if len(a.questions) > 1 {
-		progress = fmt.Sprintf("  (%d/%d)", a.qIdx+1, len(a.questions))
-	}
 	title := lipgloss.NewStyle().Bold(true).Foreground(colYou).Render("❓ "+header) +
-		lipgloss.NewStyle().Foreground(colDim).Render(progress)
+		lipgloss.NewStyle().Foreground(colDim).Render(askProgressNote(a.qIdx, len(a.questions)))
 	prompt := lipgloss.NewStyle().Foreground(colClaude).Render(q.question)
 
 	rows := make([]string, 0, len(q.options))
@@ -291,27 +239,11 @@ func (m Model) headerView() string {
 // The box has a top and bottom rule (no side borders) in the phase's color, and
 // while a turn is in flight the large working indicator sits above it.
 func (m Model) inputView() string {
-	var hint string
-	switch {
-	case len(m.pending) > 0:
-		// Not "Esc to interject": while a gate is pending Esc is deliberately
-		// suppressed (the blocked hook would deadlock), and it falls through to the
-		// composer instead. Advertising a key that does nothing is how the user
-		// learns to distrust the hint line.
-		hint = "working… · Enter queues your message · ^Y allow / ^X stop first · Ctrl+C to quit"
-	case m.processing:
-		hint = "working… · Esc to interject · Enter queues your message · Ctrl+C to quit"
-	case m.busy():
-		hint = "waiting on a task · Enter queues your message · Ctrl+C to quit"
-	case m.planReady && m.phase == PhasePlan:
-		hint = "📋 plan ready above · Ctrl+G to arm & run · or keep chatting to refine"
-	case m.phase == PhasePlan:
-		hint = "Enter to send · ^J newline · Ctrl+G to arm (start auto-run) · Ctrl+C to quit"
-	case m.phase == PhaseComplete:
-		hint = "plan complete · Enter to send a follow-up · ^J newline · Ctrl+C to quit"
-	default:
-		hint = "Enter to send · ^J newline · Ctrl+C to quit"
-	}
+	// What to say comes from present.go, which both front ends share; how it
+	// looks stays here. The two styling cases below deliberately test the model
+	// rather than the hint kind — "complete and not processing" is a wider state
+	// than the complete hint, and narrowing it would repaint a frame.
+	hint := m.hint().Text
 	hintStyle := lipgloss.NewStyle().Foreground(colDim)
 	switch {
 	case m.planReady && m.phase == PhasePlan:
@@ -392,9 +324,9 @@ func (m Model) gateView() string {
 		secs = 0
 	}
 
-	state := lipgloss.NewStyle().Bold(true).Foreground(colTool).Render(fmt.Sprintf("⏳ auto-approve in %2ds", secs))
+	state := lipgloss.NewStyle().Bold(true).Foreground(colTool).Render(gateStateLabel(secs, false))
 	if m.paused {
-		state = lipgloss.NewStyle().Bold(true).Foreground(colErr).Render("⏸  PAUSED         ")
+		state = lipgloss.NewStyle().Bold(true).Foreground(colErr).Render(gateStateLabel(secs, true))
 	}
 
 	// Name the task when a delegated child raised this. Approving an edit reads
@@ -406,8 +338,8 @@ func (m Model) gateView() string {
 	}
 	desc += badge("⚙ "+front.p.Input.ToolName, colTool) + " " +
 		lipgloss.NewStyle().Foreground(colDim).Render(firstLine(toolArgs(front.p.Input.ToolInput)))
-	if n := len(m.pending) - 1; n > 0 {
-		desc += lipgloss.NewStyle().Foreground(colDim).Render(fmt.Sprintf("  (+%d queued)", n))
+	if note := gateQueuedNote(len(m.pending) - 1); note != "" {
+		desc += lipgloss.NewStyle().Foreground(colDim).Render(note)
 	}
 
 	// Kept short enough to survive an 80-column panel on one line: it sits right

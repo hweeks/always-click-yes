@@ -13,9 +13,27 @@ one supervisor per window.
 | **ACY: Plan & Run** | start a supervisor in the workspace folder (`acy run`) |
 | **ACY: Continue Last Run** | resume the most recent run in this folder (`acy run --continue`) |
 | **ACY: Create .acy.json** | seed a project config from the `acy.defaults.*` settings and open it |
+| **ACY: Open Panel** | *(preview)* run the same supervisor headless (`acy serve`) and render it in an editor panel |
 
-The `▶ acy` status-bar item is **Plan & Run**. If a supervisor terminal is
-already alive, either command reveals it instead of launching a second one.
+The `▶ acy` status-bar item asks which of the two you want. If a supervisor
+terminal is already alive, **Plan & Run** reveals it instead of launching a
+second one, and a panel that is already open for a folder is revealed rather
+than reopened — one supervisor per project, either way.
+
+### The panel, and why it is not the default
+
+**ACY: Open Panel** starts `acy serve`: the identical supervisor — same gate,
+same countdown, same dispatched children — with no terminal, exposed over HTTP
+on `127.0.0.1` behind a per-run bearer token, which a webview then renders. It
+is fully wired but deliberately unstyled: the visual design is still to come, so
+it looks like a plain document and works like a real run. **ACY: Plan & Run**
+therefore still opens the terminal, and will keep doing so until
+`acy.useTerminal` is turned off — which you can do today if you would rather
+live in the panel.
+
+The panel owns its supervisor: closing the tab stops the run, and so does
+closing the window. `acy serve`'s stderr goes to the **acy** output channel,
+which is where a panel that will not start explains itself.
 
 ## Configuration
 
@@ -39,6 +57,9 @@ Extension settings cover only what can't live in the project file:
   your `PATH`.
 - `acy.defaults` — seed values for **ACY: Create .acy.json**. Once the file
   exists, the file is the source of truth; these are never consulted at launch.
+- `acy.useTerminal` — whether **ACY: Plan & Run** opens the TUI in a terminal
+  (default) or the panel. **ACY: Open Panel** ignores it and always opens the
+  panel.
 
 ## Requirements
 

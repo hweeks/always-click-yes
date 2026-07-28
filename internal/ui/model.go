@@ -20,6 +20,7 @@ import (
 
 	"github.com/hweeks/always-click-yes/internal/driver"
 	"github.com/hweeks/always-click-yes/internal/gate"
+	"github.com/hweeks/always-click-yes/internal/htmlrender"
 	"github.com/hweeks/always-click-yes/internal/mcp"
 	"github.com/hweeks/always-click-yes/internal/session"
 	"github.com/hweeks/always-click-yes/internal/state"
@@ -36,6 +37,13 @@ type Config struct {
 	ConfigPath string               // .acy.json the run's settings came from (shown in the UI), if any
 	MaxLines   int                  // per-block line cap in the transcript (default 10)
 	Cwd        string               // the project this run belongs to (snapshot key)
+
+	// RenderHTML asks for each entry to carry a server-rendered HTML fragment
+	// (Frame.Entries[].HTML). Off by default, and `acy run` leaves it off: the
+	// terminal has no use for HTML, and rendering markdown and re-highlighting
+	// code into markup nobody reads would be work every ingested entry paid for.
+	// The HTTP server behind the webview turns it on.
+	RenderHTML bool
 
 	// AltScreen puts the run in the alternate screen buffer. In Bubble Tea v2 the
 	// alt-screen is a field on the tea.View the model returns, not a program
@@ -106,15 +114,22 @@ type Model struct {
 	ready         bool
 	altScreen     bool
 
-	entries   []entry
-	sessionID string
-	model     string
-	mode      string
-	status    string
-	ended     bool
-	planReady bool
-	logPath   string
-	maxLines  int
+	entries []entry
+	// seq stamps each appended entry with an id a second front end can diff on.
+	// It counts appends, not entries: /clear empties the slice and deliberately
+	// leaves this alone, so an id is never handed out twice in one run.
+	seq int
+
+	sessionID  string
+	model      string
+	mode       string
+	status     string
+	ended      bool
+	planReady  bool
+	logPath    string
+	configPath string // .acy.json this run's settings came from, for the projection
+	maxLines   int
+	renderHTML bool // stamp each entry with its HTML rendering (see Config.RenderHTML)
 
 	// Billing. apiKeySource comes from claude's init event and says which account
 	// actually paid; see billing().
@@ -154,11 +169,10 @@ type Model struct {
 	nextModel     string // --model override applied to the next launched session (/model)
 	showHelp      bool   // the /help overlay is open
 	sessionLister func() ([]session.Info, error)
-	picking       bool                      // the /resume session picker is open
-	sessionList   []session.Info            // sessions shown in the picker
-	sessionSnaps  map[string]state.Snapshot // acy state per session, loaded when the picker opens
-	pickIdx       int                       // selected row in the picker
-	ask           *askState                 // a pending AskUserQuestion the user is answering
+	picking       bool      // the /resume session picker is open
+	sessionList   []pickRow // rows shown in the picker, built by pickRows when it opens
+	pickIdx       int       // selected row in the picker
+	ask           *askState // a pending AskUserQuestion the user is answering
 
 	// resume / persistence
 	cwd       string // the project this run belongs to
@@ -254,19 +268,21 @@ func New(drv *driver.Driver, cfg Config) Model {
 	}
 
 	m := Model{
-		drv:       drv,
-		input:     ta,
-		bar:       progress.New(progress.WithoutPercentage()),
-		status:    "planning",
-		gateReqs:  cfg.GateReqs,
-		askReqs:   cfg.AskReqs,
-		countdown: cfg.Countdown,
-		ctx:       cfg.Ctx,
-		launcher:  cfg.Launcher,
-		phase:     PhasePlan,
-		logPath:   cfg.LogPath,
-		maxLines:  cfg.MaxLines,
-		altScreen: cfg.AltScreen,
+		drv:        drv,
+		input:      ta,
+		bar:        progress.New(progress.WithoutPercentage()),
+		status:     "planning",
+		gateReqs:   cfg.GateReqs,
+		askReqs:    cfg.AskReqs,
+		countdown:  cfg.Countdown,
+		ctx:        cfg.Ctx,
+		launcher:   cfg.Launcher,
+		phase:      PhasePlan,
+		logPath:    cfg.LogPath,
+		configPath: cfg.ConfigPath,
+		maxLines:   cfg.MaxLines,
+		altScreen:  cfg.AltScreen,
+		renderHTML: cfg.RenderHTML,
 
 		sessionLister: cfg.Sessions,
 		dispatcher:    cfg.Dispatcher,
@@ -331,8 +347,48 @@ func (m Model) Init() tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
-// appendEntry adds a structured entry to the transcript.
-func (m *Model) appendEntry(e entry) { m.entries = append(m.entries, e) }
+// appendEntry adds a structured entry to the transcript, stamping it with the
+// next sequence number.
+//
+// seq is the id a non-terminal front end diffs on, so it must be monotonic and
+// never reused — including across /clear, which drops the entries but leaves
+// this counter alone. Resetting it there would hand a client two different
+// entries with the same id and no way to tell which one it is looking at.
+//
+// raw defaults to the body with its ANSI removed. Most entries are plain text
+// already, so that is simply the body back; the ones that aren't (tool calls)
+// set raw and lang themselves at construction, where the language is still known.
+func (m *Model) appendEntry(e entry) { m.entries = append(m.entries, m.stamp(e)) }
+
+// stamp gives an entry its id, fills in raw if the caller did not, and renders
+// its HTML when a client asked for it. It is separate from appendEntry only
+// because capReplay builds an entry it has to place at the *front* of the
+// transcript; every other caller appends.
+//
+// seq is an identity, not a sort key. Entries always travel in transcript order,
+// and capReplay's elision notice therefore carries a higher seq than the entries
+// below it — it was minted later, describing older text. A client keys on seq to
+// recognise an entry across frames, never to order them.
+//
+// The HTML is rendered here, once, for the same reason the syntax highlighting
+// in body is: rebuild() re-renders the transcript on every 120ms tick, and a
+// projection built at read time would re-run goldmark and chroma over the whole
+// history at that rate. Entries never change after they are stamped, so once is
+// the right number of times. It is also why this is behind renderHTML — `acy
+// run` would pay that cost for markup no terminal can display.
+func (m *Model) stamp(e entry) entry {
+	m.seq++
+	e.seq = m.seq
+	if e.raw == "" {
+		e.raw = stripAnsi(e.body)
+	}
+	if m.renderHTML {
+		// stripAnsi for the same reason Frame does it: a tool body is chroma's
+		// terminal256 output, and escape codes mean nothing to a browser.
+		e.html = htmlrender.Entry(entryKinds[e.kind], e.title, stripAnsi(e.body), e.raw, e.lang)
+	}
+	return e
+}
 
 // transcript returns the plain-text concatenation of all entries (used by tests
 // and the e2e suite). Tool bodies carry syntax-highlighting ANSI; strip it so
@@ -554,7 +610,8 @@ func (m *Model) ingestToolUse(b driver.ContentBlock) {
 		return
 	}
 	name := baseToolName(b.Name)
-	m.appendEntry(entry{kind: eTool, title: b.Name, body: toolBody(name, b.Input), styled: styledTools[name]})
+	body, raw, lang := toolBodyParts(name, b.Input)
+	m.appendEntry(entry{kind: eTool, title: b.Name, body: body, raw: raw, lang: lang, styled: styledTools[name]})
 }
 
 // --- small formatting helpers ---
@@ -621,12 +678,25 @@ func finishText(raw json.RawMessage) (outcome, summary string) {
 // falls back to the one-line toolArgs summary. The line cap is applied at render
 // time by clampBlock, so the full text is retained in the entry.
 func toolBody(name string, raw json.RawMessage) string {
-	if len(raw) == 0 {
-		return ""
+	body, _, _ := toolBodyParts(name, raw)
+	return body
+}
+
+// toolBodyParts builds the transcript body and, beside it, the same text with no
+// highlighting plus the language it is written in.
+//
+// One function rather than two so the two can't disagree: raw is the exact
+// plain-text counterpart of body, produced by the same composition with
+// highlight() left out, rather than a second guess at what body contains. The
+// TUI takes body and ignores the rest; the JSON projection takes raw and lang
+// and lets its own client colour them.
+func toolBodyParts(name string, in json.RawMessage) (body, raw, lang string) {
+	if len(in) == 0 {
+		return "", "", ""
 	}
 	var obj map[string]any
-	if json.Unmarshal(raw, &obj) != nil {
-		return string(raw)
+	if json.Unmarshal(in, &obj) != nil {
+		return string(in), string(in), ""
 	}
 	str := func(k string) string { s, _ := obj[k].(string); return s }
 
@@ -636,15 +706,21 @@ func toolBody(name string, raw json.RawMessage) string {
 	}
 	switch name {
 	case "Bash":
-		return highlight(str("command"), "bash")
+		cmd := str("command")
+		return highlight(cmd, "bash"), cmd, "bash"
 	case "Write":
-		return headed(fileHeader(obj), highlightFile(str("content"), path))
+		header, content := fileHeader(obj), str("content")
+		return headed(header, highlightFile(content, path)), headed(header, content), langForFile(path)
 	case "Edit":
-		return headed(fileHeader(obj), highlight(diffPreview(str("old_string"), str("new_string")), "diff"))
+		header := fileHeader(obj)
+		diff := diffPreview(str("old_string"), str("new_string"))
+		return headed(header, highlight(diff, "diff")), headed(header, diff), "diff"
 	case "Read":
-		return fileHeader(obj)
+		h := fileHeader(obj)
+		return h, h, ""
 	}
-	return toolArgs(raw)
+	args := toolArgs(in)
+	return args, args, ""
 }
 
 // styledTools are the tools whose toolBody comes back syntax-highlighted, so

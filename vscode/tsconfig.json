@@ -13,5 +13,11 @@
     "skipLibCheck": true,
     "noEmit": true
   },
-  "include": ["src"]
+  // The extension host program, and only that: node types, no DOM. The tests
+  // are excluded because they legitimately span both runtimes — they drive
+  // webview/transport.ts directly — and tsconfig.test.json, which `npm test`
+  // compiles them with, is the program that describes that. Nothing goes
+  // unchecked; it is checked as what it is.
+  "include": ["src"],
+  "exclude": ["src/test"]
 }

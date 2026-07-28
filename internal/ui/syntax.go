@@ -30,6 +30,21 @@ func highlightFile(code, path string) string {
 	return highlightWith(lexers.Match(filepath.Base(path)), code)
 }
 
+// langForFile names the language chroma would pick for a file, lowercased, so a
+// renderer that is not a terminal (the webview) can ask its own highlighter for
+// the same language rather than re-deriving the extension table. Empty when
+// nothing matches — the caller must treat that as "plain text", not as an error.
+func langForFile(path string) string {
+	if path == "" {
+		return ""
+	}
+	lexer := lexers.Match(filepath.Base(path))
+	if lexer == nil {
+		return ""
+	}
+	return strings.ToLower(lexer.Config().Name)
+}
+
 // highlightWith runs chroma's 256-color terminal formatter over code. Highlighting
 // happens once, at ingest time — rebuild() re-renders every entry on each tick
 // while a countdown is up, and re-lexing the transcript at that rate would burn

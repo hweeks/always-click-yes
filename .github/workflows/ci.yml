@@ -92,14 +92,39 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: vscode/package-lock.json
+      # Go, in the *node* job, on purpose: src/test/serve.integration.test.ts is
+      # the only thing that exercises the client/server contract end to end — it
+      # builds the real binary, starts a real `acy serve`, and drives it through
+      # the same transport.ts the webview loads. Without a toolchain that test
+      # skips itself (deliberately: a contributor without Go should not see a red
+      # suite) and this job goes green having proven nothing about the panel.
+      # go-version-file resolves against the workspace root, not this job's
+      # working-directory, so it is the same go.mod the other jobs read.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
       - name: install
         run: npm ci
       - name: lint
         run: npm run lint
       - name: typecheck
         run: npm run typecheck
+      # A skip is a pass, so a green suite is not evidence the integration test
+      # ran — which is exactly how it went unnoticed before. node --test writes
+      # `ok N - <name> # SKIP <reason>` for a skipped test and a bare `ok N -
+      # <name>` for one that really ran, so the anchored match is the assertion.
+      # The log goes to RUNNER_TEMP rather than into vscode/, where `npm run
+      # package` below would happily bundle it into the .vsix.
       - name: test
-        run: npm test
+        run: |
+          set -o pipefail
+          npm test | tee "$RUNNER_TEMP/vscode-test.tap"
+          if ! grep -qx 'ok [0-9]* - transport.ts drives a real acy serve end to end' "$RUNNER_TEMP/vscode-test.tap"; then
+            echo "::error::the acy serve integration test did not run — it skipped, or its name changed. Without it, nothing in CI exercises the client/server contract."
+            grep -i 'acy serve end to end' "$RUNNER_TEMP/vscode-test.tap" || true
+            exit 1
+          fi
       - name: package
         run: npm run package
       - uses: actions/upload-artifact@v4

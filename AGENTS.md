@@ -93,7 +93,41 @@ and let the interface enforce the rest.
   `sendInput`/`flushQueue`), `paste.go` (a dragged-in path becomes an absolute path
   reference), `commands.go` (slash commands + resume picker), `ask.go` (AskUserQuestion
   panel), `gate.go` (countdown), `dispatch.go` (the `Dispatcher` seam onto the
-  orchestrator).
+  orchestrator). It also holds the two front-end seams — `frame.go` (the read seam),
+  `action.go` (the write seam) and `present.go` (the presentation decisions both front
+  ends share). See [The seam](#the-seam-one-model-two-front-ends).
+- `internal/htmlrender` — transcript entries as HTML, for the webview. A leaf package
+  that takes primitives (`kind, title, body, raw, lang`) and **must not import
+  `internal/ui`** — ui imports it, so the other direction is a cycle. goldmark for
+  markdown (never `WithUnsafe`), chroma's *class-based* formatter for code (the
+  webview's CSP forbids `unsafe-inline`, so color lives in `StyleSheet` and an entry
+  carries none), bluemonday over the result as a second line of defence. Every body it
+  renders is untrusted — model output and raw tool results — which is what the
+  adversarial tests are for. The dark theme is pinned to the same `dracula` as
+  `chromaTheme`, so the terminal and the webview highlight identically. Rendered once at
+  ingest and only when `ui.Config.RenderHTML` is set: `acy run` never reads it and must
+  not pay for it.
+- `internal/hub` — the headless runtime: one `ui.Model`, one goroutine, a loop over
+  `Update` and the `tea.Cmd`s it returns. `Update` is a pure function of (model, msg) and
+  needs no TTY, so this is everything `tea.NewProgram` gives the terminal, minus the
+  terminal. Anything that is not the TUI drives the model through it — the live e2e
+  harness today, the HTTP server behind the webview next. It also owns frame delivery:
+  after every `Update` it marshals `Model.Frame()` once, and **emits nothing if the bytes
+  are unchanged**. That is what keeps an idle run silent (the model ticks every 120ms and
+  `Frame` deliberately carries no clock), and each subscriber's mailbox is one deep — a new
+  frame replaces an undelivered one, so a slow client can miss the middle of a story but
+  never its ending.
+- `internal/server` — the HTTP transport in front of the Hub, and what `acy serve`
+  starts: `GET /api/frame`, `GET /api/events` (SSE, `id:` = the hub's rev), `POST
+  /api/action`, `GET /api/sessions`, `GET /api/highlight.css`, plus an
+  unauthenticated `/healthz`. Loopback-only listener, a 256-bit bearer token on
+  every `/api/*` route (constant-time compared), and a CORS surface kept as small
+  as it can be while still working: the grant is *reflected* for
+  `vscode-webview://…` and never `*`, because a webview really is cross-origin and
+  its `Authorization` header really does trigger a preflight someone has to answer.
+  A refused action is **200 with the refusal**, not a 4xx — the run moves on its
+  own, so "that gate is already gone" is a domain answer. Spec:
+  `docs/webui-protocol.md`.
 - `internal/session` — reads claude's `~/.claude/projects/<slug>/*.jsonl` transcripts:
   `List` for the `/resume` picker, `Replay` to turn one back into `[]driver.Event` for the
   transcript view. Injected as `Config.Sessions` / `Config.Replay`, so tests supply fakes.
@@ -104,22 +138,126 @@ and let the interface enforce the rest.
 - `internal/e2e` — the live end-to-end suite: drives the real supervisor (real gate, real
   hook, real claude, real state files) headlessly, on your subscription. `ACY_LIVE=1` only;
   it can never run in CI.
-- `internal/cli` — Cobra commands: `run` (the TUI) and the hidden `hook`.
+- `internal/cli` — Cobra commands: `run` (the TUI), `serve` (the same supervisor
+  headless, over HTTP), and the hidden `hook`. `run` and `serve` share one flag
+  registration (`addRunFlags`) so their run settings cannot drift, and each keeps
+  its own pflag instances so `applyFileConfig`'s `.acy.json` overlay — which keys
+  on cobra's `Changed` — still tells a defaulted flag from an explicit one.
 - `internal/alog` — process-wide debug logger (off until `Open`); the `--log` flag drives it.
-- `vscode/` — the VS Code extension, a deliberate thin launcher: it resolves the acy binary
-  (`acy.binaryPath` setting → `bin/acy` bundled in a platform build → PATH) and runs it *as*
-  the terminal shell (no user shell, no quoting, the terminal dies with the supervisor).
-  It also discovers the `claude` CLI (`src/claude.ts`: `.acy.json` `claudeBin` → the
-  `acy.defaults.claudeBin` setting → `PATH` → well-known install dirs) and warns at startup
-  when there is none — acy has nothing to supervise without it, so the alternative is a run
-  that dies on its first turn. A claude found off `PATH` gets its directory prepended to the
-  terminal's `PATH`: the shell-less acy inherits that environment verbatim and could not
-  exec it otherwise.
-  Run settings travel in `.acy.json`, never flags, so CLI and extension can't disagree. The
-  decision logic lives vscode-free in `src/launch.ts` / `src/config.ts` / `src/claude.ts`
-  and is tested with
-  plain `node --test` (`npm test` in `vscode/`); `npm run package` builds an installable
-  `.vsix`. One supervisor terminal per window — a second run reveals, never relaunches.
+- `vscode/` — the VS Code extension, which now has **two** front ends over the same
+  supervisor.
+  - **The terminal launcher**, and still the default. It resolves the acy binary
+    (`acy.binaryPath` setting → `bin/acy` bundled in a platform build → PATH) and runs it
+    *as* the terminal shell (no user shell, no quoting, the terminal dies with the
+    supervisor). One supervisor terminal per window — a second run reveals, never
+    relaunches.
+  - **The panel** (`acy.openPanel`, `src/panel.ts`): `src/serve.ts` spawns `acy serve` as
+    an ordinary child process, reads the one endpoint line off its stdout
+    (`src/endpoint.ts`), forwards stderr to the `acy` output channel, and hands the
+    webview a URL and a token. **One `acy serve` and one panel per workspace folder**,
+    keyed by folder path and idempotent while the spawn is still in flight, because two
+    supervisors on one project is this repo's classic footgun — the same reason the
+    terminal reveals rather than relaunches. The panel owns the supervisor's lifetime:
+    closing the tab stops it, and `deactivate` kills it. (The *terminal* is deliberately
+    left alive across an extension reload; a served supervisor cannot be, because it is
+    the extension host's own child with no window of its own — leaving it would orphan a
+    claude session nobody can see or stop.) The URL goes through `vscode.env.asExternalUri`
+    so a Remote-SSH or Codespaces window forwards the port instead of handing the webview
+    somebody else's `127.0.0.1`, and that same origin is what the CSP is pinned to.
+  - **`acy.useTerminal` chooses between them, and defaults to `true`.** `acy.run` opens the
+    terminal exactly as it always has; the switch exists so the flip is a one-line change
+    once the panel's visual design lands. The status bar (`acy.start`) asks which.
+  - Both paths share `resolveLaunchable` in `src/extension.ts` — binary resolution, the
+    chmod repair for a bundled binary VS Code unpacked without its execute bit, and the
+    `PATH`-prepending for a `claude` found in a well-known install dir. Neither front end
+    puts a shell in between, so that is one problem twice, and a second copy would drift.
+    `src/claude.ts` discovers claude (`.acy.json` `claudeBin` → the `acy.defaults.claudeBin`
+    setting → `PATH` → well-known install dirs) and warns at startup when there is none —
+    acy has nothing to supervise without it, so the alternative is a run that dies on its
+    first turn.
+  - Run settings travel in `.acy.json`, never flags, so CLI and extension can't disagree.
+  - `webview/` is the client: `transport.ts` (fetch the frame, hold the SSE stream open,
+    reconnect with backoff, POST actions), `protocol.ts` (the `Frame`/`Action` types,
+    mirroring `internal/ui`), `render.ts` (a deliberately plain placeholder awaiting the
+    design mock — replaceable wholesale, and nothing outside it depends on its shape),
+    `main.ts` (the entry point). `esbuild.mjs` builds **two** bundles because there are two
+    runtimes: `dist/extension.js` (node, cjs, `vscode` external) and
+    `webview/dist/webview.js` (browser, **IIFE** — the webview's CSP is `default-src
+    'none'` with a per-load nonce, so it must be one plain script with no imports at load
+    time). `.vscodeignore` ships `dist/` and `webview/dist/*.js` and excludes both source
+    trees and every `.map`.
+  - The decision logic lives vscode-free in `src/launch.ts` / `src/config.ts` /
+    `src/claude.ts` / `src/endpoint.ts` and is tested with plain `node --test` (`npm test`
+    in `vscode/`), which also compiles and drives `webview/transport.ts` directly — that is
+    the only way any of it is exercised without a browser.
+    `src/test/serve.integration.test.ts` is the one test that proves the plumbing: it
+    builds the real Go binary, starts a real `acy serve`, and drives it through the real
+    `transport.ts`. It **skips if `go build` cannot run**, which is why the `vscode` CI job
+    sets up Go — without a toolchain it passes while proving nothing.
+    `npm run package` builds an installable `.vsix`.
+
+## The seam: one model, two front ends
+
+acy now renders in a terminal and in a VS Code webview. **There is still exactly one
+`ui.Model` and one set of presentation decisions.** That is the property this section
+exists to protect, because it is cheap to break by accident and expensive to notice: the
+two front ends do not run at the same time, so a divergence shows up as "the panel is
+wrong" weeks after the change that caused it.
+
+The pieces, and where each decision belongs:
+
+- **`internal/ui/frame.go` — the read seam.** `Model.Frame()` is a pure JSON projection of
+  the whole run. It is a read: nothing in it mutates and nothing in it consults the clock.
+- **`internal/ui/action.go` — the write seam.** `Action`/`ActionResult` is a semantic
+  vocabulary — "allow this gate", "arm", "submit this text" — and `applyAction` is the
+  single implementation of each. **The terminal's own key chords raise these same
+  actions**: `handleGateKey` does not resolve a gate, it raises `GateAllow`; `Ctrl+G` does
+  not arm, it raises `Arm`. The keyboard is a client, not a second door. There is
+  deliberately **no "send a keystroke" endpoint**, because a synthesised `Ctrl+Y` means
+  "whatever the terminal was looking at" and a webview is not looking at the terminal.
+- **`internal/ui/present.go` — the presentation decisions.** Composer hints, help content,
+  panel phrasing. Content lives here; styling stays in `view.go`. Nothing in `present.go`
+  imports lipgloss or knows a color exists.
+- **`docs/webui-protocol.md`** is the written contract over `frame.go` and `action.go`.
+  Change one, change both.
+
+The rules a future agent will otherwise break:
+
+- **A UI fix belongs in `present.go` or in the frame — never in the webview's TypeScript.**
+  If the panel says the wrong thing, the terminal is about to say the wrong thing too. Fix
+  it once, in Go, and let both front ends read it.
+- **The webview holds no product strings.** Hints, statuses, refusal reasons and transcript
+  bodies all arrive in the frame or in an `ActionResult`. `webview/render.ts` is a
+  placeholder awaiting a design mock and will be replaced wholesale; anything you write
+  into it is something you are volunteering to write twice.
+- **The webview renders no markdown and highlights no code.** Every entry arrives as a
+  sanitized HTML fragment in `entry.html` from `internal/htmlrender`. A second markdown
+  stack in the client would be a second implementation of the transcript — and its CSP
+  forbids `unsafe-inline` anyway, which is why styling travels separately as
+  `GET /api/highlight.css`.
+- **Gates are answered by `toolUseId`, never by position.** Gates auto-approve on their own
+  countdown, so between a client rendering a list and its request landing, the head of the
+  queue may be a different tool entirely. An id that names nothing resolves **nothing at
+  all** and comes back rejected — there is no fallback to the front of the queue, because
+  that fallback is exactly how you approve a tool nobody looked at. The open `Ask` is keyed
+  by question index for the same reason.
+- **`Frame` deliberately contains no "now".** Change detection in `internal/hub` compares
+  the marshalled bytes, so a clock anywhere in the frame would make every one of the
+  model's 120 ms ticks look like news and push eight frames a second at an idle run
+  forever. Countdowns travel as an **absolute deadline** (`deadlineUnixMs`), or as a frozen
+  `remainingMs` once `paused` is set — exactly one of the two is ever non-zero — and the
+  client animates from its own clock. `turnStartUnixMs` is absolute for the same reason.
+  Do not add a `now`, a `renderedAt`, a sequence stamp, or anything else that changes on
+  its own.
+- **Every action validates itself**, even where `update.go`'s key routing already guards
+  the same thing. An HTTP caller does not press keys, so it never passes through that
+  routing; the guard has to live where the behaviour does. (The `interject` refusal while a
+  gate is pending is the load-bearing one: the PreToolUse hook is blocked on the gate
+  socket, and interrupting the turn out from under it deadlocks — over HTTP just as easily
+  as with Esc.)
+- **A refused action is a domain answer, not an error.** `{"accepted":false,"reason":…}`
+  with a **200**; the run moves on by itself, so "that gate is already gone" is news, not a
+  malformed request. Only a kind this build has no vocabulary for is a 4xx.
 
 ## Hard-won facts about `claude` stream-json (verified live, v2.1.207–2.1.220)
 
@@ -377,12 +515,39 @@ are never paths — a token needs a separator or a leading `~`, or a sentence me
 ```sh
 make run                     # build the latest acy and dogfood it on this repo
 go build -o acy .            # build (= make build)
+./acy run                    # the TUI
+./acy serve                  # the same supervisor, headless over HTTP (prints {"url","token"})
+./acy serve --port 7777      # ...on a fixed port; the host is always 127.0.0.1
 go test ./...                # unit tests (no network; = make test)
 go test -race ./...          # what CI runs (= make race)
 ACY_LIVE=1 go test ./...     # + live tests: real `claude`, spends a few cents (= make live)
 golangci-lint run ./...      # lint (config in .golangci.yml, standard set; = make lint)
 gofmt -l .                   # must be empty (= make fmt)
 ```
+
+`serve` writes exactly one line to stdout — the URL and the bearer token — and nothing ever
+precedes it there, so a parent process can parse it. To poke at a running one by hand:
+
+```sh
+curl -s -H "Authorization: Bearer $TOKEN" "$URL/api/frame" | jq .phase
+curl -sN -H "Authorization: Bearer $TOKEN" "$URL/api/events"          # SSE, stays open
+```
+
+And in `vscode/` (Node 22; the same sequence the `vscode` CI job runs):
+
+```sh
+npm ci
+npm run lint                 # eslint over src/ and webview/
+npm run typecheck            # tsc over both trees — the webview has its own tsconfig
+npm test                     # node --test; includes the live acy serve integration test
+npm run compile              # both esbuild bundles: dist/ and webview/dist/
+npm run package              # compile + vsce package → an installable .vsix
+npm run watch                # both bundles, rebuilt on save
+```
+
+`npm test` builds the Go binary and drives a real `acy serve`, so it needs a Go toolchain —
+without one that test **skips** and the client/server contract goes unproven. It says so
+when it skips; read the output rather than the exit code.
 
 Live tests need the `claude` CLI on PATH and auth. CI skips them.
 

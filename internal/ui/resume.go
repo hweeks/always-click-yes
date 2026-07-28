@@ -283,8 +283,8 @@ func (m *Model) capReplay() {
 		return
 	}
 	dropped := len(m.entries) - maxReplayEntries
-	kept := append([]entry{{kind: eMeta, body: fmt.Sprintf(
-		"… %d earlier entries elided from the view · Claude still has the full context", dropped)}},
+	kept := append([]entry{m.stamp(entry{kind: eMeta, body: fmt.Sprintf(
+		"… %d earlier entries elided from the view · Claude still has the full context", dropped)})},
 		m.entries[dropped:]...)
 	m.entries = kept
 }

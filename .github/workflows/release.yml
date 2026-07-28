@@ -169,6 +169,13 @@ jobs:
           TAG: ${{ needs.release-please.outputs.tag }}
         run: |
           vsix="acy_${TAG}_${{ matrix.target }}.vsix"
+          # Every target carries the webview client bundle, universal included:
+          # without it the panel opens on an empty document and nothing earlier
+          # in the build says so.
+          if ! unzip -Z1 "$vsix" | grep -qx 'extension/webview/dist/webview.js'; then
+            echo "::error::${{ matrix.target }} .vsix is missing extension/webview/dist/webview.js"
+            exit 1
+          fi
           if [ "${{ matrix.target }}" = "universal" ]; then
             # A bin/ left over from a platform build would ship the wrong
             # platform's binary to everyone who installs the fallback.

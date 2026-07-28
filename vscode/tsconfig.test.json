@@ -2,7 +2,14 @@
   "extends": "./tsconfig.json",
   "compilerOptions": {
     "noEmit": false,
+    "rootDir": ".",
     "outDir": "out-test",
-    "sourceMap": true
-  }
+    "sourceMap": true,
+    // The tests drive webview/transport.ts directly — that is the only way any
+    // of it is exercised without a browser — so this compilation spans both
+    // trees and needs the DOM types the webview half is written against.
+    "lib": ["ES2022", "DOM", "DOM.Iterable"]
+  },
+  "include": ["src", "webview"],
+  "exclude": ["webview/dist"]
 }

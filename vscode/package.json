@@ -26,7 +26,8 @@
   ],
   "main": "./dist/extension.js",
   "activationEvents": [
-    "onStartupFinished"
+    "onStartupFinished",
+    "onWebviewPanel:acyPanel"
   ],
   "contributes": {
     "commands": [
@@ -38,6 +39,11 @@
       {
         "command": "acy.continue",
         "title": "Continue Last Run",
+        "category": "ACY"
+      },
+      {
+        "command": "acy.openPanel",
+        "title": "Open Panel",
         "category": "ACY"
       },
       {
@@ -60,6 +66,12 @@
           "default": "",
           "markdownDescription": "Path to the `acy` binary. Leave empty to use the binary bundled with a platform-specific build of this extension, or `acy` from your `PATH`.",
           "scope": "machine-overridable"
+        },
+        "acy.useTerminal": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Run **ACY: Plan & Run** in an integrated terminal, where acy draws its own TUI. Turning this off runs the same supervisor headless (`acy serve`) and opens the acy panel instead — a preview, and not yet finished. **ACY: Open Panel** opens it either way.",
+          "scope": "window"
         },
         "acy.defaults": {
           "type": "object",
@@ -125,9 +137,9 @@
   "scripts": {
     "compile": "node esbuild.mjs",
     "watch": "node esbuild.mjs --watch",
-    "typecheck": "tsc --noEmit",
-    "lint": "eslint src",
-    "test": "tsc -p tsconfig.test.json && node --test \"out-test/test/*.test.js\"",
+    "typecheck": "tsc --noEmit && tsc -p webview/tsconfig.json --noEmit",
+    "lint": "eslint src webview",
+    "test": "tsc -p tsconfig.test.json && node --test \"out-test/src/test/*.test.js\"",
     "package": "npm run compile && vsce package"
   },
   "devDependencies": {
