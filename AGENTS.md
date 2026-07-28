@@ -25,7 +25,7 @@ fix it rather than working around it by hand.
 
 ## What this is
 
-A Go TUI (Cobra + Bubble Tea + Lipgloss) that supervises a **Claude Code** session
+A Go TUI (Cobra + Bubble Tea v2 + Lipgloss v2) that supervises a **Claude Code** session
 for long-running tasks. It is built around one measurement.
 
 ### The measurement everything follows from
@@ -87,12 +87,13 @@ and let the interface enforce the rest.
   **not** go through `ui.Model.drv` — that stays the parent-only singleton with
   its generation counter.
 - `internal/ui` — the Bubble Tea model. `model.go` (state + ingest), `update.go` (event
-  routing + keys), `view.go` (header/footer/gate panel + help/resume/ask overlays),
-  `render.go` (structured transcript entries → lipgloss, incl. `clampBlock` line-capped
-  gutter blocks), `phase.go` (phase machine, STATUS-sentinel completion loop + manual
-  done-check fallback),
-  `commands.go` (slash commands + resume picker), `ask.go` (AskUserQuestion panel),
-  `gate.go` (countdown).
+  routing + keys), `view.go` (header/footer, stacked gate and queue panels, help/resume/ask
+  overlays), `render.go` (structured transcript entries → lipgloss, incl. `clampBlock`
+  line-capped gutter blocks), `phase.go` (phase machine plus the message queue —
+  `sendInput`/`flushQueue`), `paste.go` (a dragged-in path becomes an absolute path
+  reference), `commands.go` (slash commands + resume picker), `ask.go` (AskUserQuestion
+  panel), `gate.go` (countdown), `dispatch.go` (the `Dispatcher` seam onto the
+  orchestrator).
 - `internal/session` — reads claude's `~/.claude/projects/<slug>/*.jsonl` transcripts:
   `List` for the `/resume` picker, `Replay` to turn one back into `[]driver.Event` for the
   transcript view. Injected as `Config.Sessions` / `Config.Replay`, so tests supply fakes.
@@ -218,6 +219,100 @@ and let the interface enforce the rest.
   is still accepted. Watch it.
 - No official Go SDK; Claude Code is Node/TypeScript.
 
+## The TUI, on Bubble Tea v2
+
+The UI is on `charm.land/bubbletea/v2`, `charm.land/bubbles/v2` and
+`charm.land/lipgloss/v2`. glamour and chroma stay on their current majors on purpose:
+they only ever hand back ANSI strings, so nothing about them is v1-vs-v2 — mixing them
+in costs nothing and porting them buys nothing.
+
+What changed that the code actually depends on:
+
+- **Keys arrive as `tea.KeyPressMsg`**, not `tea.KeyMsg`. There is a matching
+  `KeyReleaseMsg`; acy never wants it.
+- **`View()` returns a `tea.View`, not a string.** The terminal modes that used to be
+  `tea.NewProgram` options are fields on the frame you hand back each render. Alt-screen is
+  the only one acy sets, so it travels on the model (`Config.AltScreen`).
+- **A bracketed paste is a `tea.PasteMsg`**, not a burst of key runes. That is why a pasted
+  document can never be read as an Enter press, and why any new interception in `update`
+  must key on the message *type* rather than on "is there text".
+- **v2 always negotiates Kitty keyboard disambiguation** — `keyboardEnhancementsFlags`
+  starts at flag 1 unconditionally, no program option involved. That is the *only* reason
+  `shift+enter` is a distinguishable key at all, and only in terminals that speak the
+  protocol; elsewhere it arrives as a bare CR and simply sends. Hence `alt+enter` and
+  `ctrl+j` as the portable newline bindings. `tea.View.KeyboardEnhancements` requests the
+  *extra* features (key repeat, release events, alternate keycodes) — acy wants none.
+
+Two bubbles traps in the composer:
+
+- **`textarea.MaxHeight` is not a visible-height cap.** `atContentLimit` refuses
+  `InsertNewline` once the value holds `MaxHeight` **logical** lines, so setting it to
+  `maxInputRows` meant the ninth newline in a message silently did nothing and a pasted plan
+  document came back out as a run-on sentence. acy sets `MaxHeight = 0` (no limit) and
+  governs the *visible* height in `layout()`, which clamps to `maxInputRows` and lets the
+  textarea scroll internally past that.
+- **v2's `SetHeight` repositions the internal view to chase the cursor**, and only ever
+  scrolls down. A box sized to the text alone is one row short whenever the cursor sits just
+  past a line that exactly fills the width, so the shrink at the end of a keystroke would
+  scroll away the text you just typed and never bring it back. `composerCursorRows`
+  (`update.go`) asks the textarea how many rows the cursor needs — only it knows about that
+  phantom next row — so the shrink never has to scroll at all.
+
+### Gates no longer own the keyboard
+
+The countdown panel **stacks above** the composer instead of replacing it, and the gate
+actions are chords: **`ctrl+y` allow, `ctrl+x` stop, `ctrl+r` pause**. They used to be bare
+`a`/`s`/`p`, which was only safe while the gate owned the screen — next to a live text box,
+typing the word "and" would approve a tool and then pause the queue. In an armed run
+practically every child tool call raises a gate, so a panel that stood in for the composer
+left the user with no way to type for most of the run. Everything `handleGateKey` does not
+claim falls through to the composer and the viewport.
+
+**Esc is deliberately suppressed while a gate is pending.** The PreToolUse hook that raised
+it is blocked on the gate socket waiting for a decision; interrupting the turn out from
+under it is an unanswered-hook deadlock path. Answer the gate (`^Y`/`^X`) first, interject
+after.
+
+### The message queue
+
+Enter during a busy session **queues** rather than dropping (`sendInput`, `phase.go`). It
+used to refuse on `m.processing` and say nothing about it, which in an armed run meant the
+key was simply dead. `busy()` is three things: a turn in flight, a gate waiting to be
+answered (the turn that raised it is still open), or a dispatched task the parent is blocked
+on.
+
+- **The whole queue leaves as ONE turn**, joined by a blank line — never one turn each. A
+  turn re-bills the entire accumulated context (the measurement at the top of this file is
+  what that costs), so N sends would pay for the conversation N times over to deliver text
+  the model reads in one pass regardless.
+- **It is never persisted.** `snapshot()` does not carry it, on purpose: a message surviving
+  a crash and being delivered into a different phase is worse than one that was lost. If the
+  stream closes with messages held, `reportUnsentQueue` prints them back into the transcript
+  so they can be copied out. `/queue` lists them, `/queue clear` drops them.
+- **`flushQueue` is fully self-guarded** — non-empty queue, live driver, not ended, not busy
+  — so a call site never adds conditions of its own. It fires from two places: the
+  `eventMsg` case *after* `onTurnEnd` (which is what decides whether the turn really ended),
+  and the `childMsg` case. The second one is not redundant: Esc with a task running cancels
+  the dispatches and interrupts the parent, so the parent's aborted turn reports while the
+  child is still shutting down and that flush is correctly refused for an active dispatch.
+  The child then reports into an already-idle parent and **no further driver event is
+  coming** — without the child-side call the queued redirect sits there forever, with an
+  empty composer and no key that releases it.
+- Esc/interject needs no send path of its own: the aborted turn's `result` (or the last
+  child's completion) lands in one of those two sites and the queued text goes out as the
+  redirect.
+
+### Pasted paths
+
+A dragged-in file becomes an **absolute path reference in the composer, never inlined
+contents** (`paste.go`). The supervising session has `Read`, so the path is the whole
+payload — inlining the file would spend exactly the tokens acy exists to save, and images
+work for free because claude's own `Read` handles them. A paste is claimed only if it is
+*entirely* file references (shell-escaped or quoted, as the terminal writes a drag, and each
+one must stat); anything else falls through and the textarea inserts it verbatim. Bare words
+are never paths — a token needs a separator or a leading `~`, or a sentence mentioning
+`Makefile` would turn into a path depending on the working directory.
+
 ## Gotchas we already hit (don't reintroduce)
 
 - **Never put a `strings.Builder` (or any struct with an internal self-pointer / mutex) as a
@@ -271,11 +366,11 @@ and let the interface enforce the rest.
   idle turn (pure waste, gone) and picking a *restored* run back up (a real product
   promise — `TestE2EResumeAnArmedRunAfterACrash`). A resumed AUTO-RUN gets exactly
   one prompt, sent because a human explicitly asked to resume.
-- **The viewport's default keymap steals typing.** bubbles `viewport.DefaultKeyMap` binds
-  `j/k/d/u/f/b` and space to scrolling, and `Update` forwards key events to both the input and
-  the viewport — so typing those letters scrolled the transcript. `transcriptKeyMap()` in
-  `update.go` restricts scrolling to the arrows and `PgUp`/`PgDn`. Don't hand the viewport an
-  unrestricted keymap.
+- **The viewport's default keymap steals typing.** bubbles/v2 `viewport.DefaultKeyMap()`
+  binds `j/k/d/u/f/b` and space to scrolling, and `Update` forwards key events to both the
+  input and the viewport — so typing those letters scrolled the transcript.
+  `transcriptKeyMap()` in `update.go` restricts scrolling to the arrows and `PgUp`/`PgDn`.
+  Don't hand the viewport an unrestricted keymap.
 
 ## Commands
 

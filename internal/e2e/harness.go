@@ -29,7 +29,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/hweeks/always-click-yes/internal/cli"
 	"github.com/hweeks/always-click-yes/internal/state"
@@ -234,14 +234,29 @@ func (h *harness) typeAndSend(text string) {
 		return m.HasDriver()
 	})
 	for _, r := range text {
-		h.send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		h.rune(r)
 	}
-	h.send(tea.KeyMsg{Type: tea.KeyEnter})
+	h.key(tea.KeyPressMsg{Code: tea.KeyEnter})
 }
 
-func (h *harness) key(k tea.KeyType) { h.send(tea.KeyMsg{Type: k}) }
+// keyCtrlG arms the run; keyCtrlX vetoes the gate in front. v2 has no KeyCtrlG
+// constant to name them with: a modified key is its base code plus a modifier
+// bit, which is the same change that lets shift+enter be told apart from enter.
+//
+// The gate matches on msg.String(), so a Code/Mod pair that stringifies to
+// anything else would fall through to the composer and simply type — which is
+// exactly how the veto test rotted when the bindings moved off bare letters.
+// TestKeyChordsStringifyAsTheGateExpects pins that down, and it runs in CI.
+var (
+	keyCtrlG = tea.KeyPressMsg{Code: 'g', Mod: tea.ModCtrl}
+	keyCtrlX = tea.KeyPressMsg{Code: 'x', Mod: tea.ModCtrl}
+)
 
-func (h *harness) rune(r rune) { h.send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}}) }
+func (h *harness) key(k tea.KeyPressMsg) { h.send(k) }
+
+// rune presses a printable key. Text is what the model reads as typed input, so
+// a key with a Code but no Text would move the cursor and insert nothing.
+func (h *harness) rune(r rune) { h.send(tea.KeyPressMsg{Code: r, Text: string(r)}) }
 
 // read borrows the model under the lock. Every assertion goes through here.
 func (h *harness) read(fn func(ui.Model)) {

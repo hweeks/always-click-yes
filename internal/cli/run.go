@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/spf13/cobra"
 
 	"github.com/hweeks/always-click-yes/internal/alog"
@@ -56,6 +56,13 @@ type Flags struct {
 	// Not a flag: runSupervisor stamps it so the UI can say where its settings
 	// came from.
 	ConfigPath string
+
+	// AltScreen asks for the alternate screen buffer. Also not a flag:
+	// runSupervisor stamps it from ACY_NO_ALTSCREEN. Bubble Tea v2 takes the
+	// alt-screen off the tea.View the model returns rather than off a program
+	// option, so the decision has to travel all the way into the model — and a
+	// headless caller (the e2e harness) leaves it alone by leaving it false.
+	AltScreen bool
 }
 
 // applyFileConfig overlays a .acy.json onto the flags. Precedence is
@@ -392,6 +399,7 @@ func NewSupervisor(ctx context.Context, f Flags) (*Supervisor, error) {
 		ConfigPath: f.ConfigPath,
 		MaxLines:   f.MaxLines,
 		Cwd:        cwd,
+		AltScreen:  f.AltScreen,
 		Resume:     resumeID,
 		Dispatcher: orch,
 		LoadState:  state.Load,
@@ -427,6 +435,10 @@ func runSupervisor(ctx context.Context, f Flags, changed func(string) bool) erro
 		applyFileConfig(&f, file, changed)
 	}
 
+	// Alt-screen by default; ACY_NO_ALTSCREEN=1 keeps output inline (useful for
+	// capturing frames when smoke-testing under a pseudo-terminal).
+	f.AltScreen = os.Getenv("ACY_NO_ALTSCREEN") == ""
+
 	sup, err := NewSupervisor(ctx, f)
 	if err != nil {
 		return err
@@ -437,17 +449,19 @@ func runSupervisor(ctx context.Context, f Flags, changed func(string) bool) erro
 	// but not forever. Tidying is best-effort and never blocks the run.
 	defer func() { _ = state.Prune(maxSnapshots) }()
 
-	// Alt-screen by default; ACY_NO_ALTSCREEN=1 keeps output inline (useful for
-	// capturing frames when smoke-testing under a pseudo-terminal).
-	progOpts := []tea.ProgramOption{tea.WithContext(ctx)}
-	if os.Getenv("ACY_NO_ALTSCREEN") == "" {
-		progOpts = append(progOpts, tea.WithAltScreen())
-	}
-
+	// v2 needs no keyboard-enhancement option: the renderer always asks the
+	// terminal for Kitty key disambiguation (keyboardEnhancementsFlags starts at
+	// flag 1 unconditionally), which is the part that makes shift+enter and
+	// alt+enter arrive as themselves rather than as a bare CR. tea.View's
+	// KeyboardEnhancements field only requests the *extra* features — key repeat
+	// and release events, alternate keycodes — and acy wants none of them.
+	//
 	// Bubble Tea's init() has already queried the terminal by now; throw away any
 	// reply still sitting in the input queue, before it gets read as keystrokes.
+	// v2 dropped that init-time query, but a terminal that answered a *previous*
+	// process is still a terminal with an unread reply in the queue.
 	term.DrainInput(os.Stdin)
 
-	_, err = tea.NewProgram(sup.Model, progOpts...).Run()
+	_, err = tea.NewProgram(sup.Model, tea.WithContext(ctx)).Run()
 	return err
 }

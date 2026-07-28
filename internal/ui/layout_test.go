@@ -4,15 +4,22 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
 // typeInto returns the model after the given text has been typed into the
 // composer, routed through Update so the real layout pass runs.
+//
+// One key press per rune: v2's KeyPressMsg carries a single Code, so there is no
+// longer a "here are twelve runes at once" key event to stand in for typing —
+// and one-at-a-time is what these tests are about anyway.
 func typeInto(m Model, text string) Model {
-	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(text)})
-	return tm.(Model)
+	for _, r := range text {
+		tm, _ := m.Update(tea.KeyPressMsg{Code: r, Text: string(r)})
+		m = tm.(Model)
+	}
+	return m
 }
 
 // The frame must be exactly as tall as the terminal no matter how long the
@@ -29,7 +36,7 @@ func TestFrameHeightIsStableAsComposerGrows(t *testing.T) {
 	// Walk the composer across the wrap boundary a character at a time.
 	for i := range 200 {
 		m = typeInto(m, "x")
-		if got := lipgloss.Height(m.View()); got != height {
+		if got := lipgloss.Height(m.View().Content); got != height {
 			t.Fatalf("after %d chars: frame is %d lines, want %d", i+1, got, height)
 		}
 	}
@@ -42,7 +49,7 @@ func TestComposerGrowsAndTranscriptShrinks(t *testing.T) {
 	tm, _ := m.Update(tea.WindowSizeMsg{Width: 40, Height: 30})
 	m = tm.(Model)
 
-	oneRow, oneVP := m.input.Height(), m.vp.Height
+	oneRow, oneVP := m.input.Height(), m.vp.Height()
 	if oneRow != 1 {
 		t.Fatalf("empty composer is %d rows, want 1", oneRow)
 	}
@@ -51,8 +58,8 @@ func TestComposerGrowsAndTranscriptShrinks(t *testing.T) {
 	if m.input.Height() <= oneRow {
 		t.Errorf("composer did not grow: %d rows", m.input.Height())
 	}
-	if m.vp.Height >= oneVP {
-		t.Errorf("transcript did not shrink: %d rows, was %d", m.vp.Height, oneVP)
+	if m.vp.Height() >= oneVP {
+		t.Errorf("transcript did not shrink: %d rows, was %d", m.vp.Height(), oneVP)
 	}
 	if !strings.Contains(m.input.View(), "word") {
 		t.Error("composer text is not visible")
@@ -93,13 +100,13 @@ func TestFrameHeightIsStableWhileWorking(t *testing.T) {
 
 	m.processing = true
 	m.layout()
-	if got := lipgloss.Height(m.View()); got != height {
+	if got := lipgloss.Height(m.View().Content); got != height {
 		t.Fatalf("working frame is %d lines, want %d", got, height)
 	}
 
 	m.processing = false
 	m.layout()
-	if got := lipgloss.Height(m.View()); got != height {
+	if got := lipgloss.Height(m.View().Content); got != height {
 		t.Fatalf("idle frame is %d lines, want %d", got, height)
 	}
 }
@@ -114,8 +121,8 @@ func TestComposerGrowthIsCapped(t *testing.T) {
 	if m.input.Height() != maxInputRows {
 		t.Errorf("composer is %d rows, want the %d-row cap", m.input.Height(), maxInputRows)
 	}
-	if lipgloss.Height(m.View()) != 30 {
-		t.Errorf("frame is %d lines, want 30", lipgloss.Height(m.View()))
+	if lipgloss.Height(m.View().Content) != 30 {
+		t.Errorf("frame is %d lines, want 30", lipgloss.Height(m.View().Content))
 	}
 }
 
@@ -135,7 +142,7 @@ func TestComposerShrinksAfterSend(t *testing.T) {
 	if tall.input.Height() != 1 {
 		t.Errorf("composer is %d rows after clearing, want 1", tall.input.Height())
 	}
-	if tall.vp.Height != m.vp.Height {
-		t.Errorf("transcript is %d rows, want its original %d back", tall.vp.Height, m.vp.Height)
+	if tall.vp.Height() != m.vp.Height() {
+		t.Errorf("transcript is %d rows, want its original %d back", tall.vp.Height(), m.vp.Height())
 	}
 }

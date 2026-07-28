@@ -2,9 +2,13 @@ package ui
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
+
+	"github.com/hweeks/always-click-yes/internal/driver"
 	"github.com/hweeks/always-click-yes/internal/gate"
 )
 
@@ -140,6 +144,127 @@ func TestVetoFront(t *testing.T) {
 	d := <-ch
 	if d.Behavior != gate.Deny {
 		t.Fatalf("want deny, got %+v", d)
+	}
+}
+
+// gatedModel is what an armed auto-run looks like for most of its life: a turn in
+// flight and one tool counting down. The driver is real but writes to a buffer,
+// so Interrupt() succeeds without a claude process.
+func gatedModel(t *testing.T) (Model, <-chan gate.Decision) {
+	t.Helper()
+	m := sizedModel(t)
+	m.now = time.Unix(1_000_000, 0)
+	m.drv = driver.NewWithWriter(driver.Options{}, nopCloser{&strings.Builder{}})
+	m.processing = true
+
+	p, ch := bashPending("echo hi")
+	m.enqueue(p)
+	if len(m.pending) != 1 {
+		t.Fatalf("setup: want 1 pending gate, got %d", len(m.pending))
+	}
+	return m, ch
+}
+
+func ctrlKey(r rune) tea.KeyPressMsg { return tea.KeyPressMsg{Code: r, Mod: tea.ModCtrl} }
+
+// A gate no longer swallows the keyboard. Every child tool call in an armed run
+// raises one, so a blanket interception left the user unable to type for most of
+// a run — including the letters the gate itself used to be bound to.
+func TestTypingWhileGatedReachesTheComposer(t *testing.T) {
+	const typed = "sap, and stop" // every old binding (s, a, p) is in here
+
+	m, ch := gatedModel(t)
+	for _, r := range typed {
+		tm, _ := m.Update(tea.KeyPressMsg{Code: r, Text: string(r)})
+		m = tm.(Model)
+	}
+
+	if got := m.input.Value(); got != typed {
+		t.Errorf("composer value = %q, want %q", got, typed)
+	}
+	if len(m.pending) != 1 {
+		t.Errorf("typing resolved the gate: %d pending, want 1", len(m.pending))
+	}
+	if m.paused {
+		t.Error("typing paused the countdown")
+	}
+	select {
+	case d := <-ch:
+		t.Fatalf("typing answered the gate: %+v", d)
+	default:
+	}
+}
+
+// The three chords do what the bare letters used to, and the bare letters no
+// longer do anything at all — they are text now.
+func TestGateChords(t *testing.T) {
+	cases := []struct {
+		name     string
+		key      tea.KeyPressMsg
+		wantPend int
+		wantDec  string // "" = the gate must still be waiting, undecided
+		wantPaus bool
+	}{
+		{"ctrl+y allows now", ctrlKey('y'), 0, gate.Allow, false},
+		{"ctrl+x vetoes", ctrlKey('x'), 0, gate.Deny, false},
+		{"ctrl+r pauses", ctrlKey('r'), 1, "", true},
+		{"a is not a binding", tea.KeyPressMsg{Code: 'a', Text: "a"}, 1, "", false},
+		{"s is not a binding", tea.KeyPressMsg{Code: 's', Text: "s"}, 1, "", false},
+		{"p is not a binding", tea.KeyPressMsg{Code: 'p', Text: "p"}, 1, "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m, ch := gatedModel(t)
+			tm, _ := m.Update(tc.key)
+			m = tm.(Model)
+
+			if len(m.pending) != tc.wantPend {
+				t.Errorf("pending = %d, want %d", len(m.pending), tc.wantPend)
+			}
+			if m.paused != tc.wantPaus {
+				t.Errorf("paused = %v, want %v", m.paused, tc.wantPaus)
+			}
+			// Resolve is synchronous into a buffered channel, so a decision that
+			// was going to arrive is already here.
+			select {
+			case d := <-ch:
+				if tc.wantDec == "" {
+					t.Fatalf("gate was answered %+v; it should still be counting down", d)
+				}
+				if d.Behavior != tc.wantDec {
+					t.Errorf("decision = %q, want %q", d.Behavior, tc.wantDec)
+				}
+			default:
+				if tc.wantDec != "" {
+					t.Fatal("no decision — claude is still blocked on the hook")
+				}
+			}
+		})
+	}
+}
+
+// Esc is the one key a pending gate still swallows. The PreToolUse hook that
+// raised the countdown is blocked on the gate socket waiting for a decision, and
+// interrupting the turn out from under it is an unanswered-hook deadlock path.
+func TestEscDoesNotInterjectWhileGated(t *testing.T) {
+	m, _ := gatedModel(t)
+
+	tm, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	m = tm.(Model)
+	if m.interrupted {
+		t.Error("Esc interjected while a gate was pending")
+	}
+	if strings.Contains(m.transcript(), "interrupting") {
+		t.Errorf("Esc announced an interrupt while gated:\n%s", m.transcript())
+	}
+
+	// The control: the same key with the queue empty still interjects, so the
+	// guard above is the gate and not a broken Esc.
+	m.pending = nil
+	tm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	m = tm.(Model)
+	if !m.interrupted {
+		t.Fatal("Esc did not interject with no gate pending")
 	}
 }
 

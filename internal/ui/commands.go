@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/hweeks/always-click-yes/internal/session"
 	"github.com/hweeks/always-click-yes/internal/state"
@@ -40,6 +40,13 @@ func parseCommand(s string) (name, args string, ok bool) {
 		return "", "", false
 	}
 	name, rest, _ := strings.Cut(s, " ")
+	// An absolute path is not a command. Every supervisor command is a single bare
+	// word, so a separator in the name means the leading slash was the root of a
+	// path — which is exactly what a message opening with an attached file looks
+	// like, and it would otherwise be eaten as an unknown command and never sent.
+	if strings.ContainsRune(name, '/') {
+		return "", "", false
+	}
 	return strings.ToLower(name), strings.TrimSpace(rest), true
 }
 
@@ -49,7 +56,7 @@ func parseCommand(s string) (name, args string, ok bool) {
 func (m *Model) handleEnter() tea.Cmd {
 	text := strings.TrimSpace(m.input.Value())
 	if name, args, ok := parseCommand(text); ok {
-		m.input.Reset()
+		m.clearComposer()
 		return m.runCommand(name, args)
 	}
 	m.sendInput()
@@ -105,12 +112,43 @@ func (m *Model) runCommand(name, args string) tea.Cmd {
 		}
 		m.cancelDispatches("the run was finished by hand")
 		m.finish("completed", strings.TrimSpace(args))
+	case "queue":
+		switch strings.ToLower(args) {
+		case "":
+			m.appendEntry(entry{kind: eMeta, body: m.queueReport()})
+		case "clear":
+			n := len(m.queued)
+			m.queued = nil
+			body := "queue cleared — " + plural(n, "message") + " dropped, unsent"
+			if n == 0 {
+				body = "the queue was already empty"
+			}
+			m.appendEntry(entry{kind: eMeta, body: body})
+		default:
+			m.appendEntry(entry{kind: eWarn, body: "unknown argument " + args + " — /queue or /queue clear"})
+		}
 	case "resume":
 		return m.startResume(args)
 	default:
 		m.appendEntry(entry{kind: eWarn, body: "unknown command /" + name + " — type /help"})
 	}
 	return nil
+}
+
+// queueReport lists the messages waiting to go out. In full, not truncated: this
+// is the command you type when you want to read back — or copy out — what you
+// wrote while the model was working.
+func (m Model) queueReport() string {
+	if len(m.queued) == 0 {
+		return "nothing queued — with the session idle, Enter sends straight away"
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s · goes out as one turn when the session next falls idle",
+		plural(len(m.queued), "queued message"))
+	for i, q := range m.queued {
+		fmt.Fprintf(&b, "\n%2d. %s", i+1, q)
+	}
+	return b.String()
 }
 
 // startResume opens the session picker (no arg) or resumes a specific id.
@@ -198,7 +236,7 @@ func (m *Model) resumeSession(id string) tea.Cmd {
 
 // handlePickKey drives the /resume picker. Returns a tea.Cmd when a selection
 // launches a resume.
-func (m *Model) handlePickKey(msg tea.KeyMsg) tea.Cmd {
+func (m *Model) handlePickKey(msg tea.KeyPressMsg) tea.Cmd {
 	switch msg.String() {
 	case "up", "k":
 		if m.pickIdx > 0 {

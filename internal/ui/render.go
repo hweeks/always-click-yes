@@ -2,9 +2,10 @@ package ui
 
 import (
 	"fmt"
+	"image/color"
 	"strings"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 )
 
 // ekind identifies how a transcript entry is styled.
@@ -23,6 +24,7 @@ const (
 	eComplete              // the completion banner
 	eGood                  // a positive notice (approved, etc.)
 	eWarn                  // a warning/negative notice (vetoed, interrupted)
+	eQueued                // a message held back until the session goes idle
 )
 
 // entry is one item in the transcript. It stays structured so it can be
@@ -35,7 +37,9 @@ type entry struct {
 	task   string // the delegated task this came from ("" = the parent itself)
 }
 
-// palette
+// palette. lipgloss v2's Color is a constructor returning image/color.Color
+// rather than a named type, so the palette and everything that takes a swatch
+// is typed on the standard interface.
 var (
 	colDim    = lipgloss.Color("244")
 	colYou    = lipgloss.Color("213")
@@ -52,7 +56,7 @@ var (
 // bar, the composer border and the working indicator all follow it, so the mode
 // is legible at a glance. AUTO-RUN gets its own hot orange rather than borrowing
 // colClaude — the phase badge must not read as Claude's attribution color.
-func phaseColor(p Phase) lipgloss.Color {
+func phaseColor(p Phase) color.Color {
 	switch p {
 	case PhasePlan:
 		return colPlan
@@ -64,7 +68,7 @@ func phaseColor(p Phase) lipgloss.Color {
 	return colDim
 }
 
-func badge(label string, bg lipgloss.Color) string {
+func badge(label string, bg color.Color) string {
 	return lipgloss.NewStyle().Bold(true).Foreground(colInk).Background(bg).Padding(0, 1).Render(label)
 }
 
@@ -166,6 +170,13 @@ func renderEntry(e entry, width, maxLines int) string {
 
 	case eWarn:
 		return lipgloss.NewStyle().Foreground(colErr).Render(e.body)
+
+	case eQueued:
+		// Deliberately the same shape as eYou, dimmed: it is your message, it just
+		// has not gone anywhere yet. The badge is what tells the two apart when you
+		// scroll back and find the same text twice — once queued, once sent.
+		body := lipgloss.NewStyle().Foreground(colDim).Width(inner).Render(e.body)
+		return badge("⏳ queued", colDim) + "\n" + entryBox(body, colDim, width)
 	}
 	return e.body
 }
@@ -198,7 +209,7 @@ func renderPlan(e entry, width int) string {
 // entryBox frames a transcript entry's body in a rounded border matching its
 // attribution color. width is the full transcript width; the box renders two
 // columns narrower so the border stays inside it.
-func entryBox(content string, col lipgloss.Color, width int) string {
+func entryBox(content string, col color.Color, width int) string {
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).BorderForeground(col).
 		Padding(0, 1).Width(max(width-2, 20)).
@@ -235,7 +246,7 @@ func clampLines(body string, width, maxLines int, style lipgloss.Style) string {
 
 // clampBlock is clampLines behind a colored left gutter bar, for the entries
 // that stay light (thinking) instead of taking a full entryBox border.
-func clampBlock(body string, width, maxLines int, gutter lipgloss.Color, style lipgloss.Style) string {
+func clampBlock(body string, width, maxLines int, gutter color.Color, style lipgloss.Style) string {
 	// The gutter bar (1 col) + PaddingLeft (1 col) consume two columns.
 	content := clampLines(body, max(width-2, 10), maxLines, style)
 	if content == "" {

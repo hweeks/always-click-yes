@@ -70,7 +70,7 @@ package expects `acy` on your `PATH` or `acy.binaryPath` set.
 acy is an experiment in total trust: you make contact at the plan and at the
 end, and in between the machine runs unattended, approving its own way to the
 finish. Read the [project README](https://github.com/hweeks/always-click-yes)
-before leaving it alone with anything you love. The veto key is `s`.
+before leaving it alone with anything you love. The veto key is `Ctrl+X`.
 
 ## License
 
