@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/hweeks/always-click-yes/internal/alog"
 	"github.com/hweeks/always-click-yes/internal/driver"

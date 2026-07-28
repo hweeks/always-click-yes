@@ -2,15 +2,24 @@ package ui
 
 import (
 	"fmt"
+	"image/color"
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
-func (m Model) View() string {
+// View returns a tea.View rather than a string in v2: the terminal modes that
+// used to be program options are now fields on the frame you hand back each
+// render. Alt-screen is the only one acy sets, so it travels on the model (see
+// Config.AltScreen) instead of on tea.NewProgram.
+func (m Model) View() tea.View {
+	v := tea.NewView("")
+	v.AltScreen = m.altScreen
 	if !m.ready {
-		return "starting…"
+		v.SetContent("starting…")
+		return v
 	}
 
 	body := m.vp.View()
@@ -23,18 +32,19 @@ func (m Model) View() string {
 		body = m.overlay(m.askView())
 	}
 
-	return strings.Join([]string{
+	v.SetContent(strings.Join([]string{
 		m.headerView(),
 		body,
 		m.footerView(),
-	}, "\n")
+	}, "\n"))
+	return v
 }
 
-// footerView is the bottom region: a hint line under an overlay, the countdown
-// panel while permissions are pending, and otherwise the composer. layout()
-// measures this to size the transcript, so it must be the only place the footer
-// is built — a second copy of these conditions would drift and put the frame's
-// height back out of sync with what's drawn.
+// footerView is the bottom region: a hint line under an overlay, otherwise the
+// composer — with the countdown panel stacked above it while permissions are
+// pending. layout() measures this to size the transcript, so it must be the only
+// place the footer is built — a second copy of these conditions would drift and
+// put the frame's height back out of sync with what's drawn.
 func (m Model) footerView() string {
 	hint := func(s string) string { return lipgloss.NewStyle().Foreground(colDim).Render(s) }
 	switch {
@@ -53,16 +63,49 @@ func (m Model) footerView() string {
 			keys += fmt.Sprintf(" · auto-skip in %ds", int(r.Seconds()+0.5))
 		}
 		return hint(keys)
-	case len(m.pending) > 0:
-		return m.gateView()
 	}
-	return m.inputView()
+	// The gate stacks; it does not replace. In an armed run something is counting
+	// down nearly all the time, so a panel that stood in for the composer left the
+	// user with no text box to type into for most of the run. The queue panel
+	// stacks between them, next to the box the messages were typed into.
+	parts := make([]string, 0, 3)
+	if len(m.pending) > 0 {
+		parts = append(parts, m.gateView())
+	}
+	if q := m.queueView(); q != "" {
+		parts = append(parts, q)
+	}
+	return strings.Join(append(parts, m.inputView()), "\n")
+}
+
+// queueMaxShown is how many held messages the footer panel lists before it just
+// counts the rest — enough to recognise what is waiting, few enough that a long
+// queue can't push the transcript off the screen.
+const queueMaxShown = 3
+
+// queueView is the dim panel listing messages waiting for the turn to end. It is
+// the answer to "did that Enter do anything?", which used to be "no".
+func (m Model) queueView() string {
+	if len(m.queued) == 0 {
+		return ""
+	}
+	dim := lipgloss.NewStyle().Foreground(colDim)
+	lines := []string{dim.Render(fmt.Sprintf("⏳ %d queued · sends when this turn ends", len(m.queued)))}
+	for i, q := range m.queued {
+		if i == queueMaxShown {
+			lines = append(lines, dim.Faint(true).Render(
+				fmt.Sprintf("   (+%d more)", len(m.queued)-queueMaxShown)))
+			break
+		}
+		lines = append(lines, dim.Render("   "+truncate(firstLine(q), max(m.width-6, 20))))
+	}
+	return strings.Join(lines, "\n")
 }
 
 // overlay pads content to the viewport height so the footer stays anchored while
 // an overlay (help, picker) replaces the transcript region.
 func (m Model) overlay(content string) string {
-	return lipgloss.NewStyle().Width(m.vp.Width).Height(m.vp.Height).Render(content)
+	return lipgloss.NewStyle().Width(m.vp.Width()).Height(m.vp.Height()).Render(content)
 }
 
 // helpView lists the slash commands and key bindings.
@@ -79,6 +122,8 @@ func (m Model) helpView() string {
 		cmd("/help", "show this help"),
 		cmd("/resume [id]", "restore a prior run — transcript, phase and cost (picker if no id)"),
 		cmd("/model <name>", "set the model for the next launched/resumed session"),
+		cmd("/queue", "list the messages waiting for the current turn to end"),
+		cmd("/queue clear", "drop them all, unsent"),
 		cmd("/clear", "clear the transcript view"),
 		cmd("/log", "show the debug-log path"),
 		cmd("/tokens", "token ledger: context size, cache reads and cost by spender"),
@@ -86,16 +131,35 @@ func (m Model) helpView() string {
 		cmd("/done", "end the run by hand, if the session stopped without calling Finish"),
 		cmd("/quit", "quit (same as Ctrl+C)"),
 		"",
+		lipgloss.NewStyle().Bold(true).Foreground(colDim).Render("while Claude is working"),
+		cmd("Enter", "queues the message; the whole queue goes out as ONE turn when the"),
+		cmd("", "turn ends — one turn, because each one re-bills the whole context"),
+		cmd("Esc", "interrupts the turn, so the queue goes out as the redirect"),
+		cmd("/queue", "see what is waiting · /queue clear drops it"),
+		cmd("note", "the queue is never saved — a crash loses it rather than delivering"),
+		cmd("", "it into whatever phase the run comes back in"),
+		"",
 		lipgloss.NewStyle().Bold(true).Foreground(colDim).Render("keys"),
 		cmd("Enter", "send the message"),
-		cmd("Ctrl+J", "newline without sending"),
+		cmd("Ctrl+J", "newline without sending — works in every terminal"),
+		cmd("Alt+Enter", "newline without sending — works in every terminal"),
+		cmd("Shift+Enter", "newline, but ONLY where the terminal speaks the Kitty keyboard"),
+		cmd("", "protocol (Ghostty, kitty, WezTerm, iTerm2 3.5+). Anywhere else it"),
+		cmd("", "is indistinguishable from Enter and simply sends — use Ctrl+J"),
+		cmd("paste", "a multi-line paste arrives whole; it never sends"),
+		cmd("drag a file", "dropping or pasting a file path attaches it as an absolute path —"),
+		cmd("", "Claude reads it with its own Read tool, so nothing is sent until it does"),
 		cmd("Ctrl+G", "arm the plan (start auto-run)"),
 		cmd("Esc", "interject / interrupt the current turn"),
 		cmd("↑/↓ PgUp/PgDn", "scroll the transcript"),
 		cmd("Ctrl+C", "quit"),
 		"",
 		lipgloss.NewStyle().Bold(true).Foreground(colDim).Render("while a gate is counting down"),
-		cmd("a / s / p", "allow now / stop (veto) / pause-resume"),
+		cmd("Ctrl+Y", "allow the front tool now"),
+		cmd("Ctrl+X", "stop (veto) the front tool"),
+		cmd("Ctrl+R", "pause / resume every countdown"),
+		cmd("any other key", "types into the message box as usual"),
+		cmd("Esc", "does NOT interject — answer the gate first"),
 		"",
 		lipgloss.NewStyle().Bold(true).Foreground(colDim).Render("while Claude is asking a question"),
 		cmd("↑/↓ j/k", "move between options"),
@@ -111,7 +175,7 @@ func (m Model) helpView() string {
 func (m Model) pickerView() string {
 	title := lipgloss.NewStyle().Bold(true).Foreground(colPlan).Render(
 		"↩ resume a session · [PHASE] marks the runs acy supervised")
-	maxVisible := max(m.vp.Height-3, 3)
+	maxVisible := max(m.vp.Height()-3, 3)
 	start := 0
 	if m.pickIdx >= maxVisible {
 		start = m.pickIdx - maxVisible + 1
@@ -132,7 +196,7 @@ func (m Model) pickerView() string {
 			summary = "[" + label + "] " + summary
 		}
 		line := fmt.Sprintf("%s  %s  %s", short(s.ID), s.ModTime.Format("Jan 02 15:04"), summary)
-		line = truncate(line, max(m.vp.Width-2, 20))
+		line = truncate(line, max(m.vp.Width()-2, 20))
 		if i == m.pickIdx {
 			rows = append(rows, lipgloss.NewStyle().Bold(true).Foreground(colInk).Background(colPlan).Render("▸ "+line))
 		} else {
@@ -170,7 +234,7 @@ func (m Model) askView() string {
 		if o.description != "" {
 			line += " — " + o.description
 		}
-		line = truncate(line, max(m.vp.Width-6, 20))
+		line = truncate(line, max(m.vp.Width()-6, 20))
 		if i == q.cursor {
 			rows = append(rows, lipgloss.NewStyle().Bold(true).Foreground(colInk).Background(colYou).Render(fmt.Sprintf("▸ %s %s", mark, line)))
 		} else {
@@ -192,6 +256,11 @@ func (m Model) headerView() string {
 	left := chip + bar.Bold(true).Render(" always-click-yes ")
 
 	meta := []string{m.status}
+	// Right after the status, because it *is* status: it says the next thing that
+	// will happen when this turn ends. The meta strip is truncated from the tail.
+	if n := len(m.queued); n > 0 {
+		meta = append(meta, fmt.Sprintf("%d queued", n))
+	}
 	if m.sessionID != "" {
 		meta = append(meta, "session "+short(m.sessionID))
 	}
@@ -224,16 +293,24 @@ func (m Model) headerView() string {
 func (m Model) inputView() string {
 	var hint string
 	switch {
+	case len(m.pending) > 0:
+		// Not "Esc to interject": while a gate is pending Esc is deliberately
+		// suppressed (the blocked hook would deadlock), and it falls through to the
+		// composer instead. Advertising a key that does nothing is how the user
+		// learns to distrust the hint line.
+		hint = "working… · Enter queues your message · ^Y allow / ^X stop first · Ctrl+C to quit"
 	case m.processing:
-		hint = "working… · Esc to interject · Ctrl+C to quit"
+		hint = "working… · Esc to interject · Enter queues your message · Ctrl+C to quit"
+	case m.busy():
+		hint = "waiting on a task · Enter queues your message · Ctrl+C to quit"
 	case m.planReady && m.phase == PhasePlan:
 		hint = "📋 plan ready above · Ctrl+G to arm & run · or keep chatting to refine"
 	case m.phase == PhasePlan:
-		hint = "Enter to send · Ctrl+G to arm (start auto-run) · Ctrl+C to quit"
+		hint = "Enter to send · ^J newline · Ctrl+G to arm (start auto-run) · Ctrl+C to quit"
 	case m.phase == PhaseComplete:
-		hint = "plan complete · Enter to send a follow-up · Ctrl+C to quit"
+		hint = "plan complete · Enter to send a follow-up · ^J newline · Ctrl+C to quit"
 	default:
-		hint = "Enter to send · Ctrl+C to quit"
+		hint = "Enter to send · ^J newline · Ctrl+C to quit"
 	}
 	hintStyle := lipgloss.NewStyle().Foreground(colDim)
 	switch {
@@ -249,7 +326,14 @@ func (m Model) inputView() string {
 		Width(max(m.width-2, 20)).
 		Render(m.input.View())
 
-	out := box + "\n" + hintStyle.Render(hint)
+	out := box
+	// Directly under the box, because it is a statement about what is in the box:
+	// the paths are sitting there as editable text, and this line is the
+	// confirmation that acy read the drag as files rather than as a stray string.
+	if note := attachNote(m.attached, max(m.width-2, 20)); note != "" {
+		out += "\n" + lipgloss.NewStyle().Foreground(colDim).Render(note)
+	}
+	out += "\n" + hintStyle.Render(hint)
 	if m.processing {
 		out = m.workingView() + "\n" + out
 	}
@@ -278,7 +362,7 @@ func (m Model) workingView() string {
 
 // sweep draws a width-cell track with a bright segment bouncing across it — the
 // indeterminate progress bar for "a turn is running, no ETA".
-func sweep(width, frame int, col lipgloss.Color) string {
+func sweep(width, frame int, col color.Color) string {
 	if width < 8 {
 		return ""
 	}
@@ -326,7 +410,10 @@ func (m Model) gateView() string {
 		desc += lipgloss.NewStyle().Foreground(colDim).Render(fmt.Sprintf("  (+%d queued)", n))
 	}
 
-	keys := lipgloss.NewStyle().Foreground(colDim).Render("[s]top  [a]llow  [p]ause  ^C quit")
+	// Kept short enough to survive an 80-column panel on one line: it sits right
+	// above the composer now, and a wrapped hint reads as part of the message box.
+	keys := lipgloss.NewStyle().Foreground(colDim).Render(
+		"^Y allow  ^X stop  ^R pause  ^C quit  ·  or just keep typing")
 
 	panel := strings.Join([]string{
 		m.bar.ViewAs(frac),

@@ -5,8 +5,6 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-
 	"github.com/hweeks/always-click-yes/internal/ui"
 )
 
@@ -36,7 +34,7 @@ func TestE2EResumeAnArmedRunAfterACrash(t *testing.T) {
 	var sessionID string
 	first.read(func(m ui.Model) { sessionID = m.SessionID() })
 
-	first.key(tea.KeyCtrlG)
+	first.key(keyCtrlG)
 	first.waitFor("the run to arm", 30*time.Second, func(m ui.Model) bool {
 		return m.Phase() == ui.PhaseAutoRun
 	})
@@ -133,7 +131,7 @@ func TestE2EResumeACompletedRunLandsInPlan(t *testing.T) {
 	var sessionID string
 	first.read(func(m ui.Model) { sessionID = m.SessionID() })
 
-	first.key(tea.KeyCtrlG)
+	first.key(keyCtrlG)
 	first.waitFor("the run to complete", workTimeout, func(m ui.Model) bool {
 		return m.Phase() == ui.PhaseComplete
 	})

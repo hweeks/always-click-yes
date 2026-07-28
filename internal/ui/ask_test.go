@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/hweeks/always-click-yes/internal/driver"
 	"github.com/hweeks/always-click-yes/internal/mcp"
@@ -150,10 +150,10 @@ func TestAskEndToEnd(t *testing.T) {
 		idx := 0
 		if len(q.options) > 1 {
 			idx = 1
-			m.handleAskKey(tea.KeyMsg{Type: tea.KeyDown})
+			m.handleAskKey(tea.KeyPressMsg{Code: tea.KeyDown})
 		}
 		picked = append(picked, q.options[idx].label)
-		m.handleAskKey(tea.KeyMsg{Type: tea.KeyEnter})
+		m.handleAskKey(tea.KeyPressMsg{Code: tea.KeyEnter})
 	}
 
 	if m.ask != nil {
@@ -173,7 +173,7 @@ func TestAskEndToEnd(t *testing.T) {
 func TestAskEscapeStillAnswers(t *testing.T) {
 	m, reply := askModel(t, PhasePlan)
 
-	m.handleAskKey(tea.KeyMsg{Type: tea.KeyEsc})
+	m.handleAskKey(tea.KeyPressMsg{Code: tea.KeyEscape})
 
 	if m.ask != nil {
 		t.Error("expected the panel to close after Esc")
@@ -199,11 +199,11 @@ func TestAskMultiSelect(t *testing.T) {
 
 	// Toggle alpha and gamma, leave beta off.
 	m, reply := newModel()
-	m.handleAskKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}}) // alpha on
-	m.handleAskKey(tea.KeyMsg{Type: tea.KeyDown})                      // -> beta
-	m.handleAskKey(tea.KeyMsg{Type: tea.KeyDown})                      // -> gamma
-	m.handleAskKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}}) // gamma on
-	m.handleAskKey(tea.KeyMsg{Type: tea.KeyEnter})
+	m.handleAskKey(tea.KeyPressMsg{Code: ' ', Text: " "}) // alpha on
+	m.handleAskKey(tea.KeyPressMsg{Code: tea.KeyDown})    // -> beta
+	m.handleAskKey(tea.KeyPressMsg{Code: tea.KeyDown})    // -> gamma
+	m.handleAskKey(tea.KeyPressMsg{Code: ' ', Text: " "}) // gamma on
+	m.handleAskKey(tea.KeyPressMsg{Code: tea.KeyEnter})
 
 	got := answer(t, reply)
 	if !strings.Contains(got, "alpha") || !strings.Contains(got, "gamma") {
@@ -216,8 +216,8 @@ func TestAskMultiSelect(t *testing.T) {
 	// Enter with nothing toggled: the cursor row is selected rather than sending an
 	// empty answer.
 	m, reply = newModel()
-	m.handleAskKey(tea.KeyMsg{Type: tea.KeyDown}) // cursor on beta, nothing toggled
-	m.handleAskKey(tea.KeyMsg{Type: tea.KeyEnter})
+	m.handleAskKey(tea.KeyPressMsg{Code: tea.KeyDown}) // cursor on beta, nothing toggled
+	m.handleAskKey(tea.KeyPressMsg{Code: tea.KeyEnter})
 
 	if got := answer(t, reply); !strings.Contains(got, "beta") {
 		t.Errorf("answer = %q, want Enter with no toggles to fall back to the cursor row", got)
@@ -233,7 +233,7 @@ func TestAskAdvancesThroughQuestions(t *testing.T) {
 	m := &Model{phase: PhasePlan, now: time.Now()}
 	m.openAsk(p)
 
-	m.handleAskKey(tea.KeyMsg{Type: tea.KeyEnter}) // answer "one", advance
+	m.handleAskKey(tea.KeyPressMsg{Code: tea.KeyEnter}) // answer "one", advance
 	if m.ask == nil {
 		t.Fatal("panel closed on the first of two questions")
 	}
@@ -246,8 +246,8 @@ func TestAskAdvancesThroughQuestions(t *testing.T) {
 	default:
 	}
 
-	m.handleAskKey(tea.KeyMsg{Type: tea.KeyDown})  // -> blue
-	m.handleAskKey(tea.KeyMsg{Type: tea.KeyEnter}) // answer "blue", submit
+	m.handleAskKey(tea.KeyPressMsg{Code: tea.KeyDown})  // -> blue
+	m.handleAskKey(tea.KeyPressMsg{Code: tea.KeyEnter}) // answer "blue", submit
 	if m.ask != nil {
 		t.Error("expected the panel to close after the last question")
 	}
@@ -352,7 +352,7 @@ func TestAskSurfacesDeadSession(t *testing.T) {
 	m.ask.pending = p
 	p.Abandon()
 
-	m.handleAskKey(tea.KeyMsg{Type: tea.KeyEsc})
+	m.handleAskKey(tea.KeyPressMsg{Code: tea.KeyEscape})
 
 	if m.ask != nil {
 		t.Error("expected the panel to close even when the session was gone")

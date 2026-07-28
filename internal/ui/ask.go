@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/hweeks/always-click-yes/internal/alog"
 	"github.com/hweeks/always-click-yes/internal/mcp"
@@ -110,7 +110,7 @@ func (m *Model) openAsk(p *mcp.Pending) {
 // handleAskKey drives the AskUserQuestion panel. Enter confirms the current
 // question and advances (or submits on the last one); space toggles a choice for
 // multi-select; Esc skips all questions.
-func (m *Model) handleAskKey(msg tea.KeyMsg) tea.Cmd {
+func (m *Model) handleAskKey(msg tea.KeyPressMsg) tea.Cmd {
 	if m.ask == nil {
 		return nil
 	}
@@ -124,7 +124,7 @@ func (m *Model) handleAskKey(msg tea.KeyMsg) tea.Cmd {
 		if q.cursor < len(q.options)-1 {
 			q.cursor++
 		}
-	case " ":
+	case "space": // v2's String() spells the space bar out; v1 returned " "
 		if q.multiSelect {
 			q.selected[q.cursor] = !q.selected[q.cursor]
 		}

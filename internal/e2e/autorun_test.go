@@ -5,8 +5,6 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-
 	"github.com/hweeks/always-click-yes/internal/ui"
 )
 
@@ -35,7 +33,7 @@ func TestE2EPlanArmAutoApproveComplete(t *testing.T) {
 		t.Fatal("plan mode wrote a file; it is supposed to be incapable of that")
 	}
 
-	h.key(tea.KeyCtrlG) // arm
+	h.key(keyCtrlG) // arm
 
 	// Arming is the moment the plan has to be captured: it is what the snapshot
 	// persists and a resume restores, and ExitPlanMode never fires in `claude -p`,
@@ -112,12 +110,12 @@ func TestE2EVetoBlocksATool(t *testing.T) {
 		return m.SessionID() != "" && m.Status() == "idle"
 	})
 
-	h.key(tea.KeyCtrlG)
+	h.key(keyCtrlG)
 	h.waitFor("a tool to reach the gate", workTimeout, func(m ui.Model) bool {
 		return m.PendingGates() > 0
 	})
 
-	h.rune('s') // veto
+	h.key(keyCtrlX) // veto
 
 	h.waitFor("the gate to clear", 30*time.Second, func(m ui.Model) bool {
 		return m.PendingGates() == 0

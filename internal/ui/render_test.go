@@ -1,11 +1,12 @@
 package ui
 
 import (
+	"image/color"
 	"strconv"
 	"strings"
 	"testing"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 )
 
 func TestClampBlockTruncates(t *testing.T) {
@@ -43,7 +44,7 @@ func TestClampBlockSingularFooter(t *testing.T) {
 // Each phase must have its own accent, and AUTO-RUN in particular must not
 // borrow Claude's attribution color — that collision is what this UI pass fixed.
 func TestPhaseColorDistinct(t *testing.T) {
-	seen := map[lipgloss.Color]Phase{}
+	seen := map[color.Color]Phase{}
 	for _, p := range []Phase{PhasePlan, PhaseAutoRun, PhaseComplete} {
 		c := phaseColor(p)
 		if prev, dup := seen[c]; dup {

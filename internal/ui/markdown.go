@@ -4,10 +4,10 @@ import (
 	"strings"
 	"sync"
 
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/glamour/ansi"
 	"github.com/charmbracelet/glamour/styles"
-	"github.com/charmbracelet/lipgloss"
 )
 
 // Building a glamour renderer is comparatively expensive, and rebuild() re-renders

@@ -68,14 +68,14 @@ the relentless release of new features — at any human cost. This tool is what 
 feels like from the inside: pleasant, fast, and entirely hands-off. Whether that reads as
 a promise or a warning is left, deliberately, to the reader.
 
-The countdown is interruptible and the veto key is `s`. It is the most important key on
-the board and you will almost never press it. That is the whole finding.
+The countdown is interruptible and the veto key is `Ctrl+X`. It is the most important key
+on the board and you will almost never press it. That is the whole finding.
 
 ## How it works
 
 `always-click-yes` drives `claude` in stream-json mode (the same channel the
 official SDKs use) and renders the conversation itself with
-[Bubble Tea](https://github.com/charmbracelet/bubbletea) + Lipgloss. Per-tool
+[Bubble Tea](https://github.com/charmbracelet/bubbletea) v2 + Lipgloss v2. Per-tool
 approval is done with a `PreToolUse` hook: the tool wants to run → the hook blocks
 → the TUI shows a countdown → it auto-approves (or you veto).
 
@@ -207,20 +207,74 @@ you're standing in — which for this project is the point: `acy` is developed b
 | Phase | Key | Action |
 |-------|-----|--------|
 | Plan | type + `Enter` | talk to Claude, build the plan |
-| Plan | `Ctrl+J` | insert a newline without sending |
+| anywhere | `Ctrl+J`, `Alt+Enter` | insert a newline without sending |
+| anywhere | `Shift+Enter` | newline — *only* in a Kitty-protocol terminal (see below) |
+| anywhere | paste | a multi-line paste lands whole and never sends |
+| anywhere | drag a file in | attaches it as an absolute path reference |
 | Plan | `Ctrl+G` | **arm** — start auto-run on the current session |
-| Auto-run (gate pending) | `s` | stop / veto this tool |
-| Auto-run (gate pending) | `a` | approve this tool now |
-| Auto-run (gate pending) | `p` | pause / resume the countdown |
+| Auto-run (gate pending) | `Ctrl+X` | stop / veto this tool |
+| Auto-run (gate pending) | `Ctrl+Y` | approve this tool now |
+| Auto-run (gate pending) | `Ctrl+R` | pause / resume the countdown |
+| Auto-run (gate pending) | anything else | goes to the message box, as usual |
 | Auto-run (working) | `Esc` | interject — interrupt the turn, then type to redirect |
-| Idle (round cap hit) | `Enter` | send the preloaded manual "are we done?" check |
+| Auto-run (working) | type + `Enter` | queue the message; it goes out when the turn ends |
+| Auto-run (nothing running) | type + `Enter` | the run just waits — nothing is sent on its own; type to continue, or `/done` to finish it |
 | Complete | type + `Enter` | chat with the session to vet the work |
 | anywhere | `↑`/`↓`, `PgUp`/`PgDn` | scroll the transcript |
 | anywhere | `Ctrl+C` | quit |
 
 Scrolling is bound to the arrows and page keys only, so typing a message never
 scrolls the transcript out from under you. The message box grows as you type (up
-to 8 rows) and the transcript gives up the space.
+to 8 rows) and the transcript gives up the space; past that it scrolls internally,
+so the message itself has **no length limit** — a whole plan document, typed or
+pasted, keeps its paragraphs.
+
+Dragging a file onto the terminal — or pasting a path — attaches it as a clean
+absolute path in the message, instead of the escaped or quoted string the terminal
+actually typed; a `📎 … attached` line under the box confirms it. Nothing is read or
+uploaded: the path *is* the payload, and Claude opens it with its own `Read` tool if
+it needs to (which is also why a screenshot path just works). The paths are plain
+editable text — backspace them, type around them. A paste that isn't entirely file
+references is inserted verbatim, as before.
+
+`Shift+Enter` is a newline only where the terminal can tell it apart from a plain
+`Enter`, which needs the Kitty keyboard protocol — Ghostty, kitty, WezTerm, and
+iTerm2 3.5+. `acy` asks for it on every run, but a terminal that doesn't speak it
+reports `Shift+Enter` as a bare carriage return, indistinguishable from `Enter`,
+and the message simply sends. `Ctrl+J` and `Alt+Enter` work everywhere; prefer
+them if you're not sure.
+
+The gate controls are chords rather than bare letters because the countdown panel
+sits *above* the message box rather than replacing it — in an armed run something
+is nearly always counting down, and a bare `a` would approve a tool every time you
+typed the word "and". `Esc` is the one key a pending gate does swallow: the hook
+that raised the countdown is still blocked waiting for an answer, so answer it
+(`Ctrl+Y` / `Ctrl+X`) and interject after.
+
+### Typing while Claude works
+
+You don't have to wait for a turn to end to say something. `Enter` while the
+session is busy — a turn in flight, a gate counting down, a delegated task
+running — **queues** the message instead of sending it: it appears dimmed in the
+transcript, the header gains a `2 queued` marker, and a small panel above the
+message box lists what's waiting. The queue goes out by itself the moment the
+session next falls idle.
+
+It goes out as **one turn**, with the messages joined by a blank line, however
+many are waiting. That isn't tidiness — a turn re-bills the entire accumulated
+context (the measurement under [Why delegation](#why-delegation) that this whole
+design exists to shrink),
+so sending three queued messages separately would pay for the conversation three
+times to deliver text Claude reads in one pass anyway.
+
+`Esc` composes with it for free: interrupt the turn, and the queued message is
+sent as the redirect the moment the aborted turn reports back.
+
+`/queue` lists what's waiting and `/queue clear` drops it. The queue is **never
+saved** — it's transient intent, and a message surviving a crash to be delivered
+into whatever phase the run comes back in is worse than one that was lost. If the
+session ends with messages still queued, they're printed back into the transcript
+so you can copy them out.
 
 When Claude presents a plan (via `ExitPlanMode`) it's shown in a boxed
 **📋 PROPOSED PLAN** with a `▶ Press Ctrl+G to arm` prompt — that keypress is how
@@ -250,6 +304,8 @@ Type these in the message box (they're handled by `acy`, not forwarded to Claude
 | `/help` | show the command + key reference overlay |
 | `/resume [id]` | resume a prior session for this repo — a picker if no id, direct if given. Restores the transcript **and the run**: a session you armed comes back armed and keeps going (see [Resuming](#resuming)) |
 | `/model <name>` | set the model for the next launched/resumed session |
+| `/queue` | list the messages queued while Claude works, in full (see [Typing while Claude works](#typing-while-claude-works)) |
+| `/queue clear` | drop the queued messages, unsent |
 | `/clear` | clear the transcript view |
 | `/log` | show the debug-log path |
 | `/tokens` | the token ledger: current context size, cache reads and cost, split parent vs children. This is the number to watch — the parent's line should stay flat while the children's climbs |
@@ -332,8 +388,9 @@ to drive, but the cost carries over, and `Ctrl+G` re-arms if you want more.
 - `internal/config` — generates the `--settings` file that registers the hook.
 - `internal/orchestrator` — the disposable children: task queue, child lifecycle,
   the report schema, and the ledger.
-- `internal/ui` — the Bubble Tea model: transcript, countdown, phase machine,
-  delegation, slash commands, and the resume / AskUserQuestion pickers.
+- `internal/ui` — the Bubble Tea v2 model: transcript, countdown, phase machine,
+  delegation, the message queue, pasted-path attachment, slash commands, and the
+  resume / AskUserQuestion pickers.
 - `internal/session` — reads claude's `~/.claude/projects/<slug>/*.jsonl` transcripts:
   lists them for the `/resume` picker, and replays one back into the transcript view.
 - `internal/state` — `acy`'s own snapshot of a run (phase, plan, task ledger, tokens,
@@ -370,7 +427,7 @@ What it covers:
 | Test | What it proves |
 |------|----------------|
 | `TestE2EPlanArmAutoApproveComplete` | the whole premise: plan → arm → tools auto-approve → work done → the session says DONE, with a file on disk as the evidence |
-| `TestE2EVetoBlocksATool` | `s` actually stops a tool. The most important key on the board, and the one you'll never press |
+| `TestE2EVetoBlocksATool` | `Ctrl+X` actually stops a tool. The most important key on the board, and the one you'll never press |
 | `TestE2EResumeAnArmedRunAfterACrash` | kill an armed run mid-flight, `--continue`, and watch it finish unattended |
 | `TestE2EResumeACompletedRunLandsInPlan` | a finished run comes back as a chat, with its cost intact |
 | `TestE2EResumeASessionWithNoSnapshot` | a session `acy` never drove still resumes |

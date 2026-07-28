@@ -4,10 +4,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/key"
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/key"
+	"charm.land/bubbles/v2/textarea"
+	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/hweeks/always-click-yes/internal/alog"
 	"github.com/hweeks/always-click-yes/internal/gate"
@@ -33,6 +34,14 @@ const (
 	headerHeight = 1
 	maxInputRows = 8 // the composer grows to this many rows, then scrolls internally
 )
+
+// sendKeys are the key spellings that submit the composer: unmodified Enter, and
+// only that. The modified variants insert a newline instead — they are bound on
+// the textarea's KeyMap.InsertNewline in New, and reach it by falling out of the
+// key switch below to the sub-component routing.
+var sendKeys = key.NewBinding(key.WithKeys("enter"))
+
+func isEnter(msg tea.KeyPressMsg) bool { return key.Matches(msg, sendKeys) }
 
 // Update runs the message switch, then re-lays-out the frame. The composer grows
 // with its content, so the footer's height is not a constant — layout has to run
@@ -64,14 +73,17 @@ func (m *Model) layout() {
 		return
 	}
 	m.input.SetWidth(max(m.width-2, 20))
-	m.input.SetHeight(clamp(wrappedRows(m.input.Value(), m.input.Width()), 1, maxInputRows))
+	m.input.SetHeight(clamp(max(
+		wrappedRows(m.input.Value(), m.input.Width()),
+		composerCursorRows(&m.input),
+	), 1, maxInputRows))
 
 	vpHeight := max(m.height-headerHeight-lipgloss.Height(m.footerView()), 3)
-	if m.vp.Height == vpHeight {
+	if m.vp.Height() == vpHeight {
 		return
 	}
 	atBottom := m.vp.AtBottom()
-	m.vp.Height = vpHeight
+	m.vp.SetHeight(vpHeight)
 	if atBottom {
 		m.vp.GotoBottom() // stay pinned to the newest output as the composer grows
 	}
@@ -87,6 +99,27 @@ func wrappedRows(value string, width int) int {
 	return lipgloss.Height(lipgloss.NewStyle().Width(width).Render(value))
 }
 
+// composerCursorRows is how many rows the composer must show for the cursor to
+// be on screen — every wrapped row above it, plus its own.
+//
+// It exists because bubbles v2 made SetHeight reposition the textarea's internal
+// view to keep the cursor visible, and that reposition only ever scrolls *down*.
+// A box sized to the text alone is one row short whenever the cursor sits just
+// past a line that exactly fills the width, so the shrink at the end of a
+// keystroke would scroll the text you just typed off the top and never bring it
+// back. Sizing to the cursor means the shrink never has to scroll at all.
+//
+// The row count has to come from the textarea itself: only it knows the cursor
+// is on that phantom next row, which is exactly what wrappedRows cannot see.
+func composerCursorRows(ta *textarea.Model) int {
+	lines := strings.Split(ta.Value(), "\n")
+	rows := 0
+	for i := 0; i < ta.Line() && i < len(lines); i++ {
+		rows += wrappedRows(lines[i], ta.Width())
+	}
+	return rows + ta.LineInfo().RowOffset + 1
+}
+
 func clamp(v, lo, hi int) int { return min(max(v, lo), hi) }
 
 func (m Model) update(msg tea.Msg) (Model, tea.Cmd) {
@@ -96,19 +129,21 @@ func (m Model) update(msg tea.Msg) (Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		if !m.ready {
-			m.vp = viewport.New(msg.Width, max(msg.Height-headerHeight-4, 3))
+			m.vp = viewport.New(
+				viewport.WithWidth(msg.Width),
+				viewport.WithHeight(max(msg.Height-headerHeight-4, 3)))
 			m.vp.KeyMap = transcriptKeyMap()
 			m.ready = true
 		} else {
-			m.vp.Width = msg.Width
+			m.vp.SetWidth(msg.Width)
 		}
-		m.bar.Width = max(msg.Width-4, 10)
+		m.bar.SetWidth(max(msg.Width-4, 10))
 		m.layout() // the viewport must be sized before rebuild re-renders into it
 		m.rebuild()
 		return m, nil
 
-	case tea.KeyMsg:
-		if msg.Type == tea.KeyCtrlC {
+	case tea.KeyPressMsg:
+		if msg.String() == "ctrl+c" {
 			if m.drv != nil {
 				m.drv.Stop()
 			}
@@ -132,29 +167,53 @@ func (m Model) update(msg tea.Msg) (Model, tea.Cmd) {
 			m.rebuild()
 			return m, cmd
 		}
-		// When gates are pending, keys drive the countdown instead of the input.
-		if len(m.pending) > 0 {
-			m.handleGateKey(msg)
+		// When gates are pending, three chords drive the countdown — and nothing
+		// else does. Everything they don't claim falls through to the composer and
+		// the viewport below, because in an armed auto-run every child tool call
+		// raises a gate, so a blanket interception meant the keyboard was dead for
+		// most of a run.
+		if len(m.pending) > 0 && m.handleGateKey(msg) {
 			m.rebuild()
 			return m, nil
 		}
-		// Esc interjects: interrupt the in-flight turn to redirect.
-		if msg.Type == tea.KeyEsc && m.interject() {
+		// Esc interjects: interrupt the in-flight turn to redirect. Not while a
+		// gate is up, though: the PreToolUse hook that raised it is blocked on the
+		// gate socket waiting for a decision, and interrupting the turn out from
+		// under it is an unanswered-hook deadlock path. Until that is untangled,
+		// answer the gate first (^Y/^X) and interject after.
+		if msg.String() == "esc" && len(m.pending) == 0 && m.interject() {
 			m.rebuild()
 			return m, nil
 		}
 		// Ctrl+G arms the run: switch from planning to auto-run. The driver check is
 		// not redundant — a resume knows the session id before its process exists, and
 		// arming into that gap would launch a second claude for the same session.
-		if msg.Type == tea.KeyCtrlG && m.phase == PhasePlan && m.sessionID != "" && m.drv != nil {
+		if msg.String() == "ctrl+g" && m.phase == PhasePlan && m.sessionID != "" && m.drv != nil {
 			m.arm()
 			m.rebuild()
 			return m, nil
 		}
-		if msg.Type == tea.KeyEnter {
+		// Plain Enter sends; shift+enter, alt+enter and ctrl+j must NOT be claimed
+		// here, or the textarea never sees the newline they are bound to. Under v1
+		// all three had to send: a terminal reported the modified variants as a bare
+		// CR, so the comparison could not see the modifier even in principle. v2
+		// negotiates the Kitty protocol, so a terminal that speaks it now reports
+		// them separately — and one that doesn't sends a bare CR, which is to say
+		// shift+enter simply sends there. Hence ctrl+j and alt+enter as fallbacks.
+		if isEnter(msg) {
 			cmd := m.handleEnter()
 			m.rebuild()
 			return m, cmd
+		}
+
+	case tea.PasteMsg:
+		// A dragged file arrives here as whatever the terminal typed for it —
+		// shell-escaped, quoted, sometimes several at once. Decide what it is
+		// *before* the textarea inserts it: a paste that is entirely file
+		// references becomes absolute paths (attachPaste), and everything else
+		// falls out of the switch to the routing below and is inserted verbatim.
+		if m.attachPaste(msg.Content) {
+			return m, nil
 		}
 
 	case eventMsg:
@@ -168,6 +227,9 @@ func (m Model) update(msg tea.Msg) (Model, tea.Cmd) {
 			m.persist()
 		}
 		m.onTurnEnd(msg.ev)
+		// After onTurnEnd, which is what decides whether this really was the end of
+		// the work: a queued message goes out only once nothing is left running.
+		m.flushQueue()
 		m.rebuild()
 		cmds = append(cmds, waitEvent(m.drv.Events(), m.gen))
 
@@ -184,6 +246,9 @@ func (m Model) update(msg tea.Msg) (Model, tea.Cmd) {
 		// Nothing is left to answer, and an open panel would swallow every key.
 		m.abandonAsk()
 		m.appendEntry(entry{kind: eTurn, body: "──── session ended ────"})
+		// Whatever was still queued will never be sent now; say so rather than
+		// dropping it silently, which is the bug the queue exists to fix.
+		m.reportUnsentQueue()
 		m.rebuild()
 		return m, nil
 
@@ -218,6 +283,15 @@ func (m Model) update(msg tea.Msg) (Model, tea.Cmd) {
 
 	case childMsg:
 		m.ingestChild(msg.ev)
+		// A child event can be the last thing that happens in a run, and the queue
+		// has to leave on it. Esc with a task running cancels the dispatches and
+		// interrupts the parent: the parent's aborted turn reports first, while the
+		// child is still shutting down, so the flush there is refused for an active
+		// dispatch. Once the child finally reports, the parent is already idle and
+		// no further driver event is coming — so without this call the queued
+		// redirect would sit there forever, with an empty composer and no key that
+		// releases it.
+		m.flushQueue()
 		m.rebuild()
 		if m.dispatcher != nil {
 			cmds = append(cmds, waitChild(m.dispatcher.Events()))
@@ -238,7 +312,13 @@ func (m Model) update(msg tea.Msg) (Model, tea.Cmd) {
 		return m, tickCmd()
 	}
 
-	// Route remaining messages to the sub-components.
+	// Route remaining messages to the sub-components. A bracketed paste that was
+	// not a path list arrives here: v2 delivers it as tea.PasteMsg rather than as
+	// key runes, so it is not a tea.KeyPressMsg, none of the interception branches
+	// above can claim it, and the textarea inserts the whole thing itself (newlines
+	// included) — which is also why a pasted document can never be mistaken for an
+	// Enter press. Keep any new interception keyed on the message type, not on "is
+	// there text".
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
 	cmds = append(cmds, cmd)
@@ -249,20 +329,32 @@ func (m Model) update(msg tea.Msg) (Model, tea.Cmd) {
 }
 
 // handleGateKey processes controls while one or more permission gates are
-// counting down.
-func (m *Model) handleGateKey(msg tea.KeyMsg) {
-	switch strings.ToLower(msg.String()) {
-	case "s": // stop/veto the front gate
+// counting down, and reports whether it consumed the key. A false means the key
+// belongs to the composer.
+//
+// These are chords rather than the bare a/s/p they used to be. The composer now
+// sits under the countdown panel instead of being replaced by it, and next to a
+// live text box a bare letter is not a command: typing the word "and" would have
+// approved a tool and then paused the queue. ctrl+y/ctrl+x/ctrl+r are the free
+// ones — none appear in the bubbles textarea DefaultKeyMap or in
+// transcriptKeyMap, and ctrl+p/ctrl+n (composer line movement), ctrl+j
+// (newline), ctrl+g (arm) and ctrl+c (quit) are all already spoken for.
+func (m *Model) handleGateKey(msg tea.KeyPressMsg) bool {
+	switch msg.String() {
+	case "ctrl+x": // stop/veto the front gate
 		name := m.pending[0].p.Input.ToolName
 		m.resolveFront(
 			gate.Decision{Behavior: gate.Deny, Reason: "vetoed by user"},
 			entry{kind: eWarn, body: "✋ vetoed · ⚙ " + name})
-	case "a": // approve the front gate immediately
+	case "ctrl+y": // approve the front gate immediately
 		name := m.pending[0].p.Input.ToolName
 		m.resolveFront(
 			gate.Decision{Behavior: gate.Allow, Reason: "approved by user"},
 			entry{kind: eGood, body: "✔ approved · ⚙ " + name})
-	case "p": // pause / resume all countdowns
+	case "ctrl+r": // pause / resume all countdowns
 		m.togglePause()
+	default:
+		return false
 	}
+	return true
 }

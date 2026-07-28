@@ -11,12 +11,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/key"
-	"github.com/charmbracelet/bubbles/progress"
-	"github.com/charmbracelet/bubbles/textarea"
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/key"
+	"charm.land/bubbles/v2/progress"
+	"charm.land/bubbles/v2/textarea"
+	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/hweeks/always-click-yes/internal/driver"
 	"github.com/hweeks/always-click-yes/internal/gate"
@@ -36,6 +36,12 @@ type Config struct {
 	ConfigPath string               // .acy.json the run's settings came from (shown in the UI), if any
 	MaxLines   int                  // per-block line cap in the transcript (default 10)
 	Cwd        string               // the project this run belongs to (snapshot key)
+
+	// AltScreen puts the run in the alternate screen buffer. In Bubble Tea v2 the
+	// alt-screen is a field on the tea.View the model returns, not a program
+	// option, so the caller's choice has to reach the model rather than
+	// tea.NewProgram. Headless callers (the tests, the e2e harness) leave it off.
+	AltScreen bool
 
 	// Sessions lists resumable sessions for the /resume picker (nil = disabled).
 	Sessions func() ([]session.Info, error)
@@ -98,6 +104,7 @@ type Model struct {
 
 	width, height int
 	ready         bool
+	altScreen     bool
 
 	entries   []entry
 	sessionID string
@@ -172,6 +179,23 @@ type Model struct {
 	paused    bool
 	now       time.Time
 
+	// attached names the files a paste resolved into the composer, so the footer
+	// can say the drag registered. It describes what is currently *in* the box —
+	// clearComposer is the only place it dies, and it has to be, or a 📎 line
+	// would sit under an empty composer promising a file the next message never
+	// carries.
+	attached []string
+
+	// queued holds messages typed while the session was busy, waiting to go out
+	// as one turn when it next falls idle. Plain strings, deliberately: Bubble Tea
+	// copies the Model on every Update, so anything with an internal self-pointer
+	// in here is the strings.Builder crash again.
+	//
+	// It is never persisted. A queued message is transient intent, and one
+	// surviving a crash to be delivered into a different phase is worse than one
+	// that was lost.
+	queued []string
+
 	// phase machine
 	ctx         context.Context
 	launcher    Launcher
@@ -191,22 +215,36 @@ func New(drv *driver.Driver, cfg Config) Model {
 	// layout), and a textinput is single-line by construction — it scrolls
 	// sideways and can only ever be one row tall.
 	ta := textarea.New()
-	ta.Placeholder = "type a message for Claude, Enter to send (Ctrl+C to quit)"
+	ta.Placeholder = "type a message for Claude, Enter to send, Ctrl+J for a newline"
 	ta.Prompt = "▸ "
 	ta.ShowLineNumbers = false
 	ta.CharLimit = 0
-	ta.MaxHeight = maxInputRows
+	// 0 = no limit, and it has to be 0. In bubbles MaxHeight is not merely the
+	// visible-row cap it reads as: atContentLimit refuses InsertNewline once the
+	// value holds MaxHeight *logical* lines, so maxInputRows here meant the ninth
+	// newline in a message silently did nothing and a pasted plan document came
+	// back out as a run-on sentence. The visible height is layout()'s job — it
+	// clamps to maxInputRows and the textarea scrolls internally past that.
+	ta.MaxHeight = 0
 	ta.SetHeight(1)
 	ta.Focus()
-	// Enter sends, so a deliberate newline needs its own key; terminals can't
-	// tell shift+enter from enter, so ctrl+j it is.
-	ta.KeyMap.InsertNewline = key.NewBinding(key.WithKeys("ctrl+j"), key.WithHelp("ctrl+j", "newline"))
+	// Enter sends, so a deliberate newline needs its own keys. shift+enter is only
+	// a distinct key where the terminal speaks the Kitty keyboard protocol (which
+	// Bubble Tea v2 negotiates on every run); everywhere else it arrives as a bare
+	// Enter and sends, so alt+enter and ctrl+j are the portable fallbacks.
+	ta.KeyMap.InsertNewline = key.NewBinding(
+		key.WithKeys("shift+enter", "alt+enter", "ctrl+j"),
+		key.WithHelp("ctrl+j", "newline"))
 	// ↑/↓ belong to the transcript, as /help promises. Leave the textarea's own
 	// line movement on ctrl+p/ctrl+n.
 	ta.KeyMap.LinePrevious = key.NewBinding(key.WithKeys("ctrl+p"))
 	ta.KeyMap.LineNext = key.NewBinding(key.WithKeys("ctrl+n"))
 	// The cursor-line highlight reads as a selection bar in a one-line composer.
-	ta.FocusedStyle.CursorLine = lipgloss.NewStyle()
+	// v2 keeps the styles behind a getter/setter pair rather than exposing
+	// FocusedStyle/BlurredStyle directly, so read-modify-write is the whole idiom.
+	taStyles := ta.Styles()
+	taStyles.Focused.CursorLine = lipgloss.NewStyle()
+	ta.SetStyles(taStyles)
 
 	if cfg.Countdown <= 0 {
 		cfg.Countdown = 30 * time.Second
@@ -228,6 +266,7 @@ func New(drv *driver.Driver, cfg Config) Model {
 		phase:     PhasePlan,
 		logPath:   cfg.LogPath,
 		maxLines:  cfg.MaxLines,
+		altScreen: cfg.AltScreen,
 
 		sessionLister: cfg.Sessions,
 		dispatcher:    cfg.Dispatcher,
@@ -319,7 +358,7 @@ func (m *Model) rebuild() {
 	if !m.ready {
 		return
 	}
-	m.vp.SetContent(renderEntries(m.entries, m.vp.Width, m.maxLines))
+	m.vp.SetContent(renderEntries(m.entries, m.vp.Width(), m.maxLines))
 	m.vp.GotoBottom()
 }
 

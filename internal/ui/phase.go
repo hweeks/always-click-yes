@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/hweeks/always-click-yes/internal/alog"
 	"github.com/hweeks/always-click-yes/internal/driver"
@@ -126,18 +126,86 @@ func (m *Model) beginTurn() {
 	m.status = "working…"
 }
 
-// sendInput dispatches the current input box to claude.
+// busy reports whether the session has something in flight that a new user turn
+// would land on top of: its own turn, a permission gate waiting to be answered
+// (the turn that raised it is still open), or a delegated task the parent is
+// blocked on.
+func (m Model) busy() bool {
+	return m.processing ||
+		len(m.pending) > 0 ||
+		(m.dispatcher != nil && m.dispatcher.Active() > 0)
+}
+
+// sendInput dispatches the current input box to claude, or queues it when the
+// session is busy.
+//
+// It used to drop it: `m.processing` was a refusal, and in an armed run
+// something is in flight nearly all the time, so Enter did nothing and said
+// nothing about it. The only genuine refusals left are the ones with nowhere to
+// send to at all.
 func (m *Model) sendInput() {
 	text := strings.TrimSpace(m.input.Value())
-	if text == "" || m.ended || m.drv == nil || m.processing {
-		return // ignore sends while a turn is in flight (Esc to interject first)
+	if text == "" || m.ended || m.drv == nil {
+		return // nothing to send, or nothing left to send it to
+	}
+	if m.busy() {
+		m.queued = append(m.queued, text)
+		m.appendEntry(entry{kind: eQueued, body: text})
+		m.clearComposer()
+		return
 	}
 	m.interrupted = false
 	m.turnText = ""
 	_ = m.drv.Send(text)
 	m.beginTurn()
 	m.appendEntry(entry{kind: eYou, body: text})
-	m.input.Reset()
+	m.clearComposer()
+}
+
+// flushQueue sends everything typed while the session was busy, the moment it
+// goes idle.
+//
+// One turn carrying every queued message, never one turn each: a turn re-bills
+// the entire accumulated context (the measurement in AGENTS.md that this whole
+// architecture exists to shrink), so N separate sends pay for the conversation N
+// times over to deliver text the model will read in one go regardless.
+//
+// This is also, for free, the Esc/interject path: Esc aborts the turn, the
+// aborted turn's `result` event lands here, and the queued message goes out as
+// the redirect — the same code, without a second way to send.
+func (m *Model) flushQueue() {
+	if len(m.queued) == 0 || m.ended || m.drv == nil || m.busy() {
+		return
+	}
+	text := strings.Join(m.queued, "\n\n")
+	m.interrupted = false
+	m.turnText = ""
+	_ = m.drv.Send(text)
+	m.appendEntry(entry{kind: eYou, body: text})
+	m.beginTurn()
+	m.queued = nil
+}
+
+// reportUnsentQueue prints anything still queued back into the transcript when
+// the session ends under it. The messages are gone as far as claude is
+// concerned; the least acy can do is leave them somewhere the user can copy
+// them out of rather than swallowing what they typed.
+func (m *Model) reportUnsentQueue() {
+	if len(m.queued) == 0 {
+		return
+	}
+	m.appendEntry(entry{kind: eWarn, body: fmt.Sprintf(
+		"⚠ the session ended with %s never sent — copy anything you still want:\n\n%s",
+		plural(len(m.queued), "queued message"), strings.Join(m.queued, "\n\n"))})
+	m.queued = nil
+}
+
+// plural renders "1 thing" / "2 things".
+func plural(n int, noun string) string {
+	if n == 1 {
+		return fmt.Sprintf("%d %s", n, noun)
+	}
+	return fmt.Sprintf("%d %ss", n, noun)
 }
 
 // interject aborts the in-flight turn so the user can redirect. Returns false if

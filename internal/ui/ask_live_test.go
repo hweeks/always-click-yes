@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/hweeks/always-click-yes/internal/driver"
 )
@@ -96,7 +96,7 @@ func TestLiveAskUserQuestion(t *testing.T) {
 						t.Fatal("ingestToolUse did not open the panel for a real AskUserQuestion")
 					}
 					for m.ask != nil {
-						m.handleAskKey(tea.KeyMsg{Type: tea.KeyEnter})
+						m.handleAskKey(tea.KeyPressMsg{Code: tea.KeyEnter})
 					}
 					answered = true
 
