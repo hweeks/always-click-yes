@@ -9,8 +9,13 @@ BIN := acy
 build:
 	go build -o $(BIN) .
 
+# The 3s countdown is for dogfooding, not a default worth shipping. Children do
+# all the tool work now and every one of their calls counts down, so a measured
+# run spent ~13 of its 17 minutes waiting on gates it was always going to
+# approve. Three seconds is still long enough to hit `s` when you see something
+# wrong, which is the only thing the countdown is for.
 run: build
-	./$(BIN) run
+	./$(BIN) run --countdown 3s
 
 test:
 	go test ./...

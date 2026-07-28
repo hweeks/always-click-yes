@@ -178,6 +178,90 @@ func TestNoFlushWhileAGateIsPending(t *testing.T) {
 	}
 }
 
+// gatedBusyModel is a busy model holding one queued message behind one gate with
+// a countdown a test can step past by hand.
+func gatedBusyModel(t *testing.T, text string) (Model, *strings.Builder) {
+	t.Helper()
+	m, sent := busyModel(t)
+	// Both before enqueue: the deadline is m.now.Add(m.countdown), read once.
+	m.countdown = 30 * time.Second
+	m.now = time.Unix(1_000_000, 0)
+	m = typeAndSend(t, m, text)
+
+	p, _ := bashPending("echo hi")
+	m.enqueue(p)
+	if len(m.pending) != 1 {
+		t.Fatalf("setup: want 1 pending gate, got %d", len(m.pending))
+	}
+
+	// The turn reports while the gate still counts down: that refusal is correct,
+	// and it is what leaves the gate as the only thing holding the queue.
+	tm, _ := m.Update(resultMsg(m))
+	m = tm.(Model)
+	if sent.String() != "" {
+		t.Fatalf("setup: flushed with a gate still pending; stdin got:\n%s", sent.String())
+	}
+	if len(m.queued) != 1 {
+		t.Fatalf("setup: queued = %q, want the message still held", m.queued)
+	}
+	return m, sent
+}
+
+// A gate can be the last thing holding the queue. Its countdown expiring is not a
+// driver event, so nothing else is coming: the tick that auto-approves it has to
+// release the queue itself, or the message is stranded with an empty composer and
+// no key that frees it.
+func TestGateExpiringOnItsCountdownFlushesTheQueue(t *testing.T) {
+	m, sent := gatedBusyModel(t, "and add a test for it")
+
+	tm, _ := m.Update(tickMsg(m.now.Add(m.countdown + time.Second)))
+	m = tm.(Model)
+
+	if len(m.pending) != 0 {
+		t.Fatalf("setup: the gate should have auto-approved, %d still pending", len(m.pending))
+	}
+	if !strings.Contains(sent.String(), "and add a test for it") {
+		t.Fatalf("the queue was stranded by the expiring gate; stdin got:\n%s", sent.String())
+	}
+	if len(m.queued) != 0 {
+		t.Errorf("queued = %q, want it emptied by the flush", m.queued)
+	}
+	if !strings.Contains(m.transcript(), "and add a test for it") {
+		t.Errorf("the flushed message never reached the transcript:\n%s", m.transcript())
+	}
+	// And on screen. The tick only rebuilds the viewport for a live gate, which is
+	// precisely what just went away, so a flush that sends has to force the redraw
+	// itself — otherwise the message shows as queued and nothing else until
+	// something unrelated happens to redraw. Twice is the tell: the ⏳ entry from
+	// when it was held, and the "you" entry from when it went out.
+	view := stripAnsi(m.View().Content)
+	if n := strings.Count(view, "and add a test for it"); n < 2 {
+		t.Errorf("the sent message was not redrawn (shown %d×, want the queued and the sent copy):\n%s", n, view)
+	}
+}
+
+// Same stranding, answered by hand: ^Y resolves the front gate outside any event
+// path at all, so it has to retry the flush too.
+func TestApprovingTheLastGateFlushesTheQueue(t *testing.T) {
+	m, sent := gatedBusyModel(t, "then run the linter")
+
+	tm, _ := m.Update(tea.KeyPressMsg{Code: 'y', Mod: tea.ModCtrl})
+	m = tm.(Model)
+
+	if len(m.pending) != 0 {
+		t.Fatalf("setup: ctrl+y should have resolved the gate, %d still pending", len(m.pending))
+	}
+	if !strings.Contains(sent.String(), "then run the linter") {
+		t.Fatalf("the queue was stranded by the approved gate; stdin got:\n%s", sent.String())
+	}
+	if len(m.queued) != 0 {
+		t.Errorf("queued = %q, want it emptied by the flush", m.queued)
+	}
+	if !m.processing {
+		t.Error("a flush starts a turn")
+	}
+}
+
 // Queue, then Esc: the interject path needs no code of its own. Esc aborts the
 // turn, the aborted turn's result lands, and the queued text goes out as the
 // redirect.

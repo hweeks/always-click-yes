@@ -173,9 +173,14 @@ func (m *Model) sendInput() {
 // This is also, for free, the Esc/interject path: Esc aborts the turn, the
 // aborted turn's `result` event lands here, and the queued message goes out as
 // the redirect — the same code, without a second way to send.
-func (m *Model) flushQueue() {
+//
+// It reports whether it actually sent, because a send writes a transcript entry
+// and starts a turn: a caller that only redraws under some other condition (the
+// tick, which redraws for a live gate) would otherwise leave the user's own
+// message off screen until something unrelated happened to redraw.
+func (m *Model) flushQueue() bool {
 	if len(m.queued) == 0 || m.ended || m.drv == nil || m.busy() {
-		return
+		return false
 	}
 	text := strings.Join(m.queued, "\n\n")
 	m.interrupted = false
@@ -184,6 +189,7 @@ func (m *Model) flushQueue() {
 	m.appendEntry(entry{kind: eYou, body: text})
 	m.beginTurn()
 	m.queued = nil
+	return true
 }
 
 // reportUnsentQueue prints anything still queued back into the transcript when

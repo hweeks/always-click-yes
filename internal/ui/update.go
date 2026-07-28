@@ -173,6 +173,12 @@ func (m Model) update(msg tea.Msg) (Model, tea.Cmd) {
 		// raises a gate, so a blanket interception meant the keyboard was dead for
 		// most of a run.
 		if len(m.pending) > 0 && m.handleGateKey(msg) {
+			// The gate ^Y/^X just answered can be the last thing holding the queue:
+			// the turn that raised it has already reported, so no further driver or
+			// child event is coming to release it. ^R falls in here too and is a
+			// no-op — flushQueue re-checks busy() itself, and a paused gate is still
+			// pending.
+			m.flushQueue()
 			m.rebuild()
 			return m, nil
 		}
@@ -306,7 +312,14 @@ func (m Model) update(msg tea.Msg) (Model, tea.Cmd) {
 		m.spinFrame++ // animates the footer/header spinner; View() re-renders each tick
 		m.expireDue()
 		m.expireAsk()
-		if len(m.pending) > 0 || m.ask != nil {
+		// A gate expiring on its own countdown can be the last thing holding the
+		// queue, and nothing is guaranteed to arrive after it: the turn that raised
+		// it has already reported, so without this the message would sit there
+		// forever, with an empty composer and no key that releases it. The redraw
+		// has to follow a send — this branch otherwise only rebuilds for a live
+		// gate, which is exactly what just went away.
+		flushed := m.flushQueue()
+		if flushed || len(m.pending) > 0 || m.ask != nil {
 			m.rebuild()
 		}
 		return m, tickCmd()
