@@ -32,6 +32,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/hweeks/always-click-yes/internal/cli"
+	"github.com/hweeks/always-click-yes/internal/hub"
 	"github.com/hweeks/always-click-yes/internal/state"
 	"github.com/hweeks/always-click-yes/internal/ui"
 )
@@ -74,14 +75,11 @@ var acyBinary = sync.OnceValues(func() (string, error) {
 type harness struct {
 	t   *testing.T
 	sup *cli.Supervisor
+	hub *hub.Hub
 
-	mu     sync.Mutex
-	model  ui.Model
-	closed bool
-
-	msgs chan tea.Msg
-	done chan struct{}
-	ctx  context.Context
+	// crashed makes crash idempotent: a test that kills a run and then hits a
+	// cleanup path must not stop the driver twice.
+	crashed sync.Once
 }
 
 // options configures a harness. The zero value is a fresh run in a scratch project.
@@ -101,10 +99,12 @@ type options struct {
 // claude launcher, real state files — and runs its Bubble Tea model
 // headlessly, so a test can send keys and read the transcript without a terminal.
 //
-// It deliberately does not use tea.NewProgram: a Program wants a TTY and owns its
-// own goroutine, and a test needs to *interleave* with the model — send a key, wait
-// for a phase, read what was written to disk. Update() is a pure function of
-// (model, msg), so a plain loop over the commands it returns is the whole runtime.
+// The headless runtime is internal/hub. It deliberately does not use
+// tea.NewProgram: a Program wants a TTY and owns its own goroutine, and a test
+// needs to *interleave* with the model — send a key, wait for a phase, read what
+// was written to disk. Update() is a pure function of (model, msg), so a plain
+// loop over the commands it returns is the whole runtime, and the HTTP server
+// that feeds the webview needs exactly the same one.
 func newHarness(t *testing.T, opt options) *harness {
 	t.Helper()
 	requireLive(t)
@@ -154,73 +154,14 @@ func newHarness(t *testing.T, opt options) *harness {
 	}
 	t.Cleanup(sup.Close)
 
-	h := &harness{
-		t:     t,
-		sup:   sup,
-		model: sup.Model,
-		msgs:  make(chan tea.Msg, 256),
-		done:  make(chan struct{}),
-		ctx:   ctx,
-	}
-
-	// Init reads the model, so take its command *before* the loop goroutine can start
-	// writing to it.
-	init := h.model.Init()
-	go h.loop()
-
-	// Bubble Tea's first message is always the window size; the model stays unready
-	// (and renders nothing) until it arrives.
-	h.send(tea.WindowSizeMsg{Width: 100, Height: 40})
-	h.exec(init)
+	// The Hub is the runtime: it takes Init's command before its loop can touch
+	// the model, feeds the synthetic window size the model stays unready without,
+	// and then runs the loop. Closed before the supervisor is torn down —
+	// t.Cleanup is LIFO and this registration is the later one — so nothing is
+	// still driving a model whose gate socket has gone away.
+	h := &harness{t: t, sup: sup, hub: hub.New(sup.Model)}
+	t.Cleanup(h.hub.Close)
 	return h
-}
-
-// loop is the event loop: apply a message, run whatever commands come back.
-func (h *harness) loop() {
-	defer close(h.done)
-	for {
-		select {
-		case <-h.ctx.Done():
-			return
-		case msg := <-h.msgs:
-			if _, ok := msg.(tea.QuitMsg); ok {
-				return
-			}
-			h.mu.Lock()
-			next, cmd := h.model.Update(msg)
-			h.model = next.(ui.Model)
-			h.mu.Unlock()
-			h.exec(cmd)
-		}
-	}
-}
-
-// exec runs a command off the loop and feeds its message back in, which is exactly
-// what tea.Program does. Batched commands fan out; nil commands are no-ops.
-func (h *harness) exec(cmd tea.Cmd) {
-	if cmd == nil {
-		return
-	}
-	go func() {
-		msg := cmd()
-		switch m := msg.(type) {
-		case nil:
-			return
-		case tea.BatchMsg:
-			for _, c := range m {
-				h.exec(c)
-			}
-		default:
-			h.send(msg)
-		}
-	}()
-}
-
-func (h *harness) send(msg tea.Msg) {
-	select {
-	case h.msgs <- msg:
-	case <-h.ctx.Done():
-	}
 }
 
 // typeAndSend puts text in the composer and presses Enter, the way a user would.
@@ -252,18 +193,17 @@ var (
 	keyCtrlX = tea.KeyPressMsg{Code: 'x', Mod: tea.ModCtrl}
 )
 
-func (h *harness) key(k tea.KeyPressMsg) { h.send(k) }
+// key presses a key. It goes in as a raw message rather than as a ui.Action on
+// purpose: these tests are testing the key routing itself — that ^G reaches arm
+// and ^X reaches the gate — which an action would bypass.
+func (h *harness) key(k tea.KeyPressMsg) { h.hub.Send(k) }
 
 // rune presses a printable key. Text is what the model reads as typed input, so
 // a key with a Code but no Text would move the cursor and insert nothing.
-func (h *harness) rune(r rune) { h.send(tea.KeyPressMsg{Code: r, Text: string(r)}) }
+func (h *harness) rune(r rune) { h.hub.Send(tea.KeyPressMsg{Code: r, Text: string(r)}) }
 
 // read borrows the model under the lock. Every assertion goes through here.
-func (h *harness) read(fn func(ui.Model)) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	fn(h.model)
-}
+func (h *harness) read(fn func(ui.Model)) { h.hub.Read(fn) }
 
 // waitFor polls until cond holds, and fails the test with the transcript if it
 // never does. Polling is the honest primitive here: the thing we are waiting for is
@@ -284,16 +224,17 @@ func (h *harness) waitFor(what string, timeout time.Duration, cond func(ui.Model
 	h.t.Fatalf("timed out after %s waiting for %s\n--- transcript ---\n%s", timeout, what, dump)
 }
 
-// stop tears the run down the way a crash would: the driver dies, and nothing gets
-// a chance to tidy up. That is the state a resume has to cope with.
+// crash tears the run down the way a real crash would: the driver dies, and
+// nothing gets a chance to tidy up. That is the state a resume has to cope with.
+//
+// It reaches the driver through the model borrowed under the Hub's lock, which
+// is the same place the old harness stopped it from: the model's copy carries
+// the same *driver.Driver pointer, so stopping it stops the process the loop is
+// reading from.
 func (h *harness) crash() {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if h.closed {
-		return
-	}
-	h.closed = true
-	h.model.StopDriver()
+	h.crashed.Do(func() {
+		h.read(func(m ui.Model) { m.StopDriver() })
+	})
 }
 
 // snapshotFor reads what acy persisted for a session — the file a resume reads back.

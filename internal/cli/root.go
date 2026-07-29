@@ -23,6 +23,9 @@ func Root() *cobra.Command {
 
 	runCmd := newRunCmd()
 	root.AddCommand(runCmd)
+	// serve is a documented sibling of run, not a hidden command: it is how a
+	// webview client (and anything else that is not a terminal) supervises a run.
+	root.AddCommand(newServeCmd())
 	root.AddCommand(newHookCmd())
 	root.AddCommand(newMCPCmd())
 

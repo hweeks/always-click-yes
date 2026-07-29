@@ -2,7 +2,9 @@ package ui
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -12,14 +14,27 @@ import (
 	"github.com/hweeks/always-click-yes/internal/gate"
 )
 
+// gateSeq mints tool_use ids for the helpers below.
+//
+// Every gate the hook raises carries one, and it is the *identity* an action
+// answers a gate by — so a helper that left it empty built gates that were all
+// the same gate as far as resolveByID was concerned, and a test matching id
+// against id was comparing "" with "" and proving nothing. Distinct ids, in the
+// shape claude uses, mean a by-id match here means what it means in production.
+var gateSeq atomic.Int64
+
+func toolUseID(tool string) string {
+	return fmt.Sprintf("toolu_%s_%02d", strings.ToLower(tool), gateSeq.Add(1))
+}
+
 func bashPending(cmd string) (*gate.Pending, <-chan gate.Decision) {
-	in := gate.PreToolUseInput{ToolName: "Bash"}
+	in := gate.PreToolUseInput{ToolName: "Bash", ToolUseID: toolUseID("Bash")}
 	in.ToolInput, _ = json.Marshal(map[string]string{"command": cmd})
 	return gate.NewPending(in)
 }
 
 func namedPending(tool string) (*gate.Pending, <-chan gate.Decision) {
-	in := gate.PreToolUseInput{ToolName: tool}
+	in := gate.PreToolUseInput{ToolName: tool, ToolUseID: toolUseID(tool)}
 	in.ToolInput, _ = json.Marshal(map[string]string{})
 	return gate.NewPending(in)
 }

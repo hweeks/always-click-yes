@@ -133,16 +133,55 @@ func (m *Model) expireDue() {
 	m.pending = kept
 }
 
-// resolveFront answers the head-of-queue gate with an explicit decision.
+// resolveByID answers the one gate carrying this tool_use id, and reports the
+// item it answered so the caller can name the tool in the transcript.
+//
+// Identity, not position, is the whole point. Gates auto-approve on their own
+// countdown, so the head of the queue can change between a client rendering it
+// and the answer arriving — and an unknown id therefore means "that gate is
+// already gone", which resolves nothing at all. There is deliberately no
+// fallback to the front of the queue: that would approve a tool nobody looked
+// at, which is the one outcome a permission gate exists to prevent.
+func (m *Model) resolveByID(id string, d gate.Decision) (*gateItem, bool) {
+	for i, it := range m.pending {
+		if it.p.Input.ToolUseID != id {
+			continue
+		}
+		it.p.Resolve(d)
+		// A fresh slice rather than a reslice or an in-place shuffle: Bubble Tea
+		// copies the Model by value, so several copies share this backing array
+		// and moving elements inside it edits a slice someone else is holding.
+		kept := make([]*gateItem, 0, len(m.pending)-1)
+		kept = append(kept, m.pending[:i]...)
+		kept = append(kept, m.pending[i+1:]...)
+		m.pending = kept
+		alog.Printf("gate: %s tool=%s use_id=%s (%s)", d.Behavior, it.p.Input.ToolName, id, d.Reason)
+		return it, true
+	}
+	return nil, false
+}
+
+// resolveFront answers the head-of-queue gate with an explicit decision. It is
+// resolveByID with the head's own id, so there is one removal path rather than
+// two that could disagree about what "answered" means.
 func (m *Model) resolveFront(d gate.Decision, e entry) {
 	if len(m.pending) == 0 {
 		return
 	}
-	it := m.pending[0]
-	it.p.Resolve(d)
-	m.pending = m.pending[1:]
-	alog.Printf("gate: %s tool=%s (%s)", d.Behavior, it.p.Input.ToolName, d.Reason)
-	m.appendEntry(e)
+	if _, ok := m.resolveByID(m.pending[0].p.Input.ToolUseID, d); ok {
+		m.appendEntry(e)
+	}
+}
+
+// setPaused puts every countdown into the requested state and reports whether
+// that was a change. Explicit rather than a toggle, because a client that is
+// not looking at the screen cannot know what it would be toggling from.
+func (m *Model) setPaused(paused bool) bool {
+	if m.paused == paused {
+		return false
+	}
+	m.togglePause()
+	return true
 }
 
 // togglePause freezes or resumes every pending countdown.

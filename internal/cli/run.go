@@ -57,6 +57,13 @@ type Flags struct {
 	// came from.
 	ConfigPath string
 
+	// RenderHTML asks each transcript entry to carry a server-rendered HTML
+	// fragment (ui.Frame.Entries[].HTML). Not a flag either: `acy serve` stamps
+	// it because its client is a webview that cannot render markdown itself,
+	// and `acy run` leaves it off because a terminal would pay goldmark and
+	// chroma on every ingested entry to produce markup nothing ever reads.
+	RenderHTML bool
+
 	// AltScreen asks for the alternate screen buffer. Also not a flag:
 	// runSupervisor stamps it from ACY_NO_ALTSCREEN. Bubble Tea v2 takes the
 	// alt-screen off the tea.View the model returns rather than off a program
@@ -132,6 +139,24 @@ func newRunCmd() *cobra.Command {
 			return runSupervisor(cmd.Context(), f, cmd.Flags().Changed)
 		},
 	}
+	addRunFlags(cmd, &f)
+	return cmd
+}
+
+// addRunFlags registers the settings that describe a *run* — everything that
+// shapes the supervisor itself — on cmd, bound to f.
+//
+// It exists because there are two commands that start a supervisor now: `run`
+// drives it with a terminal, `serve` drives it over HTTP, and they must be the
+// same run underneath. Two flag lists would drift the moment one gained a knob,
+// and the drift would be silent: `acy serve --child-effort high` would parse
+// nowhere and simply do nothing.
+//
+// It binds to a *Flags the caller owns, and registers on cmd's own FlagSet, so
+// cobra's Changed keeps answering per command. applyFileConfig keys on exactly
+// that — the .acy.json overlay only moves a field the command line did not set —
+// so sharing the registration must not mean sharing the pflag instances.
+func addRunFlags(cmd *cobra.Command, f *Flags) {
 	cmd.Flags().StringVar(&f.Model, "model", "", "model to use (e.g. sonnet, opus); default = claude's default")
 	cmd.Flags().StringVar(&f.Bin, "claude-bin", "claude", "path to the claude binary")
 	cmd.Flags().DurationVar(&f.Countdown, "countdown", 30*time.Second, "auto-approve delay per gated tool")
@@ -145,7 +170,6 @@ func newRunCmd() *cobra.Command {
 	cmd.Flags().StringVar(&f.Resume, "resume", "", "resume a prior acy session by id, restoring its transcript, phase and cost")
 	cmd.Flags().BoolVarP(&f.Continue, "continue", "c", false, "resume the most recent acy session in this directory")
 	cmd.MarkFlagsMutuallyExclusive("resume", "continue")
-	return cmd
 }
 
 // resumeTarget resolves the session the run should restore, or "" for a cold start.
@@ -186,6 +210,14 @@ func resumeTarget(f Flags, cwd string) (string, error) {
 type Supervisor struct {
 	Model ui.Model
 	Close func() // releases the gate socket, the generated settings, and the log
+
+	// Sessions and LoadState are the exact two functions the model was given for
+	// its /resume picker. They are handed back so a second front end can build
+	// the same picker from the same sources — `acy serve` passes them straight to
+	// internal/server — rather than re-deriving "which sessions belong to this
+	// project" and getting a different answer than the terminal.
+	Sessions  func() ([]session.Info, error)
+	LoadState func(id string) (state.Snapshot, bool, error)
 }
 
 // NewSupervisor builds the supervisor exactly as `acy run` does — the same gate
@@ -389,6 +421,10 @@ func NewSupervisor(ctx context.Context, f Flags) (*Supervisor, error) {
 		alog.Printf("resume: restoring session %s", resumeID)
 	}
 
+	// Bound once and shared: the model's picker and any second front end read the
+	// same list of resumable sessions, from the same cwd.
+	sessions := func() ([]session.Info, error) { return session.List(cwd) }
+
 	model := ui.New(nil, ui.Config{
 		Ctx:        ctx,
 		Launcher:   launcher,
@@ -399,29 +435,31 @@ func NewSupervisor(ctx context.Context, f Flags) (*Supervisor, error) {
 		ConfigPath: f.ConfigPath,
 		MaxLines:   f.MaxLines,
 		Cwd:        cwd,
+		RenderHTML: f.RenderHTML,
 		AltScreen:  f.AltScreen,
 		Resume:     resumeID,
 		Dispatcher: orch,
 		LoadState:  state.Load,
 		SaveState:  state.Save,
 		Replay:     func(id string) ([]driver.Event, error) { return session.Replay(cwd, id) },
-		Sessions:   func() ([]session.Info, error) { return session.List(cwd) },
+		Sessions:   sessions,
 	})
 
-	return &Supervisor{Model: model, Close: closeAll}, nil
+	return &Supervisor{
+		Model:     model,
+		Close:     closeAll,
+		Sessions:  sessions,
+		LoadState: state.Load,
+	}, nil
 }
 
-func runSupervisor(ctx context.Context, f Flags, changed func(string) bool) error {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	// Overlay the project's .acy.json before wiring anything: the settings it
-	// carries (log path, countdown, model …) shape the supervisor itself. A file
-	// that exists but doesn't parse aborts the run — an unattended tool must not
-	// quietly fall back to defaults its project tried to override.
+// overlayFileConfig applies the project's .acy.json to f.
+//
+// Both `run` and `serve` do this before wiring anything, because the settings it
+// carries (log path, countdown, model …) shape the supervisor itself. A file
+// that exists but doesn't parse aborts the command — an unattended tool must not
+// quietly fall back to defaults its project tried to override.
+func overlayFileConfig(f *Flags, changed func(string) bool) error {
 	cwd := f.Cwd
 	if cwd == "" {
 		var err error
@@ -432,7 +470,20 @@ func runSupervisor(ctx context.Context, f Flags, changed func(string) bool) erro
 	if file, found, err := config.LoadFile(cwd); err != nil {
 		return err
 	} else if found {
-		applyFileConfig(&f, file, changed)
+		applyFileConfig(f, file, changed)
+	}
+	return nil
+}
+
+func runSupervisor(ctx context.Context, f Flags, changed func(string) bool) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	if err := overlayFileConfig(&f, changed); err != nil {
+		return err
 	}
 
 	// Alt-screen by default; ACY_NO_ALTSCREEN=1 keeps output inline (useful for

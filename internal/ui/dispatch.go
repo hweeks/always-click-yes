@@ -155,9 +155,13 @@ func (m *Model) ingestChildStream(ev orchestrator.Event) {
 					m.appendEntry(entry{kind: eClaude, task: ev.TaskID, body: t})
 				}
 			case driver.BlockToolUse:
+				// b.Name, not baseToolName(b.Name), matching what this has always
+				// passed — changing it would start highlighting bodies the TUI has
+				// never highlighted.
+				body, raw, lang := toolBodyParts(b.Name, b.Input)
 				m.appendEntry(entry{
 					kind: eTool, task: ev.TaskID,
-					title: baseToolName(b.Name), body: toolBody(b.Name, b.Input),
+					title: baseToolName(b.Name), body: body, raw: raw, lang: lang,
 				})
 			}
 		}

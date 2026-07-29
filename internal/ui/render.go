@@ -29,12 +29,29 @@ const (
 
 // entry is one item in the transcript. It stays structured so it can be
 // re-rendered at the current width on resize.
+//
+// raw/lang exist for the second front end and are invisible to this file. body
+// is highlighted at ingest — deliberately, because rebuild() re-renders every
+// entry on each 120ms tick and re-lexing at that rate would burn CPU for no
+// visual gain — but ANSI is a terminal's answer, not a webview's. So the
+// unhighlighted source and its language travel alongside, and a non-terminal
+// renderer highlights it its own way. See toolBodyParts.
 type entry struct {
+	seq    int // monotonic, assigned by appendEntry; never reused, never reset
 	kind   ekind
 	title  string // e.g. a tool name
 	body   string
+	raw    string // body without the syntax highlighting (plain text)
+	lang   string // language hint for raw ("bash", "diff", "go", …; "" = none)
 	styled bool   // body already carries ANSI (syntax highlighting); render it verbatim
 	task   string // the delegated task this came from ("" = the parent itself)
+
+	// html is this entry rendered for a browser, and is empty unless
+	// Config.RenderHTML asked for it — which `acy run` never does, because the
+	// terminal cannot display it and generating it would be work the run pays for
+	// and nobody reads. Like body's highlighting it is produced once, at ingest;
+	// see stamp.
+	html string
 }
 
 // palette. lipgloss v2's Color is a constructor returning image/color.Color

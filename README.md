@@ -147,13 +147,47 @@ acy run                    # in the project directory you want Claude to work in
 acy run --model opus --countdown 20s
 ```
 
+### `acy serve` — the same run, without a terminal
+
+```sh
+acy serve                  # → {"url":"http://127.0.0.1:54321","token":"8f3c…"}
+acy serve --port 7777 --model opus
+```
+
+`serve` drives the **identical supervisor** `run` does — the same gate, the same
+PreToolUse hook, the same dispatched children, the same `.acy.json` and the same
+run flags — and puts it on HTTP instead of on a screen: a frame projection, an
+action endpoint, and a Server-Sent Events stream a client renders from. It is for
+front ends that are not a terminal; the [VS Code panel](#vs-code) is the one that
+exists. `acy run` and the TUI are unchanged and unaffected.
+
+It binds **127.0.0.1 only**, requires a bearer token on every `/api/` request,
+and prints one line of JSON to stdout as soon as the listener is up — nothing
+else ever precedes it there — so a parent process can parse it and connect. The
+routes, status codes, SSE framing and CORS rules are specified in
+[`docs/webui-protocol.md`](docs/webui-protocol.md).
+
 ## VS Code
 
-The `vscode/` extension runs the same TUI in an integrated terminal: **ACY:
-Plan & Run**, **ACY: Continue Last Run**, and a `▶ acy` status-bar button, with
-one supervisor terminal per window (a second run reveals it, never
-double-launches). Install it from the VS Code Marketplace (`ext install
-hweeks.always-click-yes`), which hands you the package built for your platform.
+The `vscode/` extension gives you the same supervisor two ways.
+
+**In a terminal — the default.** **ACY: Plan & Run**, **ACY: Continue Last Run**,
+and a status-bar button run `acy` as an integrated terminal's shell, so you get
+the TUI verbatim, with one supervisor terminal per window (a second run reveals
+it, never double-launches).
+
+**In a panel.** **ACY: Open Panel** starts `acy serve` — the identical
+supervisor, headless — and renders it in a webview: the same transcript, gates,
+countdowns, queue and composer, over HTTP rather than a terminal. One panel and
+one supervisor per workspace folder; closing the tab stops it.
+
+The panel works, and it is not the default yet: `acy.useTerminal` defaults to
+`true` because the panel is still wearing placeholder styling while its visual
+design is settled. Turn that setting off and **ACY: Plan & Run** opens the panel
+instead. Nothing about the terminal path changes either way.
+
+Install from the VS Code Marketplace (`ext install hweeks.always-click-yes`),
+which hands you the package built for your platform.
 Each release also attaches those `.vsix` packages with the acy binary bundled
 (`darwin-arm64`, `darwin-x64`, `linux-x64`, `linux-arm64`, `win32-x64` — the
 last experimental and untested at runtime) plus a `universal` one that uses
@@ -379,6 +413,14 @@ to drive, but the cost carries over, and `Ctrl+G` re-arms if you want more.
   every event received (`RX`), every message sent (`TX`), gate decisions, and phase
   transitions. Set to `""` to disable. `tail -f acy-debug.log` to watch it live.
 
+Every flag above works on **`acy serve`** as well — the two commands share one
+flag registration, so they cannot drift — and `serve` adds two of its own:
+
+- `--port` — TCP port to listen on (default `0`: the kernel picks a free one).
+  The host is not a setting; it is always `127.0.0.1`.
+- `--token` — the bearer token every `/api/` request must carry. Empty (the
+  default) mints a fresh 256-bit one and prints it on the stdout endpoint line.
+
 ## Layout
 
 - `internal/driver` — the `claude` subprocess: stream-json args, stdin message
@@ -390,13 +432,26 @@ to drive, but the cost carries over, and `Ctrl+G` re-arms if you want more.
   the report schema, and the ledger.
 - `internal/ui` — the Bubble Tea v2 model: transcript, countdown, phase machine,
   delegation, the message queue, pasted-path attachment, slash commands, and the
-  resume / AskUserQuestion pickers.
+  resume / AskUserQuestion pickers. Also the two front-end seams both UIs share —
+  `Frame` (the run as a JSON value), `Action` (one semantic command, which the
+  terminal's own keys raise too), and the presentation decisions behind both.
 - `internal/session` — reads claude's `~/.claude/projects/<slug>/*.jsonl` transcripts:
   lists them for the `/resume` picker, and replays one back into the transcript view.
 - `internal/state` — `acy`'s own snapshot of a run (phase, plan, task ledger, tokens,
   cost) — the part of a session claude's transcript doesn't record.
+- `internal/hub` — the headless runtime: one `ui.Model`, one goroutine, and the
+  frame stream everything that isn't the TUI drives the run through. It emits a
+  frame only when the bytes change, so an idle run is silent.
+- `internal/htmlrender` — transcript entries as sanitized HTML for the webview,
+  plus the dark/light syntax stylesheets. Only produced for a served run; `acy
+  run` never pays for it.
+- `internal/server` — the HTTP front door behind `acy serve`: frames, actions,
+  SSE, the highlight stylesheet, a bearer token and a deliberately narrow CORS
+  surface.
 - `internal/e2e` — the live end-to-end suite (see below).
-- `internal/cli` — Cobra commands (`run`, hidden `hook`).
+- `internal/cli` — Cobra commands (`run`, `serve`, hidden `hook`).
+- `vscode/` — the VS Code extension: the terminal launcher, the `acy serve`
+  panel, and the webview client that renders its frames.
 
 ## Tests
 

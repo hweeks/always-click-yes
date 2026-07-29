@@ -2,6 +2,7 @@ package ui
 
 import (
 	"testing"
+	"time"
 
 	"github.com/hweeks/always-click-yes/internal/session"
 	"github.com/hweeks/always-click-yes/internal/state"
@@ -90,5 +91,66 @@ func TestPickerKeepsEverythingWithoutALedger(t *testing.T) {
 	list := []session.Info{{ID: "a"}, {ID: "b"}}
 	if got := hideChildSessions(list, nil); len(got) != 2 {
 		t.Errorf("got %d rows, want 2", len(got))
+	}
+}
+
+// snapLoader is a state.Load stand-in over a fixed map, for tests that need the
+// picker to be told which sessions acy supervised.
+func snapLoader(snaps map[string]state.Snapshot) func(string) (state.Snapshot, bool, error) {
+	return func(id string) (state.Snapshot, bool, error) {
+		s, ok := snaps[id]
+		return s, ok, nil
+	}
+}
+
+// SessionRows is the one list both front ends show: same filtering, same labels.
+// The HTTP server calls it directly and the /resume picker gets its rows from
+// the same place, so a row that is hidden or labelled in one is hidden or
+// labelled in the other.
+func TestSessionRows(t *testing.T) {
+	mod := time.Unix(1_700_000_000, 0)
+	list := []session.Info{
+		{ID: "parent-1", ModTime: mod, Summary: "port the parser"},
+		{ID: "child-a", ModTime: mod, Summary: "a dispatched task"},
+		{ID: "plain", ModTime: mod, Summary: "a plain claude chat"},
+	}
+	rows := SessionRows(list, snapLoader(map[string]state.Snapshot{
+		"parent-1": {
+			Phase: "AUTO-RUN", Dispatches: 3, CostSettled: 2.5,
+			Tasks: []state.Task{{ID: "t1", SessionID: "child-a"}},
+		},
+	}))
+
+	if len(rows) != 2 {
+		t.Fatalf("rows = %d, want 2 (the child is hidden): %+v", len(rows), rows)
+	}
+	if rows[0].ID != "parent-1" || rows[0].Label != "AUTO-RUN · 3 tasks · $2.50" {
+		t.Errorf("row 0 = %+v, want the supervised run with its label", rows[0])
+	}
+	// An empty label is how a plain claude session is told apart from a run acy
+	// supervised — it is not a missing value.
+	if rows[1].ID != "plain" || rows[1].Label != "" {
+		t.Errorf("row 1 = %+v, want the unsupervised session with no label", rows[1])
+	}
+	if rows[0].ModTimeUnixMs != mod.UnixMilli() {
+		t.Errorf("modTimeUnixMs = %d, want %d", rows[0].ModTimeUnixMs, mod.UnixMilli())
+	}
+	// Nothing is selected: the cursor belongs to whoever is showing the list.
+	for _, r := range rows {
+		if r.Selected {
+			t.Errorf("row %s came back selected; the picker stamps that, not the list", r.ID)
+		}
+	}
+}
+
+// No state store at all (ui tests, and any front end that was given none) means
+// no labels — never a dropped list.
+func TestSessionRowsWithoutState(t *testing.T) {
+	rows := SessionRows([]session.Info{{ID: "a"}, {ID: "b"}}, nil)
+	if len(rows) != 2 {
+		t.Fatalf("rows = %d, want 2", len(rows))
+	}
+	if rows[0].Label != "" {
+		t.Errorf("label = %q, want empty with no snapshots", rows[0].Label)
 	}
 }

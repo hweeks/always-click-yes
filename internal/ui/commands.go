@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -169,17 +170,71 @@ func (m *Model) startResume(arg string) tea.Cmd {
 		m.appendEntry(entry{kind: eMeta, body: "no past sessions found for this project"})
 		return nil
 	}
-	snaps := m.loadSnaps(list)
-	list = hideChildSessions(list, snaps)
-	if len(list) == 0 {
+	rows := pickRows(list, m.loadState)
+	if len(rows) == 0 {
 		m.appendEntry(entry{kind: eMeta, body: "no past sessions found for this project"})
 		return nil
 	}
-	m.sessionList = list
-	m.sessionSnaps = snaps
+	m.sessionList = rows
 	m.pickIdx = 0
 	m.picking = true
 	return nil
+}
+
+// pickRow is one picker row as the model holds it: the row both front ends show,
+// plus the transcript's modification time.
+//
+// The time is kept as a time.Time rather than read back out of the row's
+// ModTimeUnixMs because the two front ends want different things from it. A
+// client formats the instant itself, in whatever locale and zone the editor is
+// in, so the wire carries milliseconds; the terminal prints it here, and
+// re-deriving it from unix milliseconds would render every row in the machine's
+// local zone even when the listing knew better.
+type pickRow struct {
+	SessionRow
+	modTime time.Time
+}
+
+// SessionRows builds the /resume picker's rows for a session list: acy's own
+// snapshot paired with each session, dispatched children dropped, and one label
+// per row saying what acy remembers of the run.
+//
+// Exported because the HTTP server serves the same picker to a webview, and a
+// second implementation of "which sessions are resumable and what do they say"
+// is exactly the pair that drifts — the terminal and the webview would then
+// disagree about a list a person is choosing from. The picker path below builds
+// its rows through pickRows, which this is the wire-shaped half of.
+//
+// load is state.Load in production and a fake in tests; a nil load means no
+// snapshots, so every row comes back unlabelled rather than the call failing.
+func SessionRows(list []session.Info, load func(string) (state.Snapshot, bool, error)) []SessionRow {
+	rows := pickRows(list, load)
+	out := make([]SessionRow, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, r.SessionRow)
+	}
+	return out
+}
+
+// pickRows is the one implementation: load each session's snapshot, hide the
+// dispatched children, label the rest.
+func pickRows(list []session.Info, load func(string) (state.Snapshot, bool, error)) []pickRow {
+	snaps := loadSnaps(list, load)
+	list = hideChildSessions(list, snaps)
+	out := make([]pickRow, 0, len(list))
+	for _, s := range list {
+		snap, ok := snaps[s.ID]
+		out = append(out, pickRow{
+			SessionRow: SessionRow{
+				ID:            s.ID,
+				ModTimeUnixMs: unixMs(s.ModTime),
+				Summary:       s.Summary,
+				Label:         snapLabel(snap, ok),
+			},
+			modTime: s.ModTime,
+		})
+	}
+	return out
 }
 
 // hideChildSessions drops dispatched children from the picker.
@@ -213,13 +268,13 @@ func hideChildSessions(list []session.Info, snaps map[string]state.Snapshot) []s
 // loadSnaps pairs each listed session with acy's state for it, where there is any.
 // The list is claude's — it includes sessions acy never drove (a bare `claude`
 // run), and those simply have no snapshot.
-func (m *Model) loadSnaps(list []session.Info) map[string]state.Snapshot {
-	if m.loadState == nil {
+func loadSnaps(list []session.Info, load func(string) (state.Snapshot, bool, error)) map[string]state.Snapshot {
+	if load == nil {
 		return nil
 	}
 	snaps := make(map[string]state.Snapshot, len(list))
 	for _, s := range list {
-		if snap, ok, err := m.loadState(s.ID); err == nil && ok {
+		if snap, ok, err := load(s.ID); err == nil && ok {
 			snaps[s.ID] = snap
 		}
 	}

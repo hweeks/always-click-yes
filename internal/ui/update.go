@@ -11,7 +11,6 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/hweeks/always-click-yes/internal/alog"
-	"github.com/hweeks/always-click-yes/internal/gate"
 	"github.com/hweeks/always-click-yes/internal/mcp"
 )
 
@@ -187,7 +186,7 @@ func (m Model) update(msg tea.Msg) (Model, tea.Cmd) {
 		// gate socket waiting for a decision, and interrupting the turn out from
 		// under it is an unanswered-hook deadlock path. Until that is untangled,
 		// answer the gate first (^Y/^X) and interject after.
-		if msg.String() == "esc" && len(m.pending) == 0 && m.interject() {
+		if msg.String() == "esc" && len(m.pending) == 0 && m.raise(Interject()).Accepted {
 			m.rebuild()
 			return m, nil
 		}
@@ -195,9 +194,9 @@ func (m Model) update(msg tea.Msg) (Model, tea.Cmd) {
 		// not redundant — a resume knows the session id before its process exists, and
 		// arming into that gap would launch a second claude for the same session.
 		if msg.String() == "ctrl+g" && m.phase == PhasePlan && m.sessionID != "" && m.drv != nil {
-			m.arm()
+			cmd := m.applyAction(Arm(), nil)
 			m.rebuild()
-			return m, nil
+			return m, cmd
 		}
 		// Plain Enter sends; shift+enter, alt+enter and ctrl+j must NOT be claimed
 		// here, or the textarea never sees the newline they are bound to. Under v1
@@ -221,6 +220,18 @@ func (m Model) update(msg tea.Msg) (Model, tea.Cmd) {
 		if m.attachPaste(msg.Content) {
 			return m, nil
 		}
+
+	case ActionMsg:
+		// The write seam. A second front end reaches the model only through here,
+		// and it reaches exactly the same code the keyboard does (see action.go).
+		cmd := m.applyAction(msg.Action, msg.Ack)
+		// An action can be the last thing holding the queue — a gate answered over
+		// HTTP is the same situation as one answered with ^Y, where the turn that
+		// raised it has already reported and no further event is coming. flushQueue
+		// is fully self-guarded, so this needs no conditions of its own.
+		m.flushQueue()
+		m.rebuild()
+		return m, cmd
 
 	case eventMsg:
 		if msg.gen != m.gen {
@@ -352,20 +363,24 @@ func (m Model) update(msg tea.Msg) (Model, tea.Cmd) {
 // ones — none appear in the bubbles textarea DefaultKeyMap or in
 // transcriptKeyMap, and ctrl+p/ctrl+n (composer line movement), ctrl+j
 // (newline), ctrl+g (arm) and ctrl+c (quit) are all already spoken for.
+//
+// Each chord raises the Action a webview would send, rather than doing the work
+// itself — the gate is named by the front item's tool_use id, not by "the front
+// one", so the terminal and an HTTP client answer a gate through exactly the
+// same code. Only the caller is called first: this function is only reached
+// with at least one gate pending, which is what makes m.pending[0] safe here.
 func (m *Model) handleGateKey(msg tea.KeyPressMsg) bool {
+	frontID := func() string { return m.pending[0].p.Input.ToolUseID }
 	switch msg.String() {
 	case "ctrl+x": // stop/veto the front gate
-		name := m.pending[0].p.Input.ToolName
-		m.resolveFront(
-			gate.Decision{Behavior: gate.Deny, Reason: "vetoed by user"},
-			entry{kind: eWarn, body: "✋ vetoed · ⚙ " + name})
+		m.applyAction(GateDeny(frontID()), nil)
 	case "ctrl+y": // approve the front gate immediately
-		name := m.pending[0].p.Input.ToolName
-		m.resolveFront(
-			gate.Decision{Behavior: gate.Allow, Reason: "approved by user"},
-			entry{kind: eGood, body: "✔ approved · ⚙ " + name})
+		m.applyAction(GateAllow(frontID()), nil)
 	case "ctrl+r": // pause / resume all countdowns
-		m.togglePause()
+		// The negation, computed here: the chord is a toggle even though the
+		// action is not, because the person pressing it is looking at the screen
+		// and a stateless client is not.
+		m.applyAction(GatePause(!m.paused), nil)
 	default:
 		return false
 	}

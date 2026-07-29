@@ -137,29 +137,48 @@ func (m Model) busy() bool {
 }
 
 // sendInput dispatches the current input box to claude, or queues it when the
-// session is busy.
+// session is busy. It is the composer's half of the job and nothing else: read
+// the box, submit what was in it, and empty the box if that worked.
+//
+// The submitting itself lives in submitText, because the composer is only one
+// of the places text now comes from — a Submit action carries its own — and a
+// second copy of "queue it if busy, otherwise send it and start a turn" is
+// exactly the pair that would drift.
+func (m *Model) sendInput() {
+	if m.submitText(m.input.Value()).Accepted {
+		m.clearComposer()
+	}
+}
+
+// submitText sends one message to claude, or queues it when the session is
+// busy.
 //
 // It used to drop it: `m.processing` was a refusal, and in an armed run
 // something is in flight nearly all the time, so Enter did nothing and said
 // nothing about it. The only genuine refusals left are the ones with nowhere to
-// send to at all.
-func (m *Model) sendInput() {
-	text := strings.TrimSpace(m.input.Value())
-	if text == "" || m.ended || m.drv == nil {
-		return // nothing to send, or nothing left to send it to
+// send to at all — and those are refusals rather than silence now, because a
+// caller that is not a person watching a screen has no other way to find out.
+func (m *Model) submitText(text string) ActionResult {
+	text = strings.TrimSpace(text)
+	switch {
+	case text == "":
+		return rejected("nothing to send")
+	case m.ended:
+		return rejected("the session has ended")
+	case m.drv == nil:
+		return rejected("no session is running")
 	}
 	if m.busy() {
 		m.queued = append(m.queued, text)
 		m.appendEntry(entry{kind: eQueued, body: text})
-		m.clearComposer()
-		return
+		return accepted("queued until the session falls idle")
 	}
 	m.interrupted = false
 	m.turnText = ""
 	_ = m.drv.Send(text)
 	m.beginTurn()
 	m.appendEntry(entry{kind: eYou, body: text})
-	m.clearComposer()
+	return accepted("sent")
 }
 
 // flushQueue sends everything typed while the session was busy, the moment it

@@ -1,8 +1,11 @@
-# Only dist/ (the bundle), bin/ (a bundled acy for platform builds), and the
-# manifest belong in the .vsix.
+# Only dist/ (the extension bundle), webview/dist/ (the client bundle), bin/ (a
+# bundled acy for platform builds), and the manifest belong in the .vsix.
 src/**
 out-test/**
 node_modules/**
+webview/*.ts
+webview/tsconfig.json
+webview/dist/*.map
 esbuild.mjs
 tsconfig.json
 tsconfig.test.json

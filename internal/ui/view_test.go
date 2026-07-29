@@ -50,7 +50,7 @@ func TestViewHelpOverlay(t *testing.T) {
 func TestViewPickerOverlay(t *testing.T) {
 	m := sizedModel(t)
 	m.picking = true
-	m.sessionList = []session.Info{{ID: "deadbeefcafe", Summary: "do a thing"}}
+	m.sessionList = pickRows([]session.Info{{ID: "deadbeefcafe", Summary: "do a thing"}}, nil)
 	if out := m.View().Content; !strings.Contains(out, "deadbeef") || !strings.Contains(out, "do a thing") {
 		t.Errorf("expected picker to show the session, got:\n%s", out)
 	}

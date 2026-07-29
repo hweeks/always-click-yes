@@ -1,0 +1,52 @@
+[1;38;5;221;48;5;235m PLAN [m[1;38;5;235;48;5;221m always-click-yes [m[38;5;235;48;5;221m[m[38;5;235;48;5;221m planning · session 01234567 · $0.4213 · ctx 38k/200k · ⇣812k · subscriptio… [m
+[1;38;5;81malways-click-yes · help[m                                                                             
+                                                                                                    
+[1;38;5;244mcommands[m                                                                                            
+[38;5;215m  /help[m  [38;5;244mshow this help[m                                                                             
+[38;5;215m  /resume [id][m  [38;5;244mrestore a prior run — transcript, phase and cost (picker if no id)[m                  
+[38;5;215m  /model <name>[m  [38;5;244mset the model for the next launched/resumed session[m                                
+[38;5;215m  /queue[m  [38;5;244mlist the messages waiting for the current turn to end[m                                     
+[38;5;215m  /queue clear[m  [38;5;244mdrop them all, unsent[m                                                               
+[38;5;215m  /clear[m  [38;5;244mclear the transcript view[m                                                                 
+[38;5;215m  /log[m  [38;5;244mshow the debug-log path[m                                                                     
+[38;5;215m  /tokens[m  [38;5;244mtoken ledger: context size, cache reads and cost by spender[m                              
+[38;5;215m  /tasks[m  [38;5;244mdelegated-task ledger: outcome, cost and cache reads per task[m                             
+[38;5;215m  /done[m  [38;5;244mend the run by hand, if the session stopped without calling Finish[m                         
+[38;5;215m  /quit[m  [38;5;244mquit (same as Ctrl+C)[m                                                                      
+                                                                                                    
+[1;38;5;244mwhile Claude is working[m                                                                             
+[38;5;215m  Enter[m  [38;5;244mqueues the message; the whole queue goes out as ONE turn when the[m                          
+[38;5;215m  [m  [38;5;244mturn ends — one turn, because each one re-bills the whole context[m                               
+[38;5;215m  Esc[m  [38;5;244minterrupts the turn, so the queue goes out as the redirect[m                                   
+[38;5;215m  /queue[m  [38;5;244msee what is waiting · /queue clear drops it[m                                               
+[38;5;215m  note[m  [38;5;244mthe queue is never saved — a crash loses it rather than delivering[m                          
+[38;5;215m  [m  [38;5;244mit into whatever phase the run comes back in[m                                                    
+                                                                                                    
+[1;38;5;244mkeys[m                                                                                                
+[38;5;215m  Enter[m  [38;5;244msend the message[m                                                                           
+[38;5;215m  Ctrl+J[m  [38;5;244mnewline without sending — works in every terminal[m                                         
+[38;5;215m  Alt+Enter[m  [38;5;244mnewline without sending — works in every terminal[m                                      
+[38;5;215m  Shift+Enter[m  [38;5;244mnewline, but ONLY where the terminal speaks the Kitty keyboard[m                       
+[38;5;215m  [m  [38;5;244mprotocol (Ghostty, kitty, WezTerm, iTerm2 3.5+). Anywhere else it[m                               
+[38;5;215m  [m  [38;5;244mis indistinguishable from Enter and simply sends — use Ctrl+J[m                                   
+[38;5;215m  paste[m  [38;5;244ma multi-line paste arrives whole; it never sends[m                                           
+[38;5;215m  drag a file[m  [38;5;244mdropping or pasting a file path attaches it as an absolute path —[m                    
+[38;5;215m  [m  [38;5;244mClaude reads it with its own Read tool, so nothing is sent until it does[m                        
+[38;5;215m  Ctrl+G[m  [38;5;244marm the plan (start auto-run)[m                                                             
+[38;5;215m  Esc[m  [38;5;244minterject / interrupt the current turn[m                                                       
+[38;5;215m  ↑/↓ PgUp/PgDn[m  [38;5;244mscroll the transcript[m                                                              
+[38;5;215m  Ctrl+C[m  [38;5;244mquit[m                                                                                      
+                                                                                                    
+[1;38;5;244mwhile a gate is counting down[m                                                                       
+[38;5;215m  Ctrl+Y[m  [38;5;244mallow the front tool now[m                                                                  
+[38;5;215m  Ctrl+X[m  [38;5;244mstop (veto) the front tool[m                                                                
+[38;5;215m  Ctrl+R[m  [38;5;244mpause / resume every countdown[m                                                            
+[38;5;215m  any other key[m  [38;5;244mtypes into the message box as usual[m                                                
+[38;5;215m  Esc[m  [38;5;244mdoes NOT interject — answer the gate first[m                                                   
+                                                                                                    
+[1;38;5;244mwhile Claude is asking a question[m                                                                   
+[38;5;215m  ↑/↓ j/k[m  [38;5;244mmove between options[m                                                                     
+[38;5;215m  Space[m  [38;5;244mtoggle a choice (multi-select only)[m                                                        
+[38;5;215m  Enter[m  [38;5;244mconfirm and go to the next question[m                                                        
+[38;5;215m  Esc[m  [38;5;244mskip the questions[m                                                                           
+[38;5;244mpress any key to close[m
