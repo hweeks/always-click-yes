@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.0](https://github.com/hweeks/always-click-yes/compare/v1.2.0...v1.3.0) (2026-07-29)
+
+
+### Features
+
+* serve the supervisor over HTTP and render it in a VS Code webview ([706be04](https://github.com/hweeks/always-click-yes/commit/706be041980f9a4b1ef0054d6ab7486591ba00f2))
+
 ## [1.2.0](https://github.com/hweeks/always-click-yes/compare/v1.1.0...v1.2.0) (2026-07-28)
 
 
