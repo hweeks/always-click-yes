@@ -42,20 +42,21 @@ import (
 type ActionKind string
 
 const (
-	ActionSubmit     ActionKind = "submit"     // send text (or run a /command) as if typed
-	ActionArm        ActionKind = "arm"        // Ctrl+G: flip PLAN into AUTO-RUN
-	ActionInterject  ActionKind = "interject"  // Esc: interrupt the in-flight turn
-	ActionGateAllow  ActionKind = "gateAllow"  // approve one pending gate, by tool_use id
-	ActionGateDeny   ActionKind = "gateDeny"   // veto one pending gate, by tool_use id
-	ActionGatePause  ActionKind = "gatePause"  // freeze or resume every countdown
-	ActionAskAnswer  ActionKind = "askAnswer"  // answer the open question
-	ActionAskSkip    ActionKind = "askSkip"    // skip the open question
-	ActionResume     ActionKind = "resume"     // restore a prior session by id
-	ActionSetModel   ActionKind = "setModel"   // /model: pick the next session's model
-	ActionClear      ActionKind = "clear"      // /clear: empty the transcript view
-	ActionDone       ActionKind = "done"       // /done: end the run by hand
-	ActionQueueClear ActionKind = "queueClear" // /queue clear: drop held messages
-	ActionQuit       ActionKind = "quit"       // stop the driver and exit
+	ActionSubmit      ActionKind = "submit"      // send text (or run a /command) as if typed
+	ActionArm         ActionKind = "arm"         // Ctrl+G: flip PLAN into AUTO-RUN
+	ActionInterject   ActionKind = "interject"   // Esc: interrupt the in-flight turn
+	ActionGateAllow   ActionKind = "gateAllow"   // approve one pending gate, by tool_use id
+	ActionGateDeny    ActionKind = "gateDeny"    // veto one pending gate, by tool_use id
+	ActionGatePause   ActionKind = "gatePause"   // freeze or resume every countdown
+	ActionAskAnswer   ActionKind = "askAnswer"   // answer the open question
+	ActionAskSkip     ActionKind = "askSkip"     // skip the open question
+	ActionResume      ActionKind = "resume"      // restore a prior session by id
+	ActionPickerClose ActionKind = "pickerClose" // Esc: dismiss the /resume picker, resuming nothing
+	ActionSetModel    ActionKind = "setModel"    // /model: pick the next session's model
+	ActionClear       ActionKind = "clear"       // /clear: empty the transcript view
+	ActionDone        ActionKind = "done"        // /done: end the run by hand
+	ActionQueueClear  ActionKind = "queueClear"  // /queue clear: drop held messages
+	ActionQuit        ActionKind = "quit"        // stop the driver and exit
 )
 
 // actionKinds is every kind above. It exists for Valid, and it lives next to the
@@ -65,8 +66,8 @@ var actionKinds = map[ActionKind]bool{
 	ActionSubmit: true, ActionArm: true, ActionInterject: true,
 	ActionGateAllow: true, ActionGateDeny: true, ActionGatePause: true,
 	ActionAskAnswer: true, ActionAskSkip: true, ActionResume: true,
-	ActionSetModel: true, ActionClear: true, ActionDone: true,
-	ActionQueueClear: true, ActionQuit: true,
+	ActionPickerClose: true, ActionSetModel: true, ActionClear: true,
+	ActionDone: true, ActionQueueClear: true, ActionQuit: true,
 }
 
 // Valid reports whether k names an action at all.
@@ -144,6 +145,9 @@ func AskSkip() Action { return Action{Kind: ActionAskSkip} }
 
 // Resume restores a prior session by id.
 func Resume(sessionID string) Action { return Action{Kind: ActionResume, SessionID: sessionID} }
+
+// PickerClose is Esc in the /resume picker: dismiss it without resuming.
+func PickerClose() Action { return Action{Kind: ActionPickerClose} }
 
 // SetModel picks the model for the next launched or resumed session.
 func SetModel(name string) Action { return Action{Kind: ActionSetModel, Name: name} }
@@ -284,8 +288,23 @@ func (m *Model) applyAction(a Action, ack chan<- ActionResult) (cmd tea.Cmd) {
 			res = rejected("no session id to resume")
 			break
 		}
+		// A webview chooses a row through this action rather than through the
+		// terminal's Enter key path, so dismiss the shared picker here.
+		m.picking = false
 		cmd = m.resumeSession(id)
 		res = accepted("resuming " + short(id))
+
+	case ActionPickerClose:
+		if !m.picking {
+			res = rejected("the resume picker is not open")
+			break
+		}
+		// One literal, said twice: the transcript entry the TUI has always printed
+		// on cancel, and the sentence the client is answered with.
+		const cancelled = "resume cancelled"
+		m.picking = false
+		m.appendEntry(entry{kind: eMeta, body: cancelled})
+		res = accepted(cancelled)
 
 	case ActionSetModel:
 		name := strings.TrimSpace(a.Name)

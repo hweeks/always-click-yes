@@ -254,7 +254,7 @@ const finishSchema = `{
     },
     "summary": {
       "type": "string",
-      "maxLength": 800,
+      "maxLength": 2000,
       "description": "What the run achieved and what the human should look at first. Name anything you could not verify."
     }
   }
@@ -289,7 +289,7 @@ const DispatchSchema = `{
   "properties": {
     "title": {
       "type": "string",
-      "maxLength": 60,
+      "maxLength": 120,
       "description": "A few words naming the task, for the human watching. For example: add the token ledger"
     },
     "instruction": {
@@ -304,7 +304,7 @@ const DispatchSchema = `{
     },
     "success": {
       "type": "string",
-      "maxLength": 400,
+      "maxLength": 1000,
       "description": "How they will know it worked: the test to run, the behaviour to check. Without this they will decide for themselves what done means."
     },
     "budget_usd": {

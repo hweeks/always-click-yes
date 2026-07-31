@@ -149,6 +149,7 @@ export type ActionKind =
   | 'askAnswer'
   | 'askSkip'
   | 'resume'
+  | 'pickerClose'
   | 'setModel'
   | 'clear'
   | 'done'

@@ -41,7 +41,7 @@ const ReportSchema = `{
     },
     "summary": {
       "type": "string",
-      "maxLength": 600,
+      "maxLength": 2000,
       "description": "What you did and what it means for the caller, in 1-3 sentences. Written for someone who did NOT watch you work and will never read your transcript."
     },
     "changed": {
@@ -55,7 +55,7 @@ const ReportSchema = `{
         "properties": {
           "path": {"type": "string", "description": "Repo-relative path."},
           "action": {"type": "string", "enum": ["created", "modified", "deleted"]},
-          "note": {"type": "string", "maxLength": 120, "description": "Only when the path alone does not say what changed."}
+          "note": {"type": "string", "maxLength": 300, "description": "Only when the path alone does not say what changed."}
         }
       }
     },
@@ -68,9 +68,9 @@ const ReportSchema = `{
         "additionalProperties": false,
         "required": ["check", "result"],
         "properties": {
-          "check": {"type": "string", "maxLength": 120, "description": "The exact command or check, for example: go test ./internal/ui/"},
+          "check": {"type": "string", "maxLength": 200, "description": "The exact command or check, for example: go test ./internal/ui/"},
           "result": {"type": "string", "enum": ["pass", "fail", "not_run"]},
-          "detail": {"type": "string", "maxLength": 200, "description": "Required when result is fail: the failing case, not the raw output."}
+          "detail": {"type": "string", "maxLength": 500, "description": "Required when result is fail: the failing case, not the raw output."}
         }
       }
     },
@@ -78,11 +78,11 @@ const ReportSchema = `{
       "type": "array",
       "maxItems": 5,
       "description": "Work you deliberately did not do. Phrase each so it could be dispatched as its own task; if you cannot, it belongs in summary instead.",
-      "items": {"type": "string", "maxLength": 200}
+      "items": {"type": "string", "maxLength": 300}
     },
     "needs_decision": {
       "type": "string",
-      "maxLength": 300,
+      "maxLength": 600,
       "description": "Only when outcome is blocked and a human must choose. State the choice and the options — not the background."
     }
   }
@@ -153,7 +153,7 @@ func (r Report) Render(taskID, title string) string {
 		head = "UNKNOWN"
 	}
 	fmt.Fprintf(&b, "%s %s — %s\n", taskID, title, head)
-	b.WriteString(clip(r.Summary, 700))
+	b.WriteString(clip(r.Summary, maxSummaryRunes))
 
 	if len(r.Changed) > 0 {
 		b.WriteString("\nchanged: ")
@@ -165,7 +165,7 @@ func (r Report) Render(taskID, title string) string {
 			}
 			p := c.Path + " (" + actionGlyph(c.Action) + ")"
 			if c.Note != "" {
-				p += " " + clip(c.Note, 120)
+				p += " " + clip(c.Note, maxNoteRunes)
 			}
 			parts = append(parts, p)
 		}
@@ -180,9 +180,9 @@ func (r Report) Render(taskID, title string) string {
 				parts = append(parts, fmt.Sprintf("… +%d more", len(r.Verified)-i))
 				break
 			}
-			p := clip(c.Check, 120) + " " + c.Result
+			p := clip(c.Check, maxCheckRunes) + " " + c.Result
 			if c.Result == "fail" && c.Detail != "" {
-				p += " (" + clip(c.Detail, 200) + ")"
+				p += " (" + clip(c.Detail, maxDetailRunes) + ")"
 			}
 			parts = append(parts, p)
 		}
@@ -190,7 +190,7 @@ func (r Report) Render(taskID, title string) string {
 	}
 
 	if r.NeedsDecision != "" {
-		b.WriteString("\nneeds a decision: " + clip(r.NeedsDecision, 300))
+		b.WriteString("\nneeds a decision: " + clip(r.NeedsDecision, maxDecisionRunes))
 	}
 
 	for i, f := range r.Followups {
@@ -198,7 +198,7 @@ func (r Report) Render(taskID, title string) string {
 			fmt.Fprintf(&b, "\nfollowup: … +%d more", len(r.Followups)-i)
 			break
 		}
-		b.WriteString("\nfollowup: " + clip(f, 200))
+		b.WriteString("\nfollowup: " + clip(f, maxFollowupRunes))
 	}
 
 	// Per-field clips bound each part but say nothing about the whole, and it is
@@ -213,11 +213,29 @@ const (
 	maxRenderedChecks    = 8
 	maxRenderedFollowups = 5
 
-	// ~750 tokens. A dozen of these is still a rounding error against the
+	// ~1250 tokens. A dozen of these is still a rounding error against the
 	// hundreds of thousands of tokens the children spent producing them.
 	// Counted in runes, because that is what clip bounds — splitting a rune to
 	// hit a byte target would corrupt the text for no benefit.
-	maxRenderedRunes = 3000
+	maxRenderedRunes = 5000
+)
+
+// The per-field clip limits, one per bounded field of a Report. Each one is also
+// the field's maxLength in ReportSchema, and TestSchemaCapsMatchTheClipLimits
+// holds the two together: a schema cap above the clip silently truncates text
+// the child was allowed to write, and a cap below it costs the child its whole
+// report to a validation error over text the renderer would have carried.
+//
+// These are a safety net, not guidance. What the child actually writes is shaped
+// by the descriptions in the schema — "in 1-3 sentences" and the like — so the
+// caps sit far above them and should effectively never bind.
+const (
+	maxSummaryRunes  = 2000
+	maxNoteRunes     = 300
+	maxCheckRunes    = 200
+	maxDetailRunes   = 500
+	maxFollowupRunes = 300
+	maxDecisionRunes = 600
 )
 
 func actionGlyph(action string) string {
@@ -233,9 +251,10 @@ func actionGlyph(action string) string {
 	}
 }
 
-// clip truncates on a rune boundary. --json-schema's maxLength is advisory
-// enough that the renderer, not the schema, has to be what actually bounds the
-// parent's context.
+// clip truncates on a rune boundary. claude enforces the schema's maxLength on
+// the child's structured output, and a violation costs the entire report rather
+// than merely a long one, so the caps sit far above the guidance the descriptions
+// give and the renderer is what actually bounds the parent's context.
 func clip(s string, limit int) string {
 	s = strings.TrimSpace(s)
 	if len(s) <= limit {

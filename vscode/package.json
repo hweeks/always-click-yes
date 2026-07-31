@@ -139,7 +139,7 @@
     "watch": "node esbuild.mjs --watch",
     "typecheck": "tsc --noEmit && tsc -p webview/tsconfig.json --noEmit",
     "lint": "eslint src webview",
-    "test": "tsc -p tsconfig.test.json && node --test \"out-test/src/test/*.test.js\"",
+    "test": "tsc -p tsconfig.test.json && node --test out-test/src/test/*.test.js",
     "package": "npm run compile && vsce package"
   },
   "devDependencies": {

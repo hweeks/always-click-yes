@@ -11,7 +11,7 @@
 // `entry.html`, produced by internal/htmlrender, and is inserted as-is. Two
 // implementations of one transcript is exactly what Frame exists to prevent.
 
-import type { Frame, Gate, Theme } from './protocol';
+import type { Ask, Frame, Gate, SessionRow, Theme } from './protocol';
 import type { ConnectionState } from './transport';
 import { injectStyle } from './transport';
 
@@ -23,7 +23,16 @@ export interface RenderHooks {
   pause(paused: boolean): void;
   allow(toolUseId: string): void;
   deny(toolUseId: string): void;
+  answerAsk(questionIndex: number, optionIndices: number[]): void;
+  skipAsk(): void;
   clearQueue(): void;
+  resume(sessionId: string): void;
+  closePicker(): void;
+  /**
+   * The resume list. A hook rather than a transport call so that this file goes
+   * on knowing nothing about HTTP; main.ts is the only place that knows both.
+   */
+  sessions(): Promise<SessionRow[]>;
 }
 
 export class Renderer {
@@ -34,6 +43,15 @@ export class Renderer {
   private notice = '';
   private renderedSeqs: number[] = [];
   private gateIds = '';
+  private sessionIds = '';
+  /** Rows this client fetched itself, as opposed to rows off a frame's picker. */
+  private fetchedSessions: readonly SessionRow[] | undefined;
+  /** Whether the person asked for that list; a frame's picker outranks it. */
+  private sessionsOpen = false;
+  private askId = '';
+  /** The question the rows on screen belong to — never "whatever is current". */
+  private askShown: Ask | null = null;
+  private askBoxes: HTMLInputElement[] = [];
   private readonly ticker: ReturnType<typeof setInterval>;
 
   constructor(
@@ -43,11 +61,19 @@ export class Renderer {
   ) {
     injectStyle(root.ownerDocument, 'acy-base', BASE_CSS, nonce);
     this.els = build(root.ownerDocument, hooks);
+    this.els.askSubmit.addEventListener('click', () => this.submitAsk());
+    // Both of these depend on which of the two lists is live, which only the
+    // renderer knows, so neither can be wired at build time.
+    this.els.openSessions.addEventListener('click', () => this.loadSessions());
+    this.els.sessionsDismiss.addEventListener('click', () => this.dismissSessions());
     root.replaceChildren(this.els.shell);
     // Countdowns animate from the client's own clock against an absolute
     // deadline — Frame carries no `now`, on purpose, so that an idle run's
     // frames are byte-identical and the server stays silent.
-    this.ticker = setInterval(() => this.paintGates(), 200);
+    this.ticker = setInterval(() => {
+      this.paintGates();
+      this.paintAsk();
+    }, 200);
   }
 
   dispose(): void {
@@ -59,8 +85,10 @@ export class Renderer {
     this.frame = frame;
     this.paintHeader();
     this.paintTranscript(frame);
+    this.paintAsk();
     this.paintGates();
     this.paintQueue(frame);
+    this.paintSessions();
     this.paintComposer(frame);
   }
 
@@ -162,6 +190,105 @@ export class Renderer {
     });
   }
 
+  /**
+   * The blocked question. Like paintGates, this runs on every frame and on the
+   * tick — but unlike a gate list, the rows here hold state a person is part way
+   * through entering, so they are rebuilt only when the *question* changes and
+   * never merely because a frame arrived.
+   */
+  private paintAsk(): void {
+    const ask = this.frame?.ask ?? null;
+    this.els.ask.hidden = ask === null;
+    if (!ask) {
+      this.askId = '';
+      this.askShown = null;
+      this.askBoxes = [];
+      return;
+    }
+    const id = askIdentity(ask);
+    if (this.askId !== id) {
+      this.askId = id;
+      this.buildAsk(ask);
+    }
+    this.els.askWhen.textContent = askCountdown(ask);
+  }
+
+  /** The rows for one question, built once and then left alone. */
+  private buildAsk(ask: Ask): void {
+    const doc = this.root.ownerDocument;
+    this.askShown = ask;
+    this.els.askHead.textContent =
+      ask.total > 1 ? `Question ${ask.index + 1} of ${ask.total} · ${ask.header}` : ask.header;
+    this.els.askQuestion.textContent = ask.question;
+
+    this.askBoxes = [];
+    const rows = ask.options.map((opt, i) => {
+      const row = el(doc, 'div', 'acy-ask-option');
+      const text = el(doc, 'div', 'acy-ask-option-text');
+      const label = el(doc, 'div', 'acy-ask-label');
+      label.textContent = opt.label;
+      text.appendChild(label);
+      if (opt.description) {
+        const desc = el(doc, 'div', 'acy-ask-desc');
+        desc.textContent = opt.description;
+        text.appendChild(desc);
+      }
+      if (ask.multiSelect) {
+        const box = doc.createElement('input');
+        box.type = 'checkbox';
+        box.className = 'acy-ask-check';
+        box.checked = opt.selected;
+        box.addEventListener('change', () => this.syncAskSubmit());
+        this.askBoxes.push(box);
+        row.append(box, text);
+      } else {
+        // One click answers, naming the question by index: whatever replaced it
+        // is a different question and the server says so.
+        row.append(
+          button(doc, 'Choose', () => this.hooks.answerAsk(ask.index, askSelection(ask, [i]))),
+          text,
+        );
+      }
+      return row;
+    });
+    this.els.askOptions.replaceChildren(...rows);
+
+    this.els.askSubmit.hidden = !ask.multiSelect;
+    if (ask.multiSelect) {
+      this.syncAskSubmit();
+    }
+  }
+
+  /** What is ticked right now, normalised into what may be sent. */
+  private askTicked(): number[] {
+    const ask = this.askShown;
+    if (!ask) {
+      return [];
+    }
+    const ticked: number[] = [];
+    this.askBoxes.forEach((box, i) => {
+      if (box.checked) {
+        ticked.push(i);
+      }
+    });
+    return askSelection(ask, ticked);
+  }
+
+  // An empty answer is refused by the server with "no option chosen", so the
+  // button is closed off rather than the refusal coming back as a notice.
+  private syncAskSubmit(): void {
+    this.els.askSubmit.disabled = this.askTicked().length === 0;
+  }
+
+  private submitAsk(): void {
+    const ask = this.askShown;
+    const chosen = this.askTicked();
+    if (!ask || chosen.length === 0) {
+      return;
+    }
+    this.hooks.answerAsk(ask.index, chosen);
+  }
+
   private paintQueue(frame: Frame): void {
     this.els.queue.hidden = frame.queue.length === 0;
     this.els.queueList.replaceChildren(
@@ -171,6 +298,64 @@ export class Renderer {
         return li;
       }),
     );
+  }
+
+  /**
+   * The resume list, from whichever of its two sources is live.
+   *
+   * Rows are rebuilt only when the *identities* change, exactly as paintGates
+   * does and for the same reason: this runs on every frame, and a rebuild throws
+   * away the scroll position and the focus of someone reading the list. `selected`
+   * moves as the terminal's cursor moves, so it is repainted in place instead.
+   */
+  private paintSessions(): void {
+    const { rows, source } = visibleSessions(this.frame, this.fetchedSessions, this.sessionsOpen);
+    this.els.sessions.hidden = source === 'none';
+
+    const ids = rows.map((r) => r.id).join('\0');
+    if (this.sessionIds !== ids) {
+      this.sessionIds = ids;
+      const doc = this.root.ownerDocument;
+      this.els.sessionList.replaceChildren(...rows.map((r) => sessionRow(doc, r, this.hooks)));
+    }
+    rows.forEach((r, i) => {
+      this.els.sessionList.children[i]?.classList.toggle('acy-session--selected', r.selected);
+    });
+  }
+
+  /** The local path: ask for the list, then show it. */
+  private loadSessions(): void {
+    this.hooks.sessions().then(
+      (rows) => {
+        this.fetchedSessions = rows;
+        this.sessionsOpen = true;
+        this.paintSessions();
+      },
+      (err: unknown) => {
+        // Treated like a refused action: the reason is shown, not swallowed, and
+        // the panel is left closed rather than holding whatever it held before.
+        this.fetchedSessions = undefined;
+        this.sessionsOpen = false;
+        this.paintSessions();
+        this.setNotice(err instanceof Error ? err.message : String(err));
+      },
+    );
+  }
+
+  /**
+   * Dismiss means two different things, and the source decides which. A frame's
+   * picker is the model's modal and has to be closed on the server; a list this
+   * client fetched exists only here, so hiding it is the whole of closing it.
+   */
+  private dismissSessions(): void {
+    const { source } = visibleSessions(this.frame, this.fetchedSessions, this.sessionsOpen);
+    if (source === 'frame') {
+      this.hooks.closePicker();
+      return;
+    }
+    this.fetchedSessions = undefined;
+    this.sessionsOpen = false;
+    this.paintSessions();
   }
 
   private paintComposer(frame: Frame): void {
@@ -188,12 +373,22 @@ interface Elements {
   hint: HTMLElement;
   notice: HTMLElement;
   transcript: HTMLElement;
+  ask: HTMLElement;
+  askHead: HTMLElement;
+  askQuestion: HTMLElement;
+  askOptions: HTMLElement;
+  askWhen: HTMLElement;
+  askSubmit: HTMLButtonElement;
   gates: HTMLElement;
   gateList: HTMLElement;
   pause: HTMLButtonElement;
   queue: HTMLElement;
   queueList: HTMLElement;
   clearQueue: HTMLButtonElement;
+  sessions: HTMLElement;
+  sessionList: HTMLElement;
+  sessionsDismiss: HTMLButtonElement;
+  openSessions: HTMLButtonElement;
   input: HTMLTextAreaElement;
   send: HTMLButtonElement;
   arm: HTMLButtonElement;
@@ -209,6 +404,22 @@ function build(doc: Document, hooks: RenderHooks): Elements {
   headerBar.append(header, connection);
 
   const transcript = el(doc, 'div', 'acy-transcript');
+
+  // Above the gates: a question blocks claude's turn outright, so it is the
+  // most urgent thing on the screen. Every word in it comes off the frame.
+  const ask = el(doc, 'section', 'acy-panel acy-ask');
+  const askHead = el(doc, 'div', 'acy-panel-head');
+  const askQuestion = el(doc, 'div', 'acy-ask-question');
+  const askOptions = el(doc, 'div', 'acy-ask-options');
+  const askWhen = el(doc, 'div', 'acy-ask-when');
+  // Wired by the renderer itself, which knows which question the rows on screen
+  // belong to; the skip has nothing to name.
+  const askSubmit = button(doc, 'Submit');
+  const askSkip = button(doc, 'Skip', () => hooks.skipAsk());
+  const askButtons = el(doc, 'div', 'acy-buttons');
+  askButtons.append(askSubmit, askSkip);
+  ask.append(askHead, askQuestion, askOptions, askWhen, askButtons);
+  ask.hidden = true;
 
   const gates = el(doc, 'section', 'acy-panel acy-gates');
   const gatesHead = el(doc, 'div', 'acy-panel-head');
@@ -231,6 +442,14 @@ function build(doc: Document, hooks: RenderHooks): Elements {
   queue.append(queueHead, queueList, clearQueue);
   queue.hidden = true;
 
+  const sessions = el(doc, 'section', 'acy-panel acy-sessions');
+  const sessionsHead = el(doc, 'div', 'acy-panel-head');
+  sessionsHead.textContent = 'Sessions';
+  const sessionList = el(doc, 'div', 'acy-session-list');
+  const sessionsDismiss = button(doc, 'Close');
+  sessions.append(sessionsHead, sessionList, sessionsDismiss);
+  sessions.hidden = true;
+
   const hint = el(doc, 'div', 'acy-hint');
   const notice = el(doc, 'div', 'acy-notice');
 
@@ -249,6 +468,7 @@ function build(doc: Document, hooks: RenderHooks): Elements {
   });
   const arm = button(doc, 'Arm (start delegating)', () => hooks.arm());
   const interject = button(doc, 'Interject', () => hooks.interject());
+  const openSessions = button(doc, 'Resume session');
   input.addEventListener('keydown', (ev: KeyboardEvent) => {
     if (ev.key === 'Enter' && !ev.shiftKey && !ev.altKey && !ev.ctrlKey && !ev.metaKey) {
       ev.preventDefault();
@@ -256,10 +476,10 @@ function build(doc: Document, hooks: RenderHooks): Elements {
     }
   });
   const buttons = el(doc, 'div', 'acy-buttons');
-  buttons.append(send, arm, interject);
+  buttons.append(send, arm, interject, openSessions);
   composer.append(input, buttons);
 
-  shell.append(headerBar, transcript, gates, queue, hint, notice, composer);
+  shell.append(headerBar, transcript, ask, gates, queue, sessions, hint, notice, composer);
   return {
     shell,
     header,
@@ -267,12 +487,22 @@ function build(doc: Document, hooks: RenderHooks): Elements {
     hint,
     notice,
     transcript,
+    ask,
+    askHead,
+    askQuestion,
+    askOptions,
+    askWhen,
+    askSubmit,
     gates,
     gateList,
     pause,
     queue,
     queueList,
     clearQueue,
+    sessions,
+    sessionList,
+    sessionsDismiss,
+    openSessions,
     input,
     send,
     arm,
@@ -301,6 +531,78 @@ function gateRow(doc: Document, gate: Gate, hooks: RenderHooks): HTMLElement {
   return row;
 }
 
+/** Which session rows are on screen, with the model's modal taking precedence. */
+function visibleSessions(
+  frame: Frame | undefined,
+  fetched: readonly SessionRow[] | undefined,
+  fetchedOpen: boolean,
+): { rows: readonly SessionRow[]; source: 'frame' | 'fetched' | 'none' } {
+  if (frame?.picking) {
+    return { rows: frame.picker, source: 'frame' };
+  }
+  if (fetchedOpen) {
+    return { rows: fetched ?? [], source: 'fetched' };
+  }
+  return { rows: [], source: 'none' };
+}
+
+/** One resumable session. All product content is supplied by SessionRow. */
+function sessionRow(doc: Document, row: SessionRow, hooks: RenderHooks): HTMLElement {
+  const item = el(doc, 'div', 'acy-session');
+  const title = el(doc, 'div', 'acy-session-title');
+  title.textContent = row.label || row.id;
+  const detail = el(doc, 'div', 'acy-session-detail');
+  const when = new Date(row.modTimeUnixMs).toLocaleString();
+  detail.textContent = row.summary ? `${when} · ${row.summary}` : when;
+  item.append(button(doc, 'Resume', () => hooks.resume(row.id)), title, detail);
+  return item;
+}
+
+/**
+ * What makes this a *different* question, and so what makes the rows worth
+ * rebuilding. Deliberately not the whole Ask: `cursor` moves as someone drives
+ * the terminal picker, and rebuilding on that would throw away the checkboxes a
+ * panel user is half way through ticking.
+ */
+function askIdentity(ask: Ask): string {
+  return [
+    String(ask.index),
+    String(ask.total),
+    String(ask.multiSelect),
+    ask.header,
+    ask.question,
+    ask.options.map((o) => o.label).join(''),
+  ].join('\0');
+}
+
+/**
+ * Empty at a zero deadline, which is the PLAN phase: a person is already
+ * watching, so the question waits rather than expiring under them.
+ */
+function askCountdown(ask: Ask): string {
+  if (!ask.deadlineUnixMs) {
+    return '';
+  }
+  const left = Math.max(0, ask.deadlineUnixMs - Date.now());
+  return `auto-skips in ${(left / 1000).toFixed(1)}s`;
+}
+
+/**
+ * A raw set of chosen option indices, normalised into what may travel as
+ * `optionIndices`: in range, no duplicates, ascending — and cut to one for a
+ * single-select question, which `answerAsk` refuses more than one option for.
+ */
+export function askSelection(ask: Ask, ticked: readonly number[]): number[] {
+  const seen = new Set<number>();
+  for (const i of ticked) {
+    if (Number.isInteger(i) && i >= 0 && i < ask.options.length) {
+      seen.add(i);
+    }
+  }
+  const chosen = [...seen].sort((a, b) => a - b);
+  return ask.multiSelect ? chosen : chosen.slice(0, 1);
+}
+
 function countdown(gate: Gate, paused: boolean): string {
   if (paused) {
     return `paused with ${(gate.remainingMs / 1000).toFixed(1)}s left`;
@@ -322,11 +624,13 @@ function el(doc: Document, tag: string, className: string): HTMLElement {
   return node;
 }
 
-function button(doc: Document, label: string, onClick: () => void): HTMLButtonElement {
+function button(doc: Document, label: string, onClick?: () => void): HTMLButtonElement {
   const b = doc.createElement('button');
   b.type = 'button';
   b.textContent = label;
-  b.addEventListener('click', onClick);
+  if (onClick) {
+    b.addEventListener('click', onClick);
+  }
   return b;
 }
 
@@ -357,10 +661,24 @@ const BASE_CSS = `
 .acy-entry--meta, .acy-entry--turn, .acy-entry--thinking { color: var(--vscode-descriptionForeground); }
 .acy-panel { border: 1px solid var(--vscode-panel-border); padding: 8px; }
 .acy-panel-head { font-weight: 600; margin-bottom: 4px; }
+.acy-ask { border-color: var(--vscode-focusBorder, var(--vscode-panel-border)); }
+.acy-ask-question { margin-bottom: 6px; white-space: pre-wrap; }
+.acy-ask-options { display: flex; flex-direction: column; }
+.acy-ask-option { display: flex; align-items: flex-start; gap: 8px;
+  border-top: 1px solid var(--vscode-panel-border); padding: 6px 0; }
+.acy-ask-option-text { flex: 1 1 auto; min-width: 0; }
+.acy-ask-label { font-weight: 600; }
+.acy-ask-desc { color: var(--vscode-descriptionForeground); white-space: pre-wrap; }
+.acy-ask-check { margin-top: 3px; accent-color: var(--vscode-button-background); }
+.acy-ask-when { color: var(--vscode-descriptionForeground); min-height: 1.2em; margin: 4px 0; }
 .acy-gate { border-top: 1px solid var(--vscode-panel-border); padding: 6px 0; }
 .acy-gate-args { font-family: var(--vscode-editor-font-family); white-space: pre-wrap; word-break: break-all; }
 .acy-gate-when { color: var(--vscode-descriptionForeground); }
 .acy-queue-list { margin: 0; padding-left: 18px; }
+.acy-session { display: flex; align-items: flex-start; gap: 8px; border-top: 1px solid var(--vscode-panel-border); padding: 6px 0; }
+.acy-session--selected { outline: 1px solid var(--vscode-focusBorder); }
+.acy-session-title { flex: 1 1 auto; font-weight: 600; }
+.acy-session-detail { color: var(--vscode-descriptionForeground); }
 .acy-hint, .acy-notice { font-size: 0.9em; color: var(--vscode-descriptionForeground); min-height: 1.2em; }
 .acy-composer { display: flex; flex-direction: column; gap: 6px; }
 .acy-input { width: 100%; box-sizing: border-box; resize: vertical;
