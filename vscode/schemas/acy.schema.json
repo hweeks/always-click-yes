@@ -40,7 +40,7 @@
     },
     "childModel": {
       "type": "string",
-      "description": "Model for dispatched children. Unset = the parent model."
+      "description": "Model for dispatched children. Unset = sonnet."
     },
     "childEffort": {
       "type": "string",

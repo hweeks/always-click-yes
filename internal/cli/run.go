@@ -176,7 +176,7 @@ func addRunFlags(cmd *cobra.Command, f *Flags) {
 	cmd.Flags().IntVar(&f.MaxLines, "max-lines", 10, "max lines shown per tool call/result/thinking block in the transcript")
 	cmd.Flags().StringSliceVar(&f.PlanTools, "plan-tools", DefaultParentTools, "the built-in tool registry for the supervising session, in both phases (--tools). This is the registry, not an allowlist: anything left out cannot be called at all, which is what keeps the session you talk to unable to change your code. Dispatched children always get the full set; acy's own mcp__acy__* tools are always available.")
 	cmd.Flags().BoolVar(&f.UseAPIKey, "use-api-key", false, "bill ANTHROPIC_API_KEY instead of the claude.ai login; by default the key is stripped from claude's environment, since headless runs would otherwise use it silently")
-	cmd.Flags().StringVar(&f.ChildModel, "child-model", "", "model for dispatched tasks; empty = same as --model. A cheaper model here is often the single biggest saving, since children do the bulk of the work")
+	cmd.Flags().StringVar(&f.ChildModel, "child-model", "sonnet", "model for dispatched tasks (default sonnet); a cheaper child is often the single biggest saving, since children do the bulk of the work")
 	cmd.Flags().StringVar(&f.ChildEffort, "child-effort", "", "reasoning effort for dispatched tasks (low, medium, high, xhigh, max); empty = claude's default")
 	cmd.Flags().Float64Var(&f.TaskBudget, "task-budget", defaultTaskBudgetUSD, "spend ceiling in USD for one dispatched task (0 = unlimited; default $10)")
 	cmd.Flags().Float64Var(&f.RunBudget, "run-budget", defaultRunBudgetUSD, "spend ceiling in USD across dispatched tasks (0 = unlimited; default $50)")

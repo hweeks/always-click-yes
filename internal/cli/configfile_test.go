@@ -31,6 +31,7 @@ func defaultFlags() Flags {
 		LogPath:    "acy-debug.log",
 		MaxLines:   10,
 		PlanTools:  DefaultParentTools,
+		ChildModel: "sonnet",
 		TaskBudget: defaultTaskBudgetUSD,
 		RunBudget:  defaultRunBudgetUSD,
 	}

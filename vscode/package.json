@@ -107,7 +107,7 @@
             },
             "childModel": {
               "type": "string",
-              "description": "Model for dispatched tasks; empty means the same as model. Often the biggest saving available, since children do the bulk of the tokens."
+              "description": "Model for dispatched tasks; default sonnet. Often the biggest saving available, since children do the bulk of the tokens."
             },
             "childEffort": {
               "type": "string",
