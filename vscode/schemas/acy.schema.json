@@ -38,6 +38,19 @@
       "type": "boolean",
       "description": "Bill ANTHROPIC_API_KEY instead of the claude.ai login. Unset = false: the key is stripped from claude's environment so a headless run can't silently bill the API account."
     },
+    "provider": {
+      "type": "string",
+      "enum": ["anthropic", "openai", "cerebras", "fireworks", "openrouter", "vllm"],
+      "description": "Model provider. Hosted OpenAI-compatible providers run through a private local LiteLLM proxy; vllm uses gatewayUrl directly."
+    },
+    "gatewayBin": {
+      "type": "string",
+      "description": "Path to the LiteLLM executable for hosted non-Anthropic providers. Unset = litellm from PATH."
+    },
+    "gatewayUrl": {
+      "type": "string",
+      "description": "Anthropic Messages endpoint for provider vllm. Unset = http://127.0.0.1:8000."
+    },
     "childModel": {
       "type": "string",
       "description": "Model for dispatched children. Unset = sonnet."

@@ -21,13 +21,16 @@ const FileName = ".acy.json"
 // Resume/continue are deliberately not here — they describe one invocation,
 // not the project.
 type File struct {
-	Model     string    `json:"model,omitempty"`
-	ClaudeBin string    `json:"claudeBin,omitempty"`
-	Countdown *Duration `json:"countdown,omitempty"`
-	Log       *string   `json:"log,omitempty"` // pointer: "" is a meaningful value (disable logging)
-	MaxLines  *int      `json:"maxLines,omitempty"`
-	PlanTools []string  `json:"planTools,omitempty"`
-	UseAPIKey *bool     `json:"useApiKey,omitempty"`
+	Model      string    `json:"model,omitempty"`
+	ClaudeBin  string    `json:"claudeBin,omitempty"`
+	Countdown  *Duration `json:"countdown,omitempty"`
+	Log        *string   `json:"log,omitempty"` // pointer: "" is a meaningful value (disable logging)
+	MaxLines   *int      `json:"maxLines,omitempty"`
+	PlanTools  []string  `json:"planTools,omitempty"`
+	UseAPIKey  *bool     `json:"useApiKey,omitempty"`
+	Provider   string    `json:"provider,omitempty"`
+	GatewayBin string    `json:"gatewayBin,omitempty"`
+	GatewayURL string    `json:"gatewayUrl,omitempty"`
 
 	// Child knobs: a dispatched task is a separate process doing the actual
 	// work, so it can be priced and paced separately from the session you talk

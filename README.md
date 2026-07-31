@@ -208,12 +208,92 @@ arguments:
   "log": "acy-debug.log",
   "maxLines": 15,
   "planTools": ["Read", "Grep", "Glob"],
+  "provider": "anthropic",
   "childModel": "sonnet",
   "childEffort": "medium",
   "taskBudget": 2.50,
   "useApiKey": false
 }
 ```
+
+### Other model providers
+
+`acy` always keeps **Claude Code** as the runtime and supervisor protocol. It
+can, however, direct Claude Code to a different model backend. For hosted
+OpenAI-compatible providers, acy starts a private, loopback-only
+[LiteLLM](https://docs.litellm.ai/) sidecar that translates Claude Code's
+Anthropic Messages requests. For a local vLLM server, it connects directly to
+vLLM's Messages endpoint.
+
+Install LiteLLM once for hosted providers:
+
+```sh
+pipx install 'litellm[proxy]'
+```
+
+Then put the **non-secret** selection in `.acy.json` and export the provider
+key in the shell that launches acy. Do not put keys in `.acy.json`: it is meant
+to be committed with the project.
+
+| `provider` | Required environment variable | Default model |
+|---|---|---|
+| `anthropic` | Claude login, or `ANTHROPIC_API_KEY` with `useApiKey: true` | Claude Code's default |
+| `openai` | `OPENAI_API_KEY` | `gpt-4.1` |
+| `cerebras` | `CEREBRAS_API_KEY` | `llama-3.3-70b` |
+| `fireworks` | `FIREWORKS_API_KEY` | `accounts/fireworks/models/llama-v3p3-70b-instruct` |
+| `openrouter` | `OPENROUTER_API_KEY` | `anthropic/claude-sonnet-4` |
+| `vllm` | none by default | supply your local model name |
+
+An OpenAI example:
+
+```json
+{
+  "provider": "openai",
+  "model": "gpt-4.1",
+  "childModel": "gpt-4.1",
+  "gatewayBin": "litellm"
+}
+```
+
+`model` selects the read-only supervising session; `childModel` selects the
+disposable workers that edit and run tests. acy adds both aliases to the local
+LiteLLM config, so they may differ. If `childModel` is omitted for a hosted
+provider, acy uses `model` rather than the normal Claude `sonnet` default.
+`gatewayBin` is optional and defaults to `litellm` on `PATH`.
+
+The equivalent command-line form is:
+
+```sh
+OPENAI_API_KEY=... acy run --provider openai --model gpt-4.1 --child-model gpt-4.1
+CEREBRAS_API_KEY=... acy run --provider cerebras
+FIREWORKS_API_KEY=... acy run --provider fireworks
+OPENROUTER_API_KEY=... acy run --provider openrouter
+```
+
+For vLLM, run an Anthropic-Messages-compatible vLLM server locally and configure
+its endpoint explicitly when it is not on the default port:
+
+```json
+{
+  "provider": "vllm",
+  "gatewayUrl": "http://127.0.0.1:8000",
+  "model": "your-tool-capable-model",
+  "childModel": "your-tool-capable-model"
+}
+```
+
+`gatewayUrl` defaults to `http://127.0.0.1:8000`. It is only used by `vllm`;
+hosted providers get a fresh random loopback port each run. In the LiteLLM path,
+the upstream key exists only in the sidecar process. Claude Code and its child
+processes receive a random local gateway token instead, so a child with Bash
+cannot read `OPENAI_API_KEY`, `CEREBRAS_API_KEY`, `FIREWORKS_API_KEY`, or
+`OPENROUTER_API_KEY` from its environment.
+
+Non-Anthropic providers are experimental. Start with a small supervised task
+and confirm streaming and tool calls work for the exact model before trusting an
+unattended editing run. The project skill
+[`acy-provider-setup`](.claude/skills/acy-provider-setup/SKILL.md) provides the
+same setup and troubleshooting checklist for an agent working in the repository.
 
 Every key is optional and maps to the flag of the same meaning; `countdown` is
 a Go duration string, and an explicit `"log": ""` disables logging. Precedence

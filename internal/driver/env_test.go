@@ -31,3 +31,23 @@ func TestChildEnvKeepsAPIKeyWhenOptedIn(t *testing.T) {
 		t.Errorf("UseAPIKey should inherit the parent env (nil), got %d entries", len(env))
 	}
 }
+
+func TestChildEnvOverlaysGatewayAndStripsUpstreamKey(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "sk-upstream")
+	t.Setenv("ANTHROPIC_BASE_URL", "https://wrong.example")
+
+	env := (Options{
+		Env:      map[string]string{"ANTHROPIC_BASE_URL": "http://127.0.0.1:4000", "ANTHROPIC_AUTH_TOKEN": "local-token"},
+		StripEnv: []string{"OPENAI_API_KEY"},
+	}).childEnv()
+
+	if slices.Contains(env, "OPENAI_API_KEY=sk-upstream") {
+		t.Fatal("upstream key leaked into claude environment")
+	}
+	if !slices.Contains(env, "ANTHROPIC_BASE_URL=http://127.0.0.1:4000") || !slices.Contains(env, "ANTHROPIC_AUTH_TOKEN=local-token") {
+		t.Fatalf("gateway environment missing: %v", env)
+	}
+	if slices.Contains(env, "ANTHROPIC_BASE_URL=https://wrong.example") {
+		t.Fatal("inherited endpoint was not replaced")
+	}
+}

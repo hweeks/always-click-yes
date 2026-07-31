@@ -12,14 +12,17 @@ import (
 // the precedence rule.
 func fullFile() config.File {
 	return config.File{
-		Model:     "opus",
-		ClaudeBin: "/opt/claude",
-		Countdown: new(config.Duration(20 * time.Second)),
-		Log:       new(""),
-		MaxLines:  new(25),
-		PlanTools: []string{"Read"},
-		UseAPIKey: new(true),
-		Path:      "/proj/.acy.json",
+		Model:      "opus",
+		ClaudeBin:  "/opt/claude",
+		Countdown:  new(config.Duration(20 * time.Second)),
+		Log:        new(""),
+		MaxLines:   new(25),
+		PlanTools:  []string{"Read"},
+		UseAPIKey:  new(true),
+		Provider:   "openai",
+		GatewayBin: "/opt/litellm",
+		GatewayURL: "http://127.0.0.1:8000",
+		Path:       "/proj/.acy.json",
 	}
 }
 
@@ -49,6 +52,9 @@ func TestApplyFileConfigOverridesDefaults(t *testing.T) {
 	}
 	if f.MaxLines != 25 || !f.UseAPIKey {
 		t.Errorf("file values not applied: %+v", f)
+	}
+	if f.Provider != "openai" || f.GatewayBin != "/opt/litellm" || f.GatewayURL != "http://127.0.0.1:8000" {
+		t.Errorf("gateway config not applied: %+v", f)
 	}
 	if !reflect.DeepEqual(f.PlanTools, []string{"Read"}) {
 		t.Errorf("planTools: %v", f.PlanTools)
