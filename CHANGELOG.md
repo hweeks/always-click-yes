@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.4.0](https://github.com/hweeks/always-click-yes/compare/v1.3.0...v1.4.0) (2026-07-31)
+
+
+### Features
+
+* bound delegated task spending ([da8dc22](https://github.com/hweeks/always-click-yes/commit/da8dc227fcdc4093cb2f08110b14f3a3fa1033e1))
+* default delegated children to sonnet ([1e39397](https://github.com/hweeks/always-click-yes/commit/1e393972f11c97cea85c9cacfc7a08fc1510c566))
+* expand child reports and webview controls ([92a60dd](https://github.com/hweeks/always-click-yes/commit/92a60dd15dddb2c0818423a974dcd486cf1e1784))
+* make delegated work resilient and token-thrifty ([ebd8238](https://github.com/hweeks/always-click-yes/commit/ebd8238cc3c5e8c2c2ac0971357d593f3874af10))
+* retry work after Claude cooldown ([9fc29bf](https://github.com/hweeks/always-click-yes/commit/9fc29bfe03b93259ade93b2e0b44bdf9213ad485))
+
+
+### Bug Fixes
+
+* raise default delegated budgets ([b95afe4](https://github.com/hweeks/always-click-yes/commit/b95afe4e7545d4ba575f93550ccc3c95089e803f))
+
 ## [1.3.0](https://github.com/hweeks/always-click-yes/compare/v1.2.0...v1.3.0) (2026-07-29)
 
 
