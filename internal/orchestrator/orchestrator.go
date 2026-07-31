@@ -60,21 +60,23 @@ type Spawn func(ctx context.Context, t Task) (Child, error)
 type EventKind int
 
 const (
-	KindStarted  EventKind = iota // the child process is up
-	KindStream                    // one decoded event from the child
-	KindFinished                  // terminal: Report is set
-	KindFailed                    // terminal: Err is set
+	KindStarted     EventKind = iota // the child process is up
+	KindStream                       // one decoded event from the child
+	KindFinished                     // terminal: Report is set
+	KindFailed                       // terminal: Err is set
+	KindCoolingDown                  // rate-limited child will retry once
 )
 
 // Event is anything a child emits, tagged with the task that owns it.
 type Event struct {
-	TaskID string
-	Title  string
-	Kind   EventKind
-	Ev     driver.Event
-	Report *Report
-	Status *Status
-	Err    error
+	TaskID  string
+	Title   string
+	Kind    EventKind
+	Ev      driver.Event
+	Report  *Report
+	Status  *Status
+	Err     error
+	RetryAt time.Time
 }
 
 // Status is the ledger entry for one task.
@@ -100,14 +102,16 @@ const (
 // task is the mutable internal record. Status is the value copy handed out.
 type task struct {
 	Task
-	pending *mcp.Pending
-	started time.Time
-	ended   time.Time
-	cost    float64
-	tokens  state.Tokens
-	state   string
-	outcome string
-	cancel  context.CancelFunc
+	pending  *mcp.Pending
+	started  time.Time
+	ended    time.Time
+	cost     float64
+	tokens   state.Tokens
+	state    string
+	outcome  string
+	cancel   context.CancelFunc
+	baseCost float64
+	retries  int
 }
 
 // Orchestrator runs delegated tasks, at most limit at a time.
@@ -120,13 +124,15 @@ type Orchestrator struct {
 
 	events chan Event
 
-	mu      sync.Mutex
-	seq     int
-	running map[string]*task
-	bySess  map[string]string // child session id -> task id, for gate attribution
-	queue   []*task
-	ledger  []*task
-	closed  bool
+	mu       sync.Mutex
+	seq      int
+	running  map[string]*task
+	bySess   map[string]string // child session id -> task id, for gate attribution
+	queue    []*task
+	ledger   []*task
+	closed   bool
+	cooling  bool
+	retryNow chan struct{}
 
 	wg sync.WaitGroup
 }
@@ -161,13 +167,14 @@ func NewWithLimits(spawn Spawn, limit int, limits Limits) *Orchestrator {
 		limits.RunBudgetUSD = 0
 	}
 	return &Orchestrator{
-		spawn:   spawn,
-		limit:   limit,
-		now:     time.Now,
-		limits:  limits,
-		events:  make(chan Event, 128),
-		running: map[string]*task{},
-		bySess:  map[string]string{},
+		spawn:    spawn,
+		limit:    limit,
+		now:      time.Now,
+		limits:   limits,
+		events:   make(chan Event, 128),
+		retryNow: make(chan struct{}, 1),
+		running:  map[string]*task{},
+		bySess:   map[string]string{},
 	}
 }
 
@@ -299,36 +306,58 @@ func (o *Orchestrator) run(ctx context.Context, t *task) {
 	defer o.wg.Done()
 	defer alog.Recover("orchestrator.run")
 
-	child, err := o.spawn(ctx, t.Task)
-	if err != nil {
-		o.finishFailed(t, err)
-		return
-	}
-
-	o.emit(Event{TaskID: t.ID, Title: t.Title, Kind: KindStarted, Status: new(t.status())})
-
-	if err := child.Send(taskPrompt(t.Task)); err != nil {
+	for {
+		child, err := o.spawn(ctx, t.Task)
+		if err != nil {
+			o.finishFailed(t, err)
+			return
+		}
+		o.emit(Event{TaskID: t.ID, Title: t.Title, Kind: KindStarted, Status: new(t.status())})
+		prompt := taskPrompt(t.Task)
+		if t.retries > 0 {
+			prompt += "\n\nRetry after Claude cooldown: inspect the existing working tree first; the prior attempt may have partially completed this task."
+		}
+		if err := child.Send(prompt); err != nil {
+			child.Stop()
+			o.finishFailed(t, err)
+			return
+		}
+		out := o.consume(ctx, t, child)
 		child.Stop()
-		o.finishFailed(t, err)
+		if !out.retryAt.IsZero() && t.retries == 0 {
+			o.emit(Event{TaskID: t.ID, Title: t.Title, Kind: KindCoolingDown, Status: new(t.status()), RetryAt: out.retryAt})
+			o.mu.Lock()
+			o.cooling = true
+			o.mu.Unlock()
+			if !waitForRetry(ctx, t.pending, out.retryAt, o.retryNow) {
+				o.mu.Lock()
+				o.cooling = false
+				o.mu.Unlock()
+				o.finishCancelled(t, "the cooldown retry was cancelled")
+				return
+			}
+			o.mu.Lock()
+			o.cooling = false
+			t.baseCost = t.cost
+			old := t.SessionID
+			t.SessionID = newUUID()
+			delete(o.bySess, old)
+			o.bySess[t.SessionID] = t.ID
+			t.retries++
+			o.mu.Unlock()
+			continue
+		}
+		switch out.kind {
+		case outDone:
+			o.finishDone(t, out.report)
+		case outCancelled:
+			o.finishCancelled(t, out.reason)
+		case outAbandoned:
+			o.finishCancelledSilently(t, out.reason)
+		default:
+			o.finishFailed(t, out.err)
+		}
 		return
-	}
-
-	out := o.consume(ctx, t, child)
-
-	// Stop the child before finalising, always. Resolving the parent's call
-	// first would tell it the task is over while the process is still alive and
-	// possibly still writing to the working tree.
-	child.Stop()
-
-	switch out.kind {
-	case outDone:
-		o.finishDone(t, out.report)
-	case outCancelled:
-		o.finishCancelled(t, out.reason)
-	case outAbandoned:
-		o.finishCancelledSilently(t, out.reason)
-	default:
-		o.finishFailed(t, out.err)
 	}
 }
 
@@ -344,15 +373,17 @@ const (
 )
 
 type outcome struct {
-	kind   outcomeKind
-	report Report
-	err    error
-	reason string
+	kind    outcomeKind
+	report  Report
+	err     error
+	reason  string
+	retryAt time.Time
 }
 
 // consume reads the child's stream to its first result event.
 func (o *Orchestrator) consume(ctx context.Context, t *task, child Child) outcome {
 	events := child.Events()
+	var retryAt time.Time
 	for {
 		select {
 		case <-ctx.Done():
@@ -369,11 +400,18 @@ func (o *Orchestrator) consume(ctx context.Context, t *task, child Child) outcom
 				return outcome{kind: outFailed, err: errStreamClosed}
 			}
 			o.note(t, ev)
+			if ev.Type == driver.TypeRateLimit && ev.RateLimitInfo != nil && ev.RateLimitInfo.ResetsAt > 0 {
+				retryAt = time.Unix(ev.RateLimitInfo.ResetsAt, 0).Add(5 * time.Minute)
+			}
 			o.emit(Event{TaskID: t.ID, Title: t.Title, Kind: KindStream, Ev: ev})
 
 			if ev.IsTurnEnd() {
 				if ev.IsError || ev.TerminalReason == "aborted_streaming" {
-					return outcome{kind: outFailed, err: childTerminalError(ev)}
+					out := outcome{kind: outFailed, err: childTerminalError(ev)}
+					if ev.APIErrorStatus == 429 && retryAt.After(time.Now()) {
+						out.retryAt = retryAt
+					}
+					return out
 				}
 				if r, ok := ParseReport(ev.StructuredOutput); ok {
 					return outcome{kind: outDone, report: r}
@@ -381,6 +419,38 @@ func (o *Orchestrator) consume(ctx context.Context, t *task, child Child) outcom
 				return outcome{kind: outDone, report: degraded(noReportReason(ev))}
 			}
 		}
+	}
+}
+
+func waitForRetry(ctx context.Context, p *mcp.Pending, at time.Time, now <-chan struct{}) bool {
+	t := time.NewTimer(time.Until(at))
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-p.Done():
+		return false
+	case <-t.C:
+		return true
+	case <-now:
+		return true
+	}
+}
+
+// RetryCooldown releases the one rate-limited child currently waiting for its
+// account cooldown. It is intentionally a no-op unless that exact state exists.
+func (o *Orchestrator) RetryCooldown() bool {
+	o.mu.Lock()
+	cooling := o.cooling
+	o.mu.Unlock()
+	if !cooling {
+		return false
+	}
+	select {
+	case o.retryNow <- struct{}{}:
+		return true
+	default:
+		return true
 	}
 }
 
@@ -392,7 +462,7 @@ func (o *Orchestrator) note(t *task, ev driver.Event) {
 	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	t.cost = ev.TotalCostUSD
+	t.cost = t.baseCost + ev.TotalCostUSD
 	if u := ev.Usage; u != nil {
 		t.tokens.Add(state.Tokens{
 			Input:       int64(u.InputTokens),

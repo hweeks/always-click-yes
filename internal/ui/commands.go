@@ -128,6 +128,8 @@ func (m *Model) runCommand(name, args string) tea.Cmd {
 		default:
 			m.appendEntry(entry{kind: eWarn, body: "unknown argument " + args + " — /queue or /queue clear"})
 		}
+	case "retry":
+		m.raise(RetryCooldown())
 	case "resume":
 		return m.startResume(args)
 	default:

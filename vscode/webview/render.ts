@@ -71,6 +71,7 @@ export class Renderer {
     // deadline — Frame carries no `now`, on purpose, so that an idle run's
     // frames are byte-identical and the server stays silent.
     this.ticker = setInterval(() => {
+	  this.paintHeader();
       this.paintGates();
       this.paintAsk();
     }, 200);
@@ -114,6 +115,10 @@ export class Renderer {
       f ? `$${f.cost.total.toFixed(4)}` : '',
       f && f.tokens.context ? `ctx ${f.tokens.context.toLocaleString()}` : '',
     ].filter(Boolean);
+	if (f?.cooldownUntilUnixMs) {
+	  const left = Math.max(0, f.cooldownUntilUnixMs - Date.now());
+	  bits.unshift(`COOLING DOWN · retrying in ${(left / 1000).toFixed(0)}s`);
+	}
     this.els.header.textContent = bits.join('  ·  ');
     this.els.connection.textContent = this.detail
       ? `${this.connection} — ${this.detail}`

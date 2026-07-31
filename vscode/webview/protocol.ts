@@ -123,6 +123,7 @@ export interface Frame {
   paused: boolean;
   showHelp: boolean;
   picking: boolean;
+  cooldownUntilUnixMs: number;
   turnStartUnixMs: number;
   cost: Cost;
   tokens: Ledger;

@@ -40,6 +40,7 @@ type Dispatcher interface {
 	Cancel(taskID, reason string)
 	CancelAll(reason string)
 	Active() int
+	RetryCooldown() bool
 }
 
 type childMsg struct{ ev orchestrator.Event }

@@ -17,6 +17,7 @@ const (
 	TypeAssistant = "assistant" // a model message (thinking / text / tool_use blocks)
 	TypeUser      = "user"      // a user message (our injections, or tool_result echoes)
 	TypeResult    = "result"    // end of a turn — the idle/done signal
+	TypeRateLimit = "rate_limit_event"
 )
 
 // Content block types inside a Message.
@@ -113,8 +114,16 @@ type Event struct {
 	// was started with --json-schema. Absent otherwise. The string Result holds
 	// the same JSON, but this is already parsed and is what callers should read.
 	StructuredOutput json.RawMessage `json:"structured_output"`
+	RateLimitInfo    *RateLimitInfo  `json:"rate_limit_info,omitempty"`
 
 	Raw json.RawMessage `json:"-"`
+}
+
+// RateLimitInfo carries the account-wide reset instant from a rate_limit_event.
+// ResetsAt is Unix seconds.
+type RateLimitInfo struct {
+	Status   string `json:"status"`
+	ResetsAt int64  `json:"resetsAt"`
 }
 
 // Usage is the token count for a single turn.

@@ -37,13 +37,14 @@ type Frame struct {
 	Model     string `json:"model"`     // the model claude reported at init
 	Billing   string `json:"billing"`   // "subscription" | "API" | "" (unknown)
 
-	Ended      bool `json:"ended"`      // the stream closed; nothing left to send to
-	Busy       bool `json:"busy"`       // a turn, a gate or a task is in flight
-	Processing bool `json:"processing"` // a turn specifically
-	PlanReady  bool `json:"planReady"`  // a plan is on screen, waiting for Ctrl+G
-	Paused     bool `json:"paused"`     // every gate countdown is frozen
-	ShowHelp   bool `json:"showHelp"`   // the help overlay is open
-	Picking    bool `json:"picking"`    // the resume picker is open
+	Ended               bool  `json:"ended"`               // the stream closed; nothing left to send to
+	Busy                bool  `json:"busy"`                // a turn, a gate or a task is in flight
+	Processing          bool  `json:"processing"`          // a turn specifically
+	PlanReady           bool  `json:"planReady"`           // a plan is on screen, waiting for Ctrl+G
+	Paused              bool  `json:"paused"`              // every gate countdown is frozen
+	ShowHelp            bool  `json:"showHelp"`            // the help overlay is open
+	Picking             bool  `json:"picking"`             // the resume picker is open
+	CooldownUntilUnixMs int64 `json:"cooldownUntilUnixMs"` // retry deadline after a rate limit, else 0
 
 	// TurnStartUnixMs is when the in-flight turn began, 0 when idle. Absolute for
 	// the same reason gate deadlines are: the client counts the elapsed time up
@@ -234,13 +235,14 @@ func (m Model) Frame() Frame {
 		Model:     m.model,
 		Billing:   m.billing(),
 
-		Ended:      m.ended,
-		Busy:       m.busy(),
-		Processing: m.processing,
-		PlanReady:  m.planReady,
-		Paused:     m.paused,
-		ShowHelp:   m.showHelp,
-		Picking:    m.picking,
+		Ended:               m.ended,
+		Busy:                m.busy(),
+		Processing:          m.processing,
+		PlanReady:           m.planReady,
+		Paused:              m.paused,
+		ShowHelp:            m.showHelp,
+		Picking:             m.picking,
+		CooldownUntilUnixMs: unixMs(m.cooldownUntil),
 
 		TurnStartUnixMs: unixMs(m.turnStart),
 

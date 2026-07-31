@@ -38,6 +38,7 @@ func (f *fakeDispatcher) Totals() (state.Tokens, float64, int) { return state.To
 func (f *fakeDispatcher) Cancel(taskID, reason string)         { f.cancels = append(f.cancels, taskID) }
 func (f *fakeDispatcher) CancelAll(reason string)              { f.cancels = append(f.cancels, "*") }
 func (f *fakeDispatcher) Active() int                          { return 0 }
+func (f *fakeDispatcher) RetryCooldown() bool                  { return false }
 
 func pendingFrom(tool, sessionID string) (*gate.Pending, <-chan gate.Decision) {
 	in := gate.PreToolUseInput{ToolName: tool, SessionID: sessionID}

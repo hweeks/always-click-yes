@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -42,21 +43,22 @@ import (
 type ActionKind string
 
 const (
-	ActionSubmit      ActionKind = "submit"      // send text (or run a /command) as if typed
-	ActionArm         ActionKind = "arm"         // Ctrl+G: flip PLAN into AUTO-RUN
-	ActionInterject   ActionKind = "interject"   // Esc: interrupt the in-flight turn
-	ActionGateAllow   ActionKind = "gateAllow"   // approve one pending gate, by tool_use id
-	ActionGateDeny    ActionKind = "gateDeny"    // veto one pending gate, by tool_use id
-	ActionGatePause   ActionKind = "gatePause"   // freeze or resume every countdown
-	ActionAskAnswer   ActionKind = "askAnswer"   // answer the open question
-	ActionAskSkip     ActionKind = "askSkip"     // skip the open question
-	ActionResume      ActionKind = "resume"      // restore a prior session by id
-	ActionPickerClose ActionKind = "pickerClose" // Esc: dismiss the /resume picker, resuming nothing
-	ActionSetModel    ActionKind = "setModel"    // /model: pick the next session's model
-	ActionClear       ActionKind = "clear"       // /clear: empty the transcript view
-	ActionDone        ActionKind = "done"        // /done: end the run by hand
-	ActionQueueClear  ActionKind = "queueClear"  // /queue clear: drop held messages
-	ActionQuit        ActionKind = "quit"        // stop the driver and exit
+	ActionSubmit        ActionKind = "submit"        // send text (or run a /command) as if typed
+	ActionArm           ActionKind = "arm"           // Ctrl+G: flip PLAN into AUTO-RUN
+	ActionInterject     ActionKind = "interject"     // Esc: interrupt the in-flight turn
+	ActionGateAllow     ActionKind = "gateAllow"     // approve one pending gate, by tool_use id
+	ActionGateDeny      ActionKind = "gateDeny"      // veto one pending gate, by tool_use id
+	ActionGatePause     ActionKind = "gatePause"     // freeze or resume every countdown
+	ActionAskAnswer     ActionKind = "askAnswer"     // answer the open question
+	ActionAskSkip       ActionKind = "askSkip"       // skip the open question
+	ActionResume        ActionKind = "resume"        // restore a prior session by id
+	ActionPickerClose   ActionKind = "pickerClose"   // Esc: dismiss the /resume picker, resuming nothing
+	ActionSetModel      ActionKind = "setModel"      // /model: pick the next session's model
+	ActionClear         ActionKind = "clear"         // /clear: empty the transcript view
+	ActionDone          ActionKind = "done"          // /done: end the run by hand
+	ActionQueueClear    ActionKind = "queueClear"    // /queue clear: drop held messages
+	ActionQuit          ActionKind = "quit"          // stop the driver and exit
+	ActionRetryCooldown ActionKind = "retryCooldown" // retry a rate-limited child now
 )
 
 // actionKinds is every kind above. It exists for Valid, and it lives next to the
@@ -68,6 +70,7 @@ var actionKinds = map[ActionKind]bool{
 	ActionAskAnswer: true, ActionAskSkip: true, ActionResume: true,
 	ActionPickerClose: true, ActionSetModel: true, ActionClear: true,
 	ActionDone: true, ActionQueueClear: true, ActionQuit: true,
+	ActionRetryCooldown: true,
 }
 
 // Valid reports whether k names an action at all.
@@ -148,6 +151,8 @@ func Resume(sessionID string) Action { return Action{Kind: ActionResume, Session
 
 // PickerClose is Esc in the /resume picker: dismiss it without resuming.
 func PickerClose() Action { return Action{Kind: ActionPickerClose} }
+
+func RetryCooldown() Action { return Action{Kind: ActionRetryCooldown} }
 
 // SetModel picks the model for the next launched or resumed session.
 func SetModel(name string) Action { return Action{Kind: ActionSetModel, Name: name} }
@@ -305,6 +310,13 @@ func (m *Model) applyAction(a Action, ack chan<- ActionResult) (cmd tea.Cmd) {
 		m.picking = false
 		m.appendEntry(entry{kind: eMeta, body: cancelled})
 		res = accepted(cancelled)
+	case ActionRetryCooldown:
+		if m.dispatcher == nil || !m.dispatcher.RetryCooldown() {
+			res = rejected("no task is cooling down")
+			break
+		}
+		m.cooldownUntil = time.Time{}
+		res = accepted("cooldown retry released")
 
 	case ActionSetModel:
 		name := strings.TrimSpace(a.Name)
