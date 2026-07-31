@@ -159,7 +159,7 @@ func (p *Process) waitReady(ctx context.Context) error {
 		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, p.URL+"/health/liveliness", nil)
 		resp, err := client.Do(req)
 		if err == nil {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 				return nil
 			}
@@ -187,6 +187,6 @@ func freePort() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("reserve LiteLLM port: %w", err)
 	}
-	defer l.Close()
+	defer func() { _ = l.Close() }()
 	return strings.TrimPrefix(l.Addr().String(), "127.0.0.1:"), nil
 }
