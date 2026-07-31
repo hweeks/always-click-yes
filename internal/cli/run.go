@@ -28,6 +28,14 @@ import (
 // a problem of its own.
 const maxSnapshots = 200
 
+// Defaults are deliberately finite. A child that needs more can be resumed with
+// an explicit budget, but a vague dispatch must not consume an entire login
+// window before anyone gets a chance to inspect its first report.
+const (
+	defaultTaskBudgetUSD = 2.0
+	defaultRunBudgetUSD  = 10.0
+)
+
 // Flags configures a supervisor run. Cobra binds the fields it exposes as flags;
 // Cwd and HookBin have no flag and exist for the live e2e suite, which needs to run
 // the supervisor against a scratch project and a real acy binary.
@@ -46,6 +54,7 @@ type Flags struct {
 	ChildModel  string
 	ChildEffort string
 	TaskBudget  float64
+	RunBudget   float64
 	Resume      string
 	Continue    bool
 
@@ -108,6 +117,9 @@ func applyFileConfig(f *Flags, c config.File, changed func(string) bool) {
 	if c.TaskBudget != nil && !changed("task-budget") {
 		f.TaskBudget = *c.TaskBudget
 	}
+	if c.RunBudget != nil && !changed("run-budget") {
+		f.RunBudget = *c.RunBudget
+	}
 	f.ConfigPath = c.Path
 }
 
@@ -166,10 +178,21 @@ func addRunFlags(cmd *cobra.Command, f *Flags) {
 	cmd.Flags().BoolVar(&f.UseAPIKey, "use-api-key", false, "bill ANTHROPIC_API_KEY instead of the claude.ai login; by default the key is stripped from claude's environment, since headless runs would otherwise use it silently")
 	cmd.Flags().StringVar(&f.ChildModel, "child-model", "", "model for dispatched tasks; empty = same as --model. A cheaper model here is often the single biggest saving, since children do the bulk of the work")
 	cmd.Flags().StringVar(&f.ChildEffort, "child-effort", "", "reasoning effort for dispatched tasks (low, medium, high, xhigh, max); empty = claude's default")
-	cmd.Flags().Float64Var(&f.TaskBudget, "task-budget", 0, "spend ceiling in USD for one dispatched task (0 = none). A runaway child stops instead of running until you notice")
+	cmd.Flags().Float64Var(&f.TaskBudget, "task-budget", defaultTaskBudgetUSD, "spend ceiling in USD for one dispatched task (0 = unlimited; default $2)")
+	cmd.Flags().Float64Var(&f.RunBudget, "run-budget", defaultRunBudgetUSD, "spend ceiling in USD across dispatched tasks (0 = unlimited; default $10)")
 	cmd.Flags().StringVar(&f.Resume, "resume", "", "resume a prior acy session by id, restoring its transcript, phase and cost")
 	cmd.Flags().BoolVarP(&f.Continue, "continue", "c", false, "resume the most recent acy session in this directory")
 	cmd.MarkFlagsMutuallyExclusive("resume", "continue")
+}
+
+// childModel keeps the parent as the fallback while making an explicit
+// --child-model (or .acy.json childModel) real. The old launcher accidentally
+// always used f.Model, turning the most important cost knob into a no-op.
+func childModel(f Flags) string {
+	if f.ChildModel != "" {
+		return f.ChildModel
+	}
+	return f.Model
 }
 
 // resumeTarget resolves the session the run should restore, or "" for a cold start.
@@ -363,7 +386,7 @@ func NewSupervisor(ctx context.Context, f Flags) (*Supervisor, error) {
 		opts := driver.Options{
 			Bin:                f.Bin,
 			Cwd:                f.Cwd,
-			Model:              f.Model,
+			Model:              childModel(f),
 			UseAPIKey:          f.UseAPIKey,
 			PermissionMode:     "default",
 			SettingsPath:       settingsPath, // the same gate as the parent
@@ -404,7 +427,10 @@ func NewSupervisor(ctx context.Context, f Flags) (*Supervisor, error) {
 	// tools/call serially, so a second Dispatch is not even read off stdin until
 	// the first returns — and two children editing one working tree would
 	// corrupt each other regardless.
-	orch := orchestrator.New(spawn, 1)
+	orch := orchestrator.NewWithLimits(spawn, 1, orchestrator.Limits{
+		DefaultTaskBudgetUSD: f.TaskBudget,
+		RunBudgetUSD:         f.RunBudget,
+	})
 	closers = append(closers, func() { orch.Close() })
 
 	cwd := f.Cwd
@@ -419,6 +445,11 @@ func NewSupervisor(ctx context.Context, f Flags) (*Supervisor, error) {
 	}
 	if resumeID != "" {
 		alog.Printf("resume: restoring session %s", resumeID)
+		if snap, ok, loadErr := state.Load(resumeID); loadErr != nil {
+			alog.Printf("resume: could not seed child budget: %v", loadErr)
+		} else if ok {
+			orch.SeedSpent(snap.ChildCost)
+		}
 	}
 
 	// Bound once and shared: the model's picker and any second front end read the
@@ -484,6 +515,9 @@ func runSupervisor(ctx context.Context, f Flags, changed func(string) bool) erro
 
 	if err := overlayFileConfig(&f, changed); err != nil {
 		return err
+	}
+	if f.TaskBudget < 0 || f.RunBudget < 0 {
+		return errors.New("--task-budget and --run-budget must be zero or greater")
 	}
 
 	// Alt-screen by default; ACY_NO_ALTSCREEN=1 keeps output inline (useful for

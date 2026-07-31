@@ -26,11 +26,13 @@ func fullFile() config.File {
 // defaultFlags mirrors what cobra hands runSupervisor when nothing was typed.
 func defaultFlags() Flags {
 	return Flags{
-		Bin:       "claude",
-		Countdown: 30 * time.Second,
-		LogPath:   "acy-debug.log",
-		MaxLines:  10,
-		PlanTools: DefaultParentTools,
+		Bin:        "claude",
+		Countdown:  30 * time.Second,
+		LogPath:    "acy-debug.log",
+		MaxLines:   10,
+		PlanTools:  DefaultParentTools,
+		TaskBudget: defaultTaskBudgetUSD,
+		RunBudget:  defaultRunBudgetUSD,
 	}
 }
 
@@ -80,5 +82,16 @@ func TestApplyFileConfigLeavesUnsetFieldsAlone(t *testing.T) {
 	want.ConfigPath = "/proj/.acy.json"
 	if !reflect.DeepEqual(f, want) {
 		t.Errorf("an empty file must change nothing but ConfigPath:\n got %+v\nwant %+v", f, want)
+	}
+}
+
+func TestChildModelAndBudgetsOverlayAndRespectExplicitFlags(t *testing.T) {
+	f := defaultFlags()
+	applyFileConfig(&f, config.File{ChildModel: "sonnet", TaskBudget: new(1.5), RunBudget: new(6.0)}, func(string) bool { return false })
+	if f.ChildModel != "sonnet" || f.TaskBudget != 1.5 || f.RunBudget != 6 {
+		t.Errorf("overlay = %+v", f)
+	}
+	if got := childModel(f); got != "sonnet" {
+		t.Errorf("childModel = %q, want sonnet", got)
 	}
 }

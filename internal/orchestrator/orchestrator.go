@@ -18,6 +18,8 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -110,9 +112,11 @@ type task struct {
 
 // Orchestrator runs delegated tasks, at most limit at a time.
 type Orchestrator struct {
-	spawn Spawn
-	limit int
-	now   func() time.Time
+	spawn       Spawn
+	limit       int
+	now         func() time.Time
+	limits      Limits
+	spentBefore float64
 
 	events chan Event
 
@@ -127,19 +131,40 @@ type Orchestrator struct {
 	wg sync.WaitGroup
 }
 
+// Limits makes the safe path the default without taking the final spending
+// decision away from the human: zero explicitly means unlimited.
+type Limits struct {
+	DefaultTaskBudgetUSD float64
+	RunBudgetUSD         float64
+}
+
 // New builds an Orchestrator. limit is how many children may run at once; it is
 // 1 in practice, because acy's own MCP server handles tools/call serially (a
 // second Dispatch is not even read off stdin until the first returns) and
 // because two children editing one working tree is a correctness hazard, not
 // merely a display one.
 func New(spawn Spawn, limit int) *Orchestrator {
+	return NewWithLimits(spawn, limit, Limits{})
+}
+
+// NewWithLimits builds an orchestrator with run-wide and per-task spend
+// ceilings. New remains unbounded for small unit tests and embedders that have
+// their own accounting policy.
+func NewWithLimits(spawn Spawn, limit int, limits Limits) *Orchestrator {
 	if limit < 1 {
 		limit = 1
+	}
+	if limits.DefaultTaskBudgetUSD < 0 {
+		limits.DefaultTaskBudgetUSD = 0
+	}
+	if limits.RunBudgetUSD < 0 {
+		limits.RunBudgetUSD = 0
 	}
 	return &Orchestrator{
 		spawn:   spawn,
 		limit:   limit,
 		now:     time.Now,
+		limits:  limits,
 		events:  make(chan Event, 128),
 		running: map[string]*task{},
 		bySess:  map[string]string{},
@@ -168,6 +193,14 @@ func (o *Orchestrator) Dispatch(ctx context.Context, p *mcp.Pending) (Status, er
 		p.Resolve(mcp.Answer{Text: cancelText("the supervisor is shutting down")})
 		return Status{}, errClosed
 	}
+	if o.limits.RunBudgetUSD > 0 && o.spentLocked() >= o.limits.RunBudgetUSD {
+		spent, limit := o.spentLocked(), o.limits.RunBudgetUSD
+		o.mu.Unlock()
+		err := fmt.Errorf("the run budget of $%.2f is exhausted (spent $%.4f)", limit, spent)
+		p.Resolve(mcp.Answer{Text: "This dispatch was not started: " + err.Error() +
+			". Ask the human to raise --run-budget or end the run; do not retry automatically."})
+		return Status{}, err
+	}
 	o.seq++
 	t := &task{
 		Task: Task{
@@ -178,7 +211,7 @@ func (o *Orchestrator) Dispatch(ctx context.Context, p *mcp.Pending) (Status, er
 			Instruction: spec.Instruction,
 			Context:     spec.Context,
 			Success:     spec.Success,
-			BudgetUSD:   spec.BudgetUSD,
+			BudgetUSD:   o.effectiveBudgetLocked(spec.BudgetUSD),
 		},
 		pending: p,
 		state:   StateQueued,
@@ -193,6 +226,46 @@ func (o *Orchestrator) Dispatch(ctx context.Context, p *mcp.Pending) (Status, er
 	alog.Printf("dispatch: %s %q session=%s", t.ID, t.Title, t.SessionID)
 	o.pump(ctx)
 	return t.status(), nil
+}
+
+// effectiveBudgetLocked combines the parent-requested ceiling, the configured
+// default, and the money genuinely left in this run. A Dispatch cannot bypass
+// a run ceiling by asking for a larger task budget.
+func (o *Orchestrator) effectiveBudgetLocked(requested float64) float64 {
+	budget := requested
+	if budget <= 0 {
+		budget = o.limits.DefaultTaskBudgetUSD
+	}
+	if o.limits.RunBudgetUSD <= 0 {
+		return budget
+	}
+	remaining := o.limits.RunBudgetUSD - o.spentLocked()
+	if budget <= 0 || budget > remaining {
+		return remaining
+	}
+	return budget
+}
+
+func (o *Orchestrator) spentLocked() float64 {
+	spent := o.spentBefore
+	for _, t := range o.ledger {
+		spent += t.cost
+	}
+	return spent
+}
+
+// SeedSpent carries a resumed run's already-recorded child spend into the new
+// in-memory orchestrator. It intentionally does not alter Totals: the UI has
+// restored those totals from the snapshot already.
+func (o *Orchestrator) SeedSpent(cost float64) {
+	if cost <= 0 {
+		return
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if cost > o.spentBefore {
+		o.spentBefore = cost
+	}
 }
 
 // pump starts as many queued tasks as the limit allows.
@@ -299,6 +372,9 @@ func (o *Orchestrator) consume(ctx context.Context, t *task, child Child) outcom
 			o.emit(Event{TaskID: t.ID, Title: t.Title, Kind: KindStream, Ev: ev})
 
 			if ev.IsTurnEnd() {
+				if ev.IsError || ev.TerminalReason == "aborted_streaming" {
+					return outcome{kind: outFailed, err: childTerminalError(ev)}
+				}
 				if r, ok := ParseReport(ev.StructuredOutput); ok {
 					return outcome{kind: outDone, report: r}
 				}
@@ -561,7 +637,27 @@ func taskPrompt(t Task) string {
 	if t.Success != "" {
 		b.WriteString("\n\nDone means: " + t.Success)
 	}
+	b.WriteString("\n\nWork only this cohesive deliverable. Do not broaden the task or start unrelated cleanup. If the budget, a rate limit, or a blocker prevents completion, stop and report the precise partial state; do not retry on your own.")
 	return b.String()
+}
+
+// childTerminalError preserves the reason a child stopped in the parent's
+// answer. A rate limit or budget stop is not a completed task with a thin
+// report: it is a failed dispatch whose partially-written tree must be checked.
+func childTerminalError(ev driver.Event) error {
+	result := strings.ToLower(ev.Result)
+	switch {
+	case ev.APIErrorStatus == 429 || strings.Contains(result, "rate limit") || strings.Contains(result, "session limit"):
+		return errors.New("the child was stopped by Claude's rate limit; do not retry automatically")
+	case strings.Contains(result, "budget"):
+		return errors.New("the child reached its spend ceiling; inspect its partial work before raising the budget")
+	case ev.TerminalReason == "aborted_streaming":
+		return errors.New("the child was interrupted before it could report")
+	case ev.Result != "":
+		return fmt.Errorf("the child ended in an error: %s", clip(ev.Result, 200))
+	default:
+		return errors.New("the child ended in an error before it could report")
+	}
 }
 
 // noReportReason explains, in the report itself, why there is no report — the

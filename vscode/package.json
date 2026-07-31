@@ -123,7 +123,12 @@
             "taskBudget": {
               "type": "number",
               "minimum": 0,
-              "description": "Spend ceiling in USD for a single dispatched task (0 = none). A runaway child stops instead of running until you notice."
+              "description": "Spend ceiling in USD for a single dispatched task (0 = unlimited; otherwise acy's $2 default applies)."
+            },
+            "runBudget": {
+              "type": "number",
+              "minimum": 0,
+              "description": "Spend ceiling in USD across all dispatched tasks (0 = none)."
             },
             "useApiKey": {
               "type": "boolean",

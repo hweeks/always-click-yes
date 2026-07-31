@@ -178,13 +178,13 @@ func TestChildWithoutAReportDegradesHonestly(t *testing.T) {
 			ev := resultWith("", 0.1, 10)
 			ev.TerminalReason = "aborted_streaming"
 			return ev
-		}(), []string{"BLOCKED", "interrupted"}},
+		}(), []string{"FAILED", "interrupted"}},
 		{"errored", func() driver.Event {
 			ev := resultWith("", 0.1, 10)
 			ev.IsError = true
 			ev.Result = "budget exceeded"
 			return ev
-		}(), []string{"BLOCKED", "budget exceeded"}},
+		}(), []string{"FAILED", "spend ceiling"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -206,6 +206,75 @@ func TestChildWithoutAReportDegradesHonestly(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestLimitsCapEachTaskToTheRunRemainder(t *testing.T) {
+	first, second := newFakeChild(), newFakeChild()
+	children := []*fakeChild{first, second}
+	o := NewWithLimits(func(context.Context, Task) (Child, error) {
+		c := children[0]
+		children = children[1:]
+		return c, nil
+	}, 1, Limits{DefaultTaskBudgetUSD: 2, RunBudgetUSD: 3})
+	defer o.Close()
+
+	p1, a1 := dispatchCall(t, `{"title":"one","instruction":"one"}`)
+	st1, err := o.Dispatch(t.Context(), p1)
+	if err != nil || st1.Task.BudgetUSD != 2 {
+		t.Fatalf("first budget = $%.2f, err=%v", st1.Task.BudgetUSD, err)
+	}
+	first.events <- resultWith(goodReport, 2.25, 10)
+	waitAnswer(t, a1)
+
+	p2, a2 := dispatchCall(t, `{"title":"two","instruction":"two"}`)
+	st2, err := o.Dispatch(t.Context(), p2)
+	if err != nil || st2.Task.BudgetUSD != 0.75 {
+		t.Fatalf("second budget = $%.2f, err=%v", st2.Task.BudgetUSD, err)
+	}
+	second.events <- resultWith(goodReport, 0.75, 10)
+	waitAnswer(t, a2)
+
+	p3, a3 := dispatchCall(t, `{"title":"three","instruction":"three"}`)
+	if _, err := o.Dispatch(t.Context(), p3); err == nil {
+		t.Fatal("dispatch beyond run budget succeeded")
+	}
+	if got := waitAnswer(t, a3).Text; !strings.Contains(got, "not started") || !strings.Contains(got, "do not retry") {
+		t.Errorf("budget rejection = %q", got)
+	}
+}
+
+func TestRateLimitIsAFailureNotADegradedSuccess(t *testing.T) {
+	child := newFakeChild()
+	o := New(func(context.Context, Task) (Child, error) { return child, nil }, 1)
+	defer o.Close()
+	p, answers := dispatchCall(t, `{"title":"x","instruction":"x"}`)
+	if _, err := o.Dispatch(t.Context(), p); err != nil {
+		t.Fatal(err)
+	}
+	ev := resultWith("", 0.5, 10)
+	ev.IsError, ev.APIErrorStatus, ev.Result = true, 429, "You've hit your session limit"
+	child.events <- ev
+	if got := waitAnswer(t, answers).Text; !strings.Contains(got, "FAILED") || !strings.Contains(got, "rate limit") {
+		t.Errorf("rate-limit answer = %q", got)
+	}
+	if got := o.Statuses()[0].State; got != StateFailed {
+		t.Errorf("state = %q, want failed", got)
+	}
+}
+
+func TestRunBudgetIncludesResumedChildSpend(t *testing.T) {
+	child := newFakeChild()
+	o := NewWithLimits(func(context.Context, Task) (Child, error) { return child, nil }, 1,
+		Limits{DefaultTaskBudgetUSD: 2, RunBudgetUSD: 3})
+	defer o.Close()
+	o.SeedSpent(2.5)
+	p, answers := dispatchCall(t, `{"title":"last","instruction":"last"}`)
+	st, err := o.Dispatch(t.Context(), p)
+	if err != nil || st.Task.BudgetUSD != 0.5 {
+		t.Fatalf("resumed budget = $%.2f, err=%v", st.Task.BudgetUSD, err)
+	}
+	child.events <- resultWith(goodReport, 0.5, 10)
+	waitAnswer(t, answers)
 }
 
 // The child dying without a result event at all.

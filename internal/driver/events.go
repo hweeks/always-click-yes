@@ -100,6 +100,7 @@ type Event struct {
 	TerminalReason string  `json:"terminal_reason"`
 	TotalCostUSD   float64 `json:"total_cost_usd"`
 	IsError        bool    `json:"is_error"`
+	APIErrorStatus int     `json:"api_error_status"`
 	Result         string  `json:"result"`
 	NumTurns       int     `json:"num_turns"`
 

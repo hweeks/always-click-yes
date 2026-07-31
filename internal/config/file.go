@@ -36,6 +36,7 @@ type File struct {
 	ChildModel  string   `json:"childModel,omitempty"`
 	ChildEffort string   `json:"childEffort,omitempty"`
 	TaskBudget  *float64 `json:"taskBudget,omitempty"`
+	RunBudget   *float64 `json:"runBudget,omitempty"`
 
 	// Path is where the file was read from, for the "loaded config" line.
 	Path string `json:"-"`
@@ -88,6 +89,12 @@ func LoadFile(dir string) (File, bool, error) {
 	// Trailing garbage after the object is as much a mistake as an unknown key.
 	if dec.More() {
 		return File{}, false, fmt.Errorf("%s: unexpected content after the JSON object", path)
+	}
+	if f.TaskBudget != nil && *f.TaskBudget < 0 {
+		return File{}, false, fmt.Errorf("%s: taskBudget must be zero or greater", path)
+	}
+	if f.RunBudget != nil && *f.RunBudget < 0 {
+		return File{}, false, fmt.Errorf("%s: runBudget must be zero or greater", path)
 	}
 	f.Path = path
 	return f, true, nil

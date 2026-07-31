@@ -11,6 +11,7 @@ export interface Defaults {
   childModel?: string;
   childEffort?: string;
   taskBudget?: number;
+  runBudget?: number;
   useApiKey?: boolean;
 }
 
@@ -44,6 +45,18 @@ export function buildConfigSeed(d: Defaults): Record<string, unknown> {
   }
   if (d.useApiKey === true) {
     seed.useApiKey = true;
+  }
+  if (d.childModel?.trim()) {
+    seed.childModel = d.childModel.trim();
+  }
+  if (d.childEffort?.trim()) {
+    seed.childEffort = d.childEffort.trim();
+  }
+  if (typeof d.taskBudget === 'number' && d.taskBudget >= 0) {
+    seed.taskBudget = d.taskBudget;
+  }
+  if (typeof d.runBudget === 'number' && d.runBudget >= 0) {
+    seed.runBudget = d.runBudget;
   }
   return seed;
 }

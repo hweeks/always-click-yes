@@ -126,7 +126,7 @@ func TestDurationRoundTrips(t *testing.T) {
 // main lever a user has after the architecture itself.
 func TestLoadFileReadsChildKnobs(t *testing.T) {
 	dir := t.TempDir()
-	writeFile(t, dir, `{"childModel":"sonnet","childEffort":"low","taskBudget":2.5}`)
+	writeFile(t, dir, `{"childModel":"sonnet","childEffort":"low","taskBudget":2.5,"runBudget":7.5}`)
 
 	got, found, err := LoadFile(dir)
 	if err != nil || !found {
@@ -140,6 +140,9 @@ func TestLoadFileReadsChildKnobs(t *testing.T) {
 	}
 	if got.TaskBudget == nil || *got.TaskBudget != 2.5 {
 		t.Errorf("TaskBudget = %v, want 2.5", got.TaskBudget)
+	}
+	if got.RunBudget == nil || *got.RunBudget != 7.5 {
+		t.Errorf("RunBudget = %v, want 7.5", got.RunBudget)
 	}
 }
 

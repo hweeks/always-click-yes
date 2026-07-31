@@ -14,6 +14,10 @@ test('only values the user set make it into the seed', () => {
     log: '',
     maxLines: 0,
     planTools: [],
+    childModel: '',
+    childEffort: '',
+    taskBudget: -1,
+    runBudget: -1,
     useApiKey: false,
   });
   assert.deepEqual(seed, { model: 'opus', countdown: '20s' });
@@ -28,6 +32,10 @@ test('every field carries through when set', () => {
     maxLines: 25,
     planTools: ['Read', 'Grep'],
     useApiKey: true,
+    childModel: 'sonnet',
+    childEffort: 'low',
+    taskBudget: 2.5,
+    runBudget: 10,
   });
   assert.deepEqual(seed, {
     model: 'opus',
@@ -37,11 +45,19 @@ test('every field carries through when set', () => {
     maxLines: 25,
     planTools: ['Read', 'Grep'],
     useApiKey: true,
+    childModel: 'sonnet',
+    childEffort: 'low',
+    taskBudget: 2.5,
+    runBudget: 10,
   });
 });
 
 test('strings are trimmed, and whitespace-only means unset', () => {
   assert.deepEqual(buildConfigSeed({ model: '  opus  ', countdown: '   ' }), { model: 'opus' });
+});
+
+test('zero budgets are retained as the explicit unlimited opt-out', () => {
+  assert.deepEqual(buildConfigSeed({ taskBudget: 0, runBudget: 0 }), { taskBudget: 0, runBudget: 0 });
 });
 
 test('renderConfigSeed writes two-space-indented JSON with a trailing newline', () => {
