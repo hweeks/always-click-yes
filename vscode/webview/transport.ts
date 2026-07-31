@@ -25,7 +25,7 @@
 // this module under plain `node --test`, against a real `acy serve`, which is
 // the only way any of this gets exercised without a browser.
 
-import type { Action, ActionResult, Frame, Theme } from './protocol';
+import type { Action, ActionResult, Frame, SessionRow, Theme } from './protocol';
 
 /** Where a run is and what it takes to talk to it. */
 export interface Endpoint {
@@ -261,6 +261,20 @@ export class Transport {
       body: JSON.stringify(action),
     });
     return (await res.json()) as ActionResult;
+  }
+
+  /**
+   * GET /api/sessions.
+   *
+   * The rows come back already decided: the server builds them with
+   * ui.SessionRows, the same call the terminal's /resume picker makes, so the two
+   * front ends cannot offer different lists. Whatever this returns is passed
+   * through unfiltered, unsorted and unrelabelled — a client that sorts by mtime
+   * or hides the unlabelled rows has quietly forked the picker.
+   */
+  async sessions(): Promise<SessionRow[]> {
+    const res = await this.request('/api/sessions');
+    return (await res.json()) as SessionRow[];
   }
 
   /** GET /api/highlight.css. The palette the transcript's class names refer to. */

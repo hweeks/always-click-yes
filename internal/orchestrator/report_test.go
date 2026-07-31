@@ -62,9 +62,11 @@ func TestRenderIncludesEverythingThatMatters(t *testing.T) {
 	}
 }
 
-// The schema states maxLength and maxItems, but whether claude enforces them is
-// not something acy can rely on — and the parent pays for every byte of this on
-// every subsequent turn. So the renderer has to be the thing that bounds it.
+// claude does enforce the schema's maxLength on the child's structured output,
+// and a violation costs the entire report — so the caps are set far above the
+// guidance in the descriptions and cannot be what keeps this small. The parent
+// pays for every byte of a rendered report on every subsequent turn, so the
+// renderer has to be the thing that bounds it.
 func TestRenderBoundsAPathologicalReport(t *testing.T) {
 	r := Report{
 		Outcome: OutcomeCompleted,
@@ -117,6 +119,98 @@ func TestRenderLeavesAnOrdinaryReportAlone(t *testing.T) {
 	}
 	if len(got) > 400 {
 		t.Errorf("a typical report is %d bytes; it should be far smaller than the cap", len(got))
+	}
+}
+
+// Every cap in the schema has to be exactly the clip limit the renderer applies
+// to the same field, and the two live far apart — a string constant handed to
+// claude, and an argument to clip — so nothing but a test keeps them together.
+func TestSchemaCapsMatchTheClipLimits(t *testing.T) {
+	type stringField struct {
+		MaxLength int `json:"maxLength"`
+	}
+	var v struct {
+		Properties struct {
+			Summary stringField `json:"summary"`
+			Changed struct {
+				Items struct {
+					Properties struct {
+						Note stringField `json:"note"`
+					} `json:"properties"`
+				} `json:"items"`
+			} `json:"changed"`
+			Verified struct {
+				Items struct {
+					Properties struct {
+						Check  stringField `json:"check"`
+						Detail stringField `json:"detail"`
+					} `json:"properties"`
+				} `json:"items"`
+			} `json:"verified"`
+			Followups struct {
+				Items stringField `json:"items"`
+			} `json:"followups"`
+			NeedsDecision stringField `json:"needs_decision"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal([]byte(ReportSchema), &v); err != nil {
+		t.Fatal(err)
+	}
+
+	p := v.Properties
+	for _, c := range []struct {
+		field  string
+		schema int
+		clip   int
+	}{
+		{"summary", p.Summary.MaxLength, maxSummaryRunes},
+		{"changed[].note", p.Changed.Items.Properties.Note.MaxLength, maxNoteRunes},
+		{"verified[].check", p.Verified.Items.Properties.Check.MaxLength, maxCheckRunes},
+		{"verified[].detail", p.Verified.Items.Properties.Detail.MaxLength, maxDetailRunes},
+		{"followups[]", p.Followups.Items.MaxLength, maxFollowupRunes},
+		{"needs_decision", p.NeedsDecision.MaxLength, maxDecisionRunes},
+	} {
+		switch {
+		case c.schema > c.clip:
+			t.Errorf("%s: schema allows %d runes but the renderer clips at %d — text the child "+
+				"was told it could write is silently truncated in the parent's context",
+				c.field, c.schema, c.clip)
+		case c.schema < c.clip:
+			t.Errorf("%s: schema allows only %d runes while the renderer clips at %d — the child "+
+				"loses its entire report to a validation error over text the renderer would "+
+				"have carried in full", c.field, c.schema, c.clip)
+		}
+	}
+}
+
+// A summary written right up to the cap the schema permits has to arrive whole,
+// header and following lines included. If maxRenderedRunes were not comfortably
+// above maxSummaryRunes, the child's longest legal summary would eat the
+// changed/verified lines behind it.
+func TestRenderCarriesAMaxedOutSummaryIntact(t *testing.T) {
+	// Multi-byte, so byte length is far past the cap while rune length is exactly
+	// at it — clip has to be counting the latter.
+	summary := strings.Repeat("é", maxSummaryRunes)
+	r := Report{
+		Outcome:  OutcomeCompleted,
+		Summary:  summary,
+		Changed:  []FileChange{{Path: "internal/orchestrator/report.go", Action: "modified"}},
+		Verified: []Check{{Check: "go test ./internal/orchestrator/", Result: "pass"}},
+	}
+
+	got := r.Render("t7", "raise the caps")
+	if strings.Contains(got, "…") {
+		t.Errorf("a summary of exactly maxSummaryRunes (%d) runes was truncated; maxRenderedRunes "+
+			"(%d) must leave room for it plus the header and the lines after it",
+			maxSummaryRunes, maxRenderedRunes)
+	}
+	if !strings.Contains(got, summary) {
+		t.Error("the summary did not survive intact")
+	}
+	for _, want := range []string{"t7", "COMPLETED", "changed: ", "verified: "} {
+		if !strings.Contains(got, want) {
+			t.Errorf("render missing %q — a maxed-out summary crowded it out", want)
+		}
 	}
 }
 

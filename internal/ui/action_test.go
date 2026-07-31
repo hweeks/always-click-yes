@@ -11,6 +11,7 @@ import (
 	"github.com/hweeks/always-click-yes/internal/driver"
 	"github.com/hweeks/always-click-yes/internal/gate"
 	"github.com/hweeks/always-click-yes/internal/mcp"
+	"github.com/hweeks/always-click-yes/internal/session"
 	"github.com/hweeks/always-click-yes/internal/state"
 )
 
@@ -119,6 +120,21 @@ func askActionModel(t *testing.T) (Model, <-chan mcp.Answer) {
 		t.Fatal("setup: the fixture did not open the ask panel")
 	}
 	return m, reply
+}
+
+// openPicker opens the /resume picker on m the way startResume does: rows built
+// from a session list, cursor on the first.
+func openPicker(t *testing.T, m *Model) {
+	t.Helper()
+	m.sessionList = pickRows([]session.Info{
+		{ID: "aaaabbbbcccc", ModTime: actionClock, Summary: "port the parser"},
+		{ID: "ddddeeeeffff", ModTime: actionClock, Summary: "a plain claude chat"},
+	}, nil)
+	m.pickIdx = 0
+	m.picking = true
+	if len(m.sessionList) != 2 {
+		t.Fatalf("setup: want 2 picker rows, got %d", len(m.sessionList))
+	}
 }
 
 // --- the acknowledgement contract ---
@@ -270,6 +286,23 @@ func TestActionHappyPaths(t *testing.T) {
 			},
 		},
 		{
+			// Without this a panel user is stuck in a modal: they can pick a row, but
+			// Esc is a key the webview has no way to send.
+			name:  "picker close dismisses the picker",
+			setup: func(t *testing.T, m *Model) { openPicker(t, m) },
+			act:   PickerClose(),
+			check: func(t *testing.T, m *Model, _ string, res ActionResult) {
+				if m.picking {
+					t.Error("the picker is still open")
+				}
+				// Against the reason rather than a literal: the wording exists once,
+				// in action.go, and the entry and the reason are that same string.
+				if !strings.Contains(lastBody(m), res.Reason) {
+					t.Errorf("the cancel never reached the transcript: %q", lastBody(m))
+				}
+			},
+		},
+		{
 			name: "queue clear drops held messages",
 			setup: func(_ *testing.T, m *Model) {
 				m.processing = true
@@ -341,6 +374,63 @@ func TestResumeAction(t *testing.T) {
 	}
 	if msg.id != "sess-9" {
 		t.Errorf("resuming %q, want sess-9", msg.id)
+	}
+}
+
+// A refused pickerClose says nothing in the transcript. The cancel entry is the
+// one sentence a user reads as "the picker is gone", and printing it for a
+// picker that was never open narrates something that did not happen.
+func TestPickerCloseWithNoPickerNarratesNothing(t *testing.T) {
+	m, _ := actionModel(t)
+	before := m.transcript()
+
+	m, res := apply(t, m, PickerClose())
+	if res.Accepted {
+		t.Fatalf("pickerClose was accepted with no picker open: %+v", res)
+	}
+	if m.picking {
+		t.Error("a refusal opened the picker")
+	}
+	if got := m.transcript(); got != before {
+		t.Errorf("a refused pickerClose wrote to the transcript:\n%s", got)
+	}
+}
+
+// Esc in the picker goes *through* the action rather than around it. Inlining
+// `m.picking = false` here again would pass every other test in the file and
+// leave two copies of the cancel wording to drift apart; this is the test that
+// notices.
+func TestPickerEscRaisesTheAction(t *testing.T) {
+	byKey, _ := actionModel(t)
+	openPicker(t, &byKey)
+	byAction, _ := actionModel(t)
+	openPicker(t, &byAction)
+
+	if cmd := byKey.handlePickKey(tea.KeyPressMsg{Code: tea.KeyEscape}); cmd != nil {
+		t.Error("Esc in the picker returned a command — cancelling launches nothing")
+	}
+	byAction, res := apply(t, byAction, PickerClose())
+	if !res.Accepted {
+		t.Fatalf("PickerClose was rejected: %s", res.Reason)
+	}
+
+	if byKey.picking {
+		t.Error("Esc left the picker open")
+	}
+	if got, want := frameJSON(t, byKey), frameJSON(t, byAction); got != want {
+		t.Errorf("Esc and PickerClose diverged.\n--- key ---\n%s\n--- action ---\n%s", got, want)
+	}
+
+	// And Esc again, with the picker already closed. Routed through the action it
+	// inherits the refusal and says nothing; an inlined `m.picking = false` plus
+	// an appendEntry would print a second cancel for a picker that was not open.
+	// That is the difference this test exists to notice.
+	before := byKey.transcript()
+	if cmd := byKey.handlePickKey(tea.KeyPressMsg{Code: tea.KeyEscape}); cmd != nil {
+		t.Error("Esc on a closed picker returned a command")
+	}
+	if got := byKey.transcript(); got != before {
+		t.Errorf("Esc narrated a cancel with no picker open:\n%s", got)
 	}
 }
 
@@ -607,6 +697,11 @@ func TestActionRefusals(t *testing.T) {
 			name:       "resume with an empty id",
 			act:        Resume("  "),
 			wantReason: "no session id to resume",
+		},
+		{
+			name:       "picker close with no picker open",
+			act:        PickerClose(),
+			wantReason: "the resume picker is not open",
 		},
 		{
 			name:       "set model with no name",

@@ -18,6 +18,8 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -58,21 +60,23 @@ type Spawn func(ctx context.Context, t Task) (Child, error)
 type EventKind int
 
 const (
-	KindStarted  EventKind = iota // the child process is up
-	KindStream                    // one decoded event from the child
-	KindFinished                  // terminal: Report is set
-	KindFailed                    // terminal: Err is set
+	KindStarted     EventKind = iota // the child process is up
+	KindStream                       // one decoded event from the child
+	KindFinished                     // terminal: Report is set
+	KindFailed                       // terminal: Err is set
+	KindCoolingDown                  // rate-limited child will retry once
 )
 
 // Event is anything a child emits, tagged with the task that owns it.
 type Event struct {
-	TaskID string
-	Title  string
-	Kind   EventKind
-	Ev     driver.Event
-	Report *Report
-	Status *Status
-	Err    error
+	TaskID  string
+	Title   string
+	Kind    EventKind
+	Ev      driver.Event
+	Report  *Report
+	Status  *Status
+	Err     error
+	RetryAt time.Time
 }
 
 // Status is the ledger entry for one task.
@@ -98,33 +102,46 @@ const (
 // task is the mutable internal record. Status is the value copy handed out.
 type task struct {
 	Task
-	pending *mcp.Pending
-	started time.Time
-	ended   time.Time
-	cost    float64
-	tokens  state.Tokens
-	state   string
-	outcome string
-	cancel  context.CancelFunc
+	pending  *mcp.Pending
+	started  time.Time
+	ended    time.Time
+	cost     float64
+	tokens   state.Tokens
+	state    string
+	outcome  string
+	cancel   context.CancelFunc
+	baseCost float64
+	retries  int
 }
 
 // Orchestrator runs delegated tasks, at most limit at a time.
 type Orchestrator struct {
-	spawn Spawn
-	limit int
-	now   func() time.Time
+	spawn       Spawn
+	limit       int
+	now         func() time.Time
+	limits      Limits
+	spentBefore float64
 
 	events chan Event
 
-	mu      sync.Mutex
-	seq     int
-	running map[string]*task
-	bySess  map[string]string // child session id -> task id, for gate attribution
-	queue   []*task
-	ledger  []*task
-	closed  bool
+	mu       sync.Mutex
+	seq      int
+	running  map[string]*task
+	bySess   map[string]string // child session id -> task id, for gate attribution
+	queue    []*task
+	ledger   []*task
+	closed   bool
+	cooling  bool
+	retryNow chan struct{}
 
 	wg sync.WaitGroup
+}
+
+// Limits makes the safe path the default without taking the final spending
+// decision away from the human: zero explicitly means unlimited.
+type Limits struct {
+	DefaultTaskBudgetUSD float64
+	RunBudgetUSD         float64
 }
 
 // New builds an Orchestrator. limit is how many children may run at once; it is
@@ -133,16 +150,31 @@ type Orchestrator struct {
 // because two children editing one working tree is a correctness hazard, not
 // merely a display one.
 func New(spawn Spawn, limit int) *Orchestrator {
+	return NewWithLimits(spawn, limit, Limits{})
+}
+
+// NewWithLimits builds an orchestrator with run-wide and per-task spend
+// ceilings. New remains unbounded for small unit tests and embedders that have
+// their own accounting policy.
+func NewWithLimits(spawn Spawn, limit int, limits Limits) *Orchestrator {
 	if limit < 1 {
 		limit = 1
 	}
+	if limits.DefaultTaskBudgetUSD < 0 {
+		limits.DefaultTaskBudgetUSD = 0
+	}
+	if limits.RunBudgetUSD < 0 {
+		limits.RunBudgetUSD = 0
+	}
 	return &Orchestrator{
-		spawn:   spawn,
-		limit:   limit,
-		now:     time.Now,
-		events:  make(chan Event, 128),
-		running: map[string]*task{},
-		bySess:  map[string]string{},
+		spawn:    spawn,
+		limit:    limit,
+		now:      time.Now,
+		limits:   limits,
+		events:   make(chan Event, 128),
+		retryNow: make(chan struct{}, 1),
+		running:  map[string]*task{},
+		bySess:   map[string]string{},
 	}
 }
 
@@ -168,6 +200,14 @@ func (o *Orchestrator) Dispatch(ctx context.Context, p *mcp.Pending) (Status, er
 		p.Resolve(mcp.Answer{Text: cancelText("the supervisor is shutting down")})
 		return Status{}, errClosed
 	}
+	if o.limits.RunBudgetUSD > 0 && o.spentLocked() >= o.limits.RunBudgetUSD {
+		spent, limit := o.spentLocked(), o.limits.RunBudgetUSD
+		o.mu.Unlock()
+		err := fmt.Errorf("the run budget of $%.2f is exhausted (spent $%.4f)", limit, spent)
+		p.Resolve(mcp.Answer{Text: "This dispatch was not started: " + err.Error() +
+			". Ask the human to raise --run-budget or end the run; do not retry automatically."})
+		return Status{}, err
+	}
 	o.seq++
 	t := &task{
 		Task: Task{
@@ -178,7 +218,7 @@ func (o *Orchestrator) Dispatch(ctx context.Context, p *mcp.Pending) (Status, er
 			Instruction: spec.Instruction,
 			Context:     spec.Context,
 			Success:     spec.Success,
-			BudgetUSD:   spec.BudgetUSD,
+			BudgetUSD:   o.effectiveBudgetLocked(spec.BudgetUSD),
 		},
 		pending: p,
 		state:   StateQueued,
@@ -193,6 +233,46 @@ func (o *Orchestrator) Dispatch(ctx context.Context, p *mcp.Pending) (Status, er
 	alog.Printf("dispatch: %s %q session=%s", t.ID, t.Title, t.SessionID)
 	o.pump(ctx)
 	return t.status(), nil
+}
+
+// effectiveBudgetLocked combines the parent-requested ceiling, the configured
+// default, and the money genuinely left in this run. A Dispatch cannot bypass
+// a run ceiling by asking for a larger task budget.
+func (o *Orchestrator) effectiveBudgetLocked(requested float64) float64 {
+	budget := requested
+	if budget <= 0 {
+		budget = o.limits.DefaultTaskBudgetUSD
+	}
+	if o.limits.RunBudgetUSD <= 0 {
+		return budget
+	}
+	remaining := o.limits.RunBudgetUSD - o.spentLocked()
+	if budget <= 0 || budget > remaining {
+		return remaining
+	}
+	return budget
+}
+
+func (o *Orchestrator) spentLocked() float64 {
+	spent := o.spentBefore
+	for _, t := range o.ledger {
+		spent += t.cost
+	}
+	return spent
+}
+
+// SeedSpent carries a resumed run's already-recorded child spend into the new
+// in-memory orchestrator. It intentionally does not alter Totals: the UI has
+// restored those totals from the snapshot already.
+func (o *Orchestrator) SeedSpent(cost float64) {
+	if cost <= 0 {
+		return
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if cost > o.spentBefore {
+		o.spentBefore = cost
+	}
 }
 
 // pump starts as many queued tasks as the limit allows.
@@ -226,36 +306,58 @@ func (o *Orchestrator) run(ctx context.Context, t *task) {
 	defer o.wg.Done()
 	defer alog.Recover("orchestrator.run")
 
-	child, err := o.spawn(ctx, t.Task)
-	if err != nil {
-		o.finishFailed(t, err)
-		return
-	}
-
-	o.emit(Event{TaskID: t.ID, Title: t.Title, Kind: KindStarted, Status: new(t.status())})
-
-	if err := child.Send(taskPrompt(t.Task)); err != nil {
+	for {
+		child, err := o.spawn(ctx, t.Task)
+		if err != nil {
+			o.finishFailed(t, err)
+			return
+		}
+		o.emit(Event{TaskID: t.ID, Title: t.Title, Kind: KindStarted, Status: new(t.status())})
+		prompt := taskPrompt(t.Task)
+		if t.retries > 0 {
+			prompt += "\n\nRetry after Claude cooldown: inspect the existing working tree first; the prior attempt may have partially completed this task."
+		}
+		if err := child.Send(prompt); err != nil {
+			child.Stop()
+			o.finishFailed(t, err)
+			return
+		}
+		out := o.consume(ctx, t, child)
 		child.Stop()
-		o.finishFailed(t, err)
+		if !out.retryAt.IsZero() && t.retries == 0 {
+			o.emit(Event{TaskID: t.ID, Title: t.Title, Kind: KindCoolingDown, Status: new(t.status()), RetryAt: out.retryAt})
+			o.mu.Lock()
+			o.cooling = true
+			o.mu.Unlock()
+			if !waitForRetry(ctx, t.pending, out.retryAt, o.retryNow) {
+				o.mu.Lock()
+				o.cooling = false
+				o.mu.Unlock()
+				o.finishCancelled(t, "the cooldown retry was cancelled")
+				return
+			}
+			o.mu.Lock()
+			o.cooling = false
+			t.baseCost = t.cost
+			old := t.SessionID
+			t.SessionID = newUUID()
+			delete(o.bySess, old)
+			o.bySess[t.SessionID] = t.ID
+			t.retries++
+			o.mu.Unlock()
+			continue
+		}
+		switch out.kind {
+		case outDone:
+			o.finishDone(t, out.report)
+		case outCancelled:
+			o.finishCancelled(t, out.reason)
+		case outAbandoned:
+			o.finishCancelledSilently(t, out.reason)
+		default:
+			o.finishFailed(t, out.err)
+		}
 		return
-	}
-
-	out := o.consume(ctx, t, child)
-
-	// Stop the child before finalising, always. Resolving the parent's call
-	// first would tell it the task is over while the process is still alive and
-	// possibly still writing to the working tree.
-	child.Stop()
-
-	switch out.kind {
-	case outDone:
-		o.finishDone(t, out.report)
-	case outCancelled:
-		o.finishCancelled(t, out.reason)
-	case outAbandoned:
-		o.finishCancelledSilently(t, out.reason)
-	default:
-		o.finishFailed(t, out.err)
 	}
 }
 
@@ -271,15 +373,17 @@ const (
 )
 
 type outcome struct {
-	kind   outcomeKind
-	report Report
-	err    error
-	reason string
+	kind    outcomeKind
+	report  Report
+	err     error
+	reason  string
+	retryAt time.Time
 }
 
 // consume reads the child's stream to its first result event.
 func (o *Orchestrator) consume(ctx context.Context, t *task, child Child) outcome {
 	events := child.Events()
+	var retryAt time.Time
 	for {
 		select {
 		case <-ctx.Done():
@@ -296,15 +400,57 @@ func (o *Orchestrator) consume(ctx context.Context, t *task, child Child) outcom
 				return outcome{kind: outFailed, err: errStreamClosed}
 			}
 			o.note(t, ev)
+			if ev.Type == driver.TypeRateLimit && ev.RateLimitInfo != nil && ev.RateLimitInfo.ResetsAt > 0 {
+				retryAt = time.Unix(ev.RateLimitInfo.ResetsAt, 0).Add(5 * time.Minute)
+			}
 			o.emit(Event{TaskID: t.ID, Title: t.Title, Kind: KindStream, Ev: ev})
 
 			if ev.IsTurnEnd() {
+				if ev.IsError || ev.TerminalReason == "aborted_streaming" {
+					out := outcome{kind: outFailed, err: childTerminalError(ev)}
+					if ev.APIErrorStatus == 429 && retryAt.After(time.Now()) {
+						out.retryAt = retryAt
+					}
+					return out
+				}
 				if r, ok := ParseReport(ev.StructuredOutput); ok {
 					return outcome{kind: outDone, report: r}
 				}
 				return outcome{kind: outDone, report: degraded(noReportReason(ev))}
 			}
 		}
+	}
+}
+
+func waitForRetry(ctx context.Context, p *mcp.Pending, at time.Time, now <-chan struct{}) bool {
+	t := time.NewTimer(time.Until(at))
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-p.Done():
+		return false
+	case <-t.C:
+		return true
+	case <-now:
+		return true
+	}
+}
+
+// RetryCooldown releases the one rate-limited child currently waiting for its
+// account cooldown. It is intentionally a no-op unless that exact state exists.
+func (o *Orchestrator) RetryCooldown() bool {
+	o.mu.Lock()
+	cooling := o.cooling
+	o.mu.Unlock()
+	if !cooling {
+		return false
+	}
+	select {
+	case o.retryNow <- struct{}{}:
+		return true
+	default:
+		return true
 	}
 }
 
@@ -316,7 +462,7 @@ func (o *Orchestrator) note(t *task, ev driver.Event) {
 	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	t.cost = ev.TotalCostUSD
+	t.cost = t.baseCost + ev.TotalCostUSD
 	if u := ev.Usage; u != nil {
 		t.tokens.Add(state.Tokens{
 			Input:       int64(u.InputTokens),
@@ -561,7 +707,27 @@ func taskPrompt(t Task) string {
 	if t.Success != "" {
 		b.WriteString("\n\nDone means: " + t.Success)
 	}
+	b.WriteString("\n\nWork only this cohesive deliverable. Do not broaden the task or start unrelated cleanup. If the budget, a rate limit, or a blocker prevents completion, stop and report the precise partial state; do not retry on your own.")
 	return b.String()
+}
+
+// childTerminalError preserves the reason a child stopped in the parent's
+// answer. A rate limit or budget stop is not a completed task with a thin
+// report: it is a failed dispatch whose partially-written tree must be checked.
+func childTerminalError(ev driver.Event) error {
+	result := strings.ToLower(ev.Result)
+	switch {
+	case ev.APIErrorStatus == 429 || strings.Contains(result, "rate limit") || strings.Contains(result, "session limit"):
+		return errors.New("the child was stopped by Claude's rate limit; do not retry automatically")
+	case strings.Contains(result, "budget"):
+		return errors.New("the child reached its spend ceiling; inspect its partial work before raising the budget")
+	case ev.TerminalReason == "aborted_streaming":
+		return errors.New("the child was interrupted before it could report")
+	case ev.Result != "":
+		return fmt.Errorf("the child ended in an error: %s", clip(ev.Result, 200))
+	default:
+		return errors.New("the child ended in an error before it could report")
+	}
 }
 
 // noReportReason explains, in the report itself, why there is no report — the

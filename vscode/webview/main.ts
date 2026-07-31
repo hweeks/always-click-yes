@@ -64,7 +64,13 @@ function start(bootstrap: Bootstrap, root: HTMLElement): void {
       pause: (paused) => act({ kind: 'gatePause', paused }),
       allow: (toolUseId) => act({ kind: 'gateAllow', toolUseId }),
       deny: (toolUseId) => act({ kind: 'gateDeny', toolUseId }),
+      answerAsk: (questionIndex, optionIndices) =>
+        act({ kind: 'askAnswer', questionIndex, optionIndices }),
+      skipAsk: () => act({ kind: 'askSkip' }),
       clearQueue: () => act({ kind: 'queueClear' }),
+      resume: (sessionId) => act({ kind: 'resume', sessionId }),
+      closePicker: () => act({ kind: 'pickerClose' }),
+      sessions: () => transport.sessions(),
     },
     bootstrap.nonce,
   );

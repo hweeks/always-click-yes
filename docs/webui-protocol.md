@@ -460,6 +460,7 @@ not have to model Go's type system to do it.
 | `askAnswer` | `questionIndex`, `optionIndices` | answer the open question |
 | `askSkip` | — | abandon the open question; claude proceeds on its own judgment |
 | `resume` | `sessionId` | restore a prior run — transcript, phase and cost |
+| `pickerClose` | — | Esc: dismiss the `/resume` picker, resuming nothing |
 | `setModel` | `name` | `/model`: the model for the next launched or resumed session |
 | `clear` | — | `/clear`: empty the transcript view (not the conversation) |
 | `done` | `summary` | `/done`: end the run by hand |
@@ -504,6 +505,7 @@ there is one implementation, so there is one wording.
 | `askAnswer` | no question is open; `questionIndex` is not the question currently being asked; `optionIndices` is empty, out of range, or holds more than one option for a single-select question |
 | `askSkip` | no question is open |
 | `resume` | `sessionId` is empty |
+| `pickerClose` | the picker is not open |
 | `setModel` | `name` is empty |
 | `done` | the run is already `COMPLETE` |
 | `clear`, `queueClear`, `quit` | never |

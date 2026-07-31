@@ -128,6 +128,8 @@ func (m *Model) runCommand(name, args string) tea.Cmd {
 		default:
 			m.appendEntry(entry{kind: eWarn, body: "unknown argument " + args + " — /queue or /queue clear"})
 		}
+	case "retry":
+		m.raise(RetryCooldown())
 	case "resume":
 		return m.startResume(args)
 	default:
@@ -302,9 +304,13 @@ func (m *Model) handlePickKey(msg tea.KeyPressMsg) tea.Cmd {
 			m.pickIdx++
 		}
 	case "esc":
-		m.picking = false
-		m.appendEntry(entry{kind: eMeta, body: "resume cancelled"})
+		// The keyboard is a client: closing the picker lives in applyAction, and
+		// the terminal reads the outcome off the screen rather than off the result.
+		_ = m.raise(PickerClose())
 	case "enter":
+		// Not routed through raise, and it cannot be: raise discards the tea.Cmd
+		// applyAction returns, so a resume raised that way would never launch.
+		// pickerClose is safe to route precisely because it produces no command.
 		id := m.sessionList[m.pickIdx].ID
 		m.picking = false
 		return m.resumeSession(id)

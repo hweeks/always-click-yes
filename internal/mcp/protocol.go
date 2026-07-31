@@ -254,7 +254,7 @@ const finishSchema = `{
     },
     "summary": {
       "type": "string",
-      "maxLength": 800,
+      "maxLength": 2000,
       "description": "What the run achieved and what the human should look at first. Name anything you could not verify."
     }
   }
@@ -285,27 +285,28 @@ const FinishRecorded = "Run marked finished. The human has been handed control a
 const DispatchSchema = `{
   "type": "object",
   "additionalProperties": false,
-  "required": ["title", "instruction"],
+  "required": ["title", "instruction", "success"],
   "properties": {
     "title": {
       "type": "string",
-      "maxLength": 60,
+      "maxLength": 120,
       "description": "A few words naming the task, for the human watching. For example: add the token ledger"
     },
     "instruction": {
       "type": "string",
-      "description": "What to do, written to stand alone. The engineer who receives this has the full toolset and no memory of your conversation: they cannot see the plan, the user's messages, or any earlier report. State the change, where it goes, and any constraint that is not obvious from the code."
+      "maxLength": 4000,
+      "description": "One cohesive deliverable, written to stand alone. The engineer has the full toolset and no memory of your conversation: state the change, where it goes, and constraints. Do not bundle independent work; dispatch the next task only after this report returns."
     },
     "context": {
       "type": "array",
       "maxItems": 20,
-      "items": {"type": "string"},
+      "items": {"type": "string", "maxLength": 300},
       "description": "Paths worth reading first. A shortcut, not a restriction — they can read anything."
     },
     "success": {
       "type": "string",
-      "maxLength": 400,
-      "description": "How they will know it worked: the test to run, the behaviour to check. Without this they will decide for themselves what done means."
+      "maxLength": 1000,
+      "description": "A concrete narrow check proving this one deliverable. Without this they will decide for themselves what done means."
     },
     "budget_usd": {
       "type": "number",

@@ -107,7 +107,7 @@
             },
             "childModel": {
               "type": "string",
-              "description": "Model for dispatched tasks; empty means the same as model. Often the biggest saving available, since children do the bulk of the tokens."
+              "description": "Model for dispatched tasks; default sonnet. Often the biggest saving available, since children do the bulk of the tokens."
             },
             "childEffort": {
               "type": "string",
@@ -123,7 +123,12 @@
             "taskBudget": {
               "type": "number",
               "minimum": 0,
-              "description": "Spend ceiling in USD for a single dispatched task (0 = none). A runaway child stops instead of running until you notice."
+              "description": "Spend ceiling in USD for a single dispatched task (0 = unlimited; otherwise acy's $10 default applies)."
+            },
+            "runBudget": {
+              "type": "number",
+              "minimum": 0,
+              "description": "Spend ceiling in USD across all dispatched tasks (0 = unlimited; otherwise acy's $50 default applies)."
             },
             "useApiKey": {
               "type": "boolean",
@@ -139,7 +144,7 @@
     "watch": "node esbuild.mjs --watch",
     "typecheck": "tsc --noEmit && tsc -p webview/tsconfig.json --noEmit",
     "lint": "eslint src webview",
-    "test": "tsc -p tsconfig.test.json && node --test \"out-test/src/test/*.test.js\"",
+    "test": "tsc -p tsconfig.test.json && node --test out-test/src/test/*.test.js",
     "package": "npm run compile && vsce package"
   },
   "devDependencies": {

@@ -120,16 +120,17 @@ type Model struct {
 	// leaves this alone, so an id is never handed out twice in one run.
 	seq int
 
-	sessionID  string
-	model      string
-	mode       string
-	status     string
-	ended      bool
-	planReady  bool
-	logPath    string
-	configPath string // .acy.json this run's settings came from, for the projection
-	maxLines   int
-	renderHTML bool // stamp each entry with its HTML rendering (see Config.RenderHTML)
+	sessionID     string
+	model         string
+	mode          string
+	status        string
+	cooldownUntil time.Time // absolute retry deadline after a Claude 429
+	ended         bool
+	planReady     bool
+	logPath       string
+	configPath    string // .acy.json this run's settings came from, for the projection
+	maxLines      int
+	renderHTML    bool // stamp each entry with its HTML rendering (see Config.RenderHTML)
 
 	// Billing. apiKeySource comes from claude's init event and says which account
 	// actually paid; see billing().
@@ -430,6 +431,13 @@ func (m *Model) ingest(ev driver.Event) {
 			m.status = "ready"
 			m.appendEntry(entry{kind: eMeta, body: fmt.Sprintf(
 				"● session %s · model %s · mode %s", short(ev.SessionID), ev.Model, ev.PermissionMode)})
+		}
+	case driver.TypeRateLimit:
+		if ev.RateLimitInfo != nil && ev.RateLimitInfo.ResetsAt > 0 && ev.RateLimitInfo.Status == "rejected" {
+			until := time.Unix(ev.RateLimitInfo.ResetsAt, 0).Add(5 * time.Minute)
+			m.cooldownUntil = until
+			m.status = "cooling down — resumes " + until.Local().Format("3:04 PM")
+			m.appendEntry(entry{kind: eWarn, body: "Claude rate limit reached — automatic retry is scheduled for " + until.Local().Format(time.Kitchen)})
 		}
 	case driver.TypeAssistant:
 		for _, b := range ev.Message.Blocks() {
