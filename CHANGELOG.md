@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.5.0](https://github.com/hweeks/always-click-yes/compare/v1.4.0...v1.5.0) (2026-07-31)
+
+
+### Features
+
+* add LiteLLM provider gateway ([e31dad7](https://github.com/hweeks/always-click-yes/commit/e31dad73dadf07911f71e7afbe75a8ad4f534409))
+* add LiteLLM provider gateway ([1cb96e2](https://github.com/hweeks/always-click-yes/commit/1cb96e2ff70b130eace4c402ebddf37fea732a70))
+
+
+### Bug Fixes
+
+* check gateway close errors ([83de947](https://github.com/hweeks/always-click-yes/commit/83de947166c8e08cf37b71c4afb1f37162c16a79))
+
 ## [1.4.0](https://github.com/hweeks/always-click-yes/compare/v1.3.0...v1.4.0) (2026-07-31)
 
 
