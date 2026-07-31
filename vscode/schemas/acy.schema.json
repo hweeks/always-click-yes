@@ -50,12 +50,12 @@
     "taskBudget": {
       "type": "number",
       "minimum": 0,
-      "description": "Maximum USD for each dispatched child. Unset = $2; 0 explicitly permits an unlimited child."
+      "description": "Maximum USD for each dispatched child. Unset = $10; 0 explicitly permits an unlimited child."
     },
     "runBudget": {
       "type": "number",
       "minimum": 0,
-      "description": "Maximum USD across all dispatched children. Unset = $10; 0 explicitly permits an unlimited run."
+      "description": "Maximum USD across all dispatched children. Unset = $50; 0 explicitly permits an unlimited run."
     }
   }
 }

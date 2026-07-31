@@ -32,8 +32,8 @@ const maxSnapshots = 200
 // an explicit budget, but a vague dispatch must not consume an entire login
 // window before anyone gets a chance to inspect its first report.
 const (
-	defaultTaskBudgetUSD = 2.0
-	defaultRunBudgetUSD  = 10.0
+	defaultTaskBudgetUSD = 10.0
+	defaultRunBudgetUSD  = 50.0
 )
 
 // Flags configures a supervisor run. Cobra binds the fields it exposes as flags;
@@ -178,8 +178,8 @@ func addRunFlags(cmd *cobra.Command, f *Flags) {
 	cmd.Flags().BoolVar(&f.UseAPIKey, "use-api-key", false, "bill ANTHROPIC_API_KEY instead of the claude.ai login; by default the key is stripped from claude's environment, since headless runs would otherwise use it silently")
 	cmd.Flags().StringVar(&f.ChildModel, "child-model", "", "model for dispatched tasks; empty = same as --model. A cheaper model here is often the single biggest saving, since children do the bulk of the work")
 	cmd.Flags().StringVar(&f.ChildEffort, "child-effort", "", "reasoning effort for dispatched tasks (low, medium, high, xhigh, max); empty = claude's default")
-	cmd.Flags().Float64Var(&f.TaskBudget, "task-budget", defaultTaskBudgetUSD, "spend ceiling in USD for one dispatched task (0 = unlimited; default $2)")
-	cmd.Flags().Float64Var(&f.RunBudget, "run-budget", defaultRunBudgetUSD, "spend ceiling in USD across dispatched tasks (0 = unlimited; default $10)")
+	cmd.Flags().Float64Var(&f.TaskBudget, "task-budget", defaultTaskBudgetUSD, "spend ceiling in USD for one dispatched task (0 = unlimited; default $10)")
+	cmd.Flags().Float64Var(&f.RunBudget, "run-budget", defaultRunBudgetUSD, "spend ceiling in USD across dispatched tasks (0 = unlimited; default $50)")
 	cmd.Flags().StringVar(&f.Resume, "resume", "", "resume a prior acy session by id, restoring its transcript, phase and cost")
 	cmd.Flags().BoolVarP(&f.Continue, "continue", "c", false, "resume the most recent acy session in this directory")
 	cmd.MarkFlagsMutuallyExclusive("resume", "continue")

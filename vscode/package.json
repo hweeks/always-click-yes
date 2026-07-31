@@ -123,12 +123,12 @@
             "taskBudget": {
               "type": "number",
               "minimum": 0,
-              "description": "Spend ceiling in USD for a single dispatched task (0 = unlimited; otherwise acy's $2 default applies)."
+              "description": "Spend ceiling in USD for a single dispatched task (0 = unlimited; otherwise acy's $10 default applies)."
             },
             "runBudget": {
               "type": "number",
               "minimum": 0,
-              "description": "Spend ceiling in USD across all dispatched tasks (0 = none)."
+              "description": "Spend ceiling in USD across all dispatched tasks (0 = unlimited; otherwise acy's $50 default applies)."
             },
             "useApiKey": {
               "type": "boolean",
