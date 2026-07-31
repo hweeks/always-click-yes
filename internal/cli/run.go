@@ -15,6 +15,7 @@ import (
 	"github.com/hweeks/always-click-yes/internal/config"
 	"github.com/hweeks/always-click-yes/internal/driver"
 	"github.com/hweeks/always-click-yes/internal/gate"
+	"github.com/hweeks/always-click-yes/internal/gateway"
 	"github.com/hweeks/always-click-yes/internal/mcp"
 	"github.com/hweeks/always-click-yes/internal/orchestrator"
 	"github.com/hweeks/always-click-yes/internal/session"
@@ -47,6 +48,12 @@ type Flags struct {
 	MaxLines  int
 	PlanTools []string
 	UseAPIKey bool
+	// Provider selects an optional Anthropic-compatible gateway. Hosted
+	// OpenAI-compatible APIs run through a private LiteLLM sidecar; vLLM points
+	// at an already-running local Messages API.
+	Provider   string
+	GatewayBin string
+	GatewayURL string
 
 	// Child knobs. A dispatched child is a different kind of session from the
 	// supervising one — it does the work, unwatched, and then throws its whole
@@ -107,6 +114,15 @@ func applyFileConfig(f *Flags, c config.File, changed func(string) bool) {
 	}
 	if c.UseAPIKey != nil && !changed("use-api-key") {
 		f.UseAPIKey = *c.UseAPIKey
+	}
+	if c.Provider != "" && !changed("provider") {
+		f.Provider = c.Provider
+	}
+	if c.GatewayBin != "" && !changed("gateway-bin") {
+		f.GatewayBin = c.GatewayBin
+	}
+	if c.GatewayURL != "" && !changed("gateway-url") {
+		f.GatewayURL = c.GatewayURL
 	}
 	if c.ChildModel != "" && !changed("child-model") {
 		f.ChildModel = c.ChildModel
@@ -176,6 +192,9 @@ func addRunFlags(cmd *cobra.Command, f *Flags) {
 	cmd.Flags().IntVar(&f.MaxLines, "max-lines", 10, "max lines shown per tool call/result/thinking block in the transcript")
 	cmd.Flags().StringSliceVar(&f.PlanTools, "plan-tools", DefaultParentTools, "the built-in tool registry for the supervising session, in both phases (--tools). This is the registry, not an allowlist: anything left out cannot be called at all, which is what keeps the session you talk to unable to change your code. Dispatched children always get the full set; acy's own mcp__acy__* tools are always available.")
 	cmd.Flags().BoolVar(&f.UseAPIKey, "use-api-key", false, "bill ANTHROPIC_API_KEY instead of the claude.ai login; by default the key is stripped from claude's environment, since headless runs would otherwise use it silently")
+	cmd.Flags().StringVar(&f.Provider, "provider", "anthropic", "model provider: anthropic, openai, cerebras, fireworks, openrouter, or vllm")
+	cmd.Flags().StringVar(&f.GatewayBin, "gateway-bin", "litellm", "LiteLLM binary for hosted non-Anthropic providers")
+	cmd.Flags().StringVar(&f.GatewayURL, "gateway-url", "", "Anthropic Messages endpoint for --provider vllm (default http://127.0.0.1:8000)")
 	cmd.Flags().StringVar(&f.ChildModel, "child-model", "sonnet", "model for dispatched tasks (default sonnet); a cheaper child is often the single biggest saving, since children do the bulk of the work")
 	cmd.Flags().StringVar(&f.ChildEffort, "child-effort", "", "reasoning effort for dispatched tasks (low, medium, high, xhigh, max); empty = claude's default")
 	cmd.Flags().Float64Var(&f.TaskBudget, "task-budget", defaultTaskBudgetUSD, "spend ceiling in USD for one dispatched task (0 = unlimited; default $10)")
@@ -294,6 +313,45 @@ func NewSupervisor(ctx context.Context, f Flags) (*Supervisor, error) {
 	}
 	closers = append(closers, func() { _ = os.RemoveAll(tmp) })
 
+	// A provider gateway is established once for the whole supervisor, not once
+	// per child. LiteLLM alone inherits the real upstream key; every Claude
+	// process receives only a fresh localhost token, so child Bash commands
+	// cannot exfiltrate OPENAI_API_KEY/CEREBRAS_API_KEY/etc.
+	claudeEnv := map[string]string(nil)
+	var stripEnv []string
+	provider := f.Provider
+	if provider == "" {
+		provider = "anthropic"
+	}
+	switch provider {
+	case "anthropic":
+		// Existing claude.ai / ANTHROPIC_API_KEY behaviour is unchanged.
+	case "openai", "cerebras", "fireworks", "openrouter":
+		if f.Model == "" {
+			if model, ok := gateway.DefaultModel(provider); ok {
+				f.Model = model
+			}
+		}
+		if f.ChildModel == "sonnet" {
+			f.ChildModel = f.Model
+		}
+		proxy, startErr := gateway.Start(ctx, tmp, f.GatewayBin, provider, f.Model, childModel(f))
+		if startErr != nil {
+			return fail(startErr)
+		}
+		closers = append(closers, proxy.Close)
+		claudeEnv = map[string]string{"ANTHROPIC_BASE_URL": proxy.URL, "ANTHROPIC_AUTH_TOKEN": proxy.Token}
+		stripEnv = []string{proxy.UpstreamKey}
+	case "vllm":
+		url := f.GatewayURL
+		if url == "" {
+			url = "http://127.0.0.1:8000"
+		}
+		claudeEnv = map[string]string{"ANTHROPIC_BASE_URL": url, "ANTHROPIC_AUTH_TOKEN": "acy-local"}
+	default:
+		return fail(fmt.Errorf("unsupported --provider %q (want anthropic, openai, cerebras, fireworks, openrouter, or vllm)", provider))
+	}
+
 	// Start the gate server, then generate settings that point claude's
 	// PreToolUse hook at it.
 	srv, err := gate.Listen(tmp)
@@ -351,6 +409,8 @@ func NewSupervisor(ctx context.Context, f Flags) (*Supervisor, error) {
 			Cwd:            f.Cwd,
 			Model:          model,
 			UseAPIKey:      f.UseAPIKey,
+			Env:            claudeEnv,
+			StripEnv:       stripEnv,
 			PermissionMode: "default",
 			SettingsPath:   settingsPath,
 			IncludeHooks:   true,
@@ -388,6 +448,8 @@ func NewSupervisor(ctx context.Context, f Flags) (*Supervisor, error) {
 			Cwd:                f.Cwd,
 			Model:              childModel(f),
 			UseAPIKey:          f.UseAPIKey,
+			Env:                claudeEnv,
+			StripEnv:           stripEnv,
 			PermissionMode:     "default",
 			SettingsPath:       settingsPath, // the same gate as the parent
 			IncludeHooks:       true,

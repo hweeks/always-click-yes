@@ -1,0 +1,4 @@
+interface:
+  display_name: "ACY Provider Setup"
+  short_description: "Configure LiteLLM-backed ACY providers"
+  default_prompt: "Use $acy-provider-setup to configure ACY with my model provider."

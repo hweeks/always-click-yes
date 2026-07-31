@@ -29,6 +29,14 @@ type Options struct {
 	AllowedTools   []string // --allowedTools (optional; pre-approves tools)
 	ExtraArgs      []string // any additional raw args
 	UseAPIKey      bool     // bill ANTHROPIC_API_KEY instead of the claude.ai login (see childEnv)
+	// Env overlays variables for the claude process. It is used for an
+	// Anthropic-compatible gateway: claude sees the gateway URL and its local
+	// token, never an upstream provider credential.
+	Env map[string]string
+	// StripEnv removes inherited variables even when they are not Anthropic
+	// credentials. A managed gateway uses this to keep OPENAI_API_KEY and peers
+	// out of a child that may run Bash.
+	StripEnv []string
 
 	// Tools is --tools: the *built-in* tools claude may have at all. Empty means
 	// the full registry. Unlike --allowedTools (which pre-approves tools that
@@ -143,16 +151,28 @@ func NewWithWriter(opts Options, w io.WriteCloser) *Driver {
 // never shows the interactive "use this API key?" prompt, so a key merely present in
 // the shell bills the API account for every run. Strip it unless asked otherwise.
 func (o Options) childEnv() []string {
-	if o.UseAPIKey {
+	if o.UseAPIKey && len(o.Env) == 0 && len(o.StripEnv) == 0 {
 		return nil // nil => inherit the parent environment verbatim
 	}
 	parent := os.Environ()
-	env := make([]string, 0, len(parent))
+	strip := make(map[string]bool, len(o.StripEnv)+1)
+	if !o.UseAPIKey {
+		strip["ANTHROPIC_API_KEY"] = true
+	}
+	for _, name := range o.StripEnv {
+		strip[name] = true
+	}
+	env := make([]string, 0, len(parent)+len(o.Env))
 	for _, kv := range parent {
-		if strings.HasPrefix(kv, "ANTHROPIC_API_KEY=") {
+		name, _, _ := strings.Cut(kv, "=")
+		_, overridden := o.Env[name]
+		if strip[name] || overridden {
 			continue
 		}
 		env = append(env, kv)
+	}
+	for name, value := range o.Env {
+		env = append(env, name+"="+value)
 	}
 	return env
 }
