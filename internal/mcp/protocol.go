@@ -44,6 +44,7 @@ const (
 
 	ToolReadTickets  = "ReadTickets"
 	ToolUpdateTicket = "UpdateTicket"
+	ToolCreateTicket = "CreateTicket"
 )
 
 // Role says which side of the run an `acy mcp` process is serving. It is fixed
@@ -263,6 +264,7 @@ func toolDefs(role Role) []toolDef {
 		toolDef{Name: ToolFleetStatus, Description: fleetStatusDescription, InputSchema: json.RawMessage(fleetStatusSchema)},
 		toolDef{Name: ToolReadTickets, Description: readTicketsDescription, InputSchema: json.RawMessage(readTicketsSchema)},
 		toolDef{Name: ToolUpdateTicket, Description: updateTicketDescription, InputSchema: json.RawMessage(updateTicketSchema)},
+		toolDef{Name: ToolCreateTicket, Description: createTicketDescription, InputSchema: json.RawMessage(createTicketSchema)},
 	)
 }
 
@@ -471,8 +473,43 @@ const FleetUnavailable = "(this session has no fleet configured — .acy.json ha
 // The ticket board is the run's memory: a markdown file per ticket under
 // .acy/tickets, in the repo itself rather than in acy's own state directory,
 // so it survives a resumed run and travels with a clone or a PR diff. These
-// two tools are the architect's only way to read or change it — advertised
+// three tools are the architect's only way to read or change it — advertised
 // for RoleArchitect alone, the same as the fleet tools above.
+
+const createTicketDescription = "Turn the approved plan into the board: one ticket per PR-sized unit of " +
+	"work, called before launching any engineers. The brief becomes the engineer's whole work order — a " +
+	"fresh instance with no memory of this conversation plans its own subtasks from it alone, so write it " +
+	"to stand completely on its own. A new ticket starts as todo."
+
+const createTicketSchema = `{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "title", "brief"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "maxLength": 32,
+      "pattern": "^[a-z0-9-]+$",
+      "description": "A short identifier for this ticket, lowercase letters, digits and dashes only, e.g. \"add-token-ledger\"."
+    },
+    "title": {
+      "type": "string",
+      "maxLength": 120,
+      "description": "A few words naming the task, for the human watching. For example: add the token ledger"
+    },
+    "brief": {
+      "type": "string",
+      "maxLength": 8000,
+      "description": "The full standalone work order. The engineer that eventually takes this ticket has no memory of this conversation and plans its own subtasks from this brief alone — state the change, where it goes, and every constraint that matters."
+    },
+    "depends_on": {
+      "type": "array",
+      "maxItems": 10,
+      "items": {"type": "string"},
+      "description": "Ids of tickets that must merge before this one can start. Optional."
+    }
+  }
+}`
 
 const readTicketsDescription = "The ticket board under .acy/tickets: every ticket with id, title, " +
 	"status, branch, PR, dependencies, and brief. Read it at the start of a run and after every merge."

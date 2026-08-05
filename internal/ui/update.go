@@ -309,6 +309,8 @@ func (m Model) update(msg tea.Msg) (Model, tea.Cmd) {
 			m.startReadTickets(msg.p)
 		case mcp.ToolUpdateTicket:
 			m.startUpdateTicket(msg.p)
+		case mcp.ToolCreateTicket:
+			m.startCreateTicket(msg.p)
 		default:
 			m.openAsk(msg.p)
 		}

@@ -24,6 +24,7 @@ import (
 // FleetManager already does for *fleet.Manager.
 type TicketStore interface {
 	List() ([]tickets.Ticket, error)
+	Put(t tickets.Ticket) error
 	UpdateStatus(id, status, note string) error
 	Commit(ctx context.Context, msg string) error
 }
@@ -126,6 +127,136 @@ func (m *Model) startUpdateTicket(p *mcp.Pending) {
 		return
 	}
 	m.appendEntry(entry{kind: eGood, body: fmt.Sprintf("ticket %s → %s", args.ID, args.Status)})
+}
+
+// --- CreateTicket ---
+
+type createTicketArgs struct {
+	ID        string   `json:"id"`
+	Title     string   `json:"title"`
+	Brief     string   `json:"brief"`
+	DependsOn []string `json:"depends_on"`
+}
+
+// parseCreateTicket decodes a CreateTicket call, strictly: a missing required
+// field names itself rather than silently no-op'ing. The id's shape
+// ([a-z0-9-]+) is left to tickets.Store.Put, which already enforces it.
+func parseCreateTicket(raw json.RawMessage) (createTicketArgs, error) {
+	var a createTicketArgs
+	if len(raw) == 0 {
+		return a, errors.New("no arguments were given")
+	}
+	if err := json.Unmarshal(raw, &a); err != nil {
+		return a, fmt.Errorf("the arguments were not valid JSON: %w", err)
+	}
+	a.ID = strings.TrimSpace(a.ID)
+	a.Title = strings.TrimSpace(a.Title)
+	a.Brief = strings.TrimSpace(a.Brief)
+
+	var missing []string
+	if a.ID == "" {
+		missing = append(missing, "id")
+	}
+	if a.Title == "" {
+		missing = append(missing, "title")
+	}
+	if a.Brief == "" {
+		missing = append(missing, "brief")
+	}
+	if len(missing) > 0 {
+		return a, fmt.Errorf("missing required field(s): %s", strings.Join(missing, ", "))
+	}
+	return a, nil
+}
+
+// startCreateTicket answers a CreateTicket call: refuse a duplicate id, put
+// the new ticket as todo, then commit. A push failure from Commit is not a
+// failure of the call itself — the ticket file already landed locally — so
+// it resolves as success with a note that the human should push, the same
+// semantics as startUpdateTicket.
+func (m *Model) startCreateTicket(p *mcp.Pending) {
+	if m.tickets == nil {
+		p.Resolve(mcp.Answer{Text: mcp.TicketsUnavailable})
+		return
+	}
+	args, err := parseCreateTicket(p.Req.Args)
+	if err != nil {
+		p.Resolve(mcp.Answer{Text: "CreateTicket could not be read: " + err.Error() +
+			". Nothing was created. Fix the arguments and call it again."})
+		return
+	}
+
+	existing, err := m.tickets.List()
+	if err != nil {
+		p.Resolve(mcp.Answer{Text: "CreateTicket failed: " + err.Error()})
+		return
+	}
+	for _, t := range existing {
+		if t.ID == args.ID {
+			p.Resolve(mcp.Answer{Text: fmt.Sprintf(
+				"CreateTicket refused: ticket %q already exists. The board is the memory — updating an "+
+					"existing ticket is UpdateTicket's job, not CreateTicket's.", args.ID)})
+			return
+		}
+	}
+
+	err = m.tickets.Put(tickets.Ticket{
+		ID:        args.ID,
+		Title:     args.Title,
+		Status:    tickets.StatusTodo,
+		Body:      args.Brief,
+		DependsOn: args.DependsOn,
+	})
+	if err != nil {
+		p.Resolve(mcp.Answer{Text: "CreateTicket failed: " + err.Error()})
+		return
+	}
+
+	commitErr := m.tickets.Commit(m.ctx, fmt.Sprintf("ticket %s: created", args.ID))
+	path := ticketFilePath(args.ID, args.Title)
+	switch {
+	case commitErr == nil:
+		p.Resolve(mcp.Answer{Text: fmt.Sprintf("ticket %s created at %s", args.ID, path)})
+	case errors.Is(commitErr, tickets.ErrPushFailed):
+		p.Resolve(mcp.Answer{Text: fmt.Sprintf(
+			"ticket %s created at %s and committed locally, but the push failed — the human should push "+
+				"(a protected main branch rejecting a direct push is normal here, not an error)", args.ID, path)})
+	default:
+		p.Resolve(mcp.Answer{Text: fmt.Sprintf(
+			"ticket %s created at %s, but committing it failed: %s", args.ID, path, commitErr.Error())})
+		return
+	}
+	m.appendEntry(entry{kind: eGood, body: fmt.Sprintf("ticket %s created", args.ID)})
+}
+
+// ticketFilePath names the file CreateTicket just wrote, mirroring
+// tickets.Store's own <id>-<slug>.md convention purely for the confirmation
+// message — Put is what actually decides where the ticket lives.
+func ticketFilePath(id, title string) string {
+	return ".acy/tickets/" + id + "-" + ticketSlugify(title) + ".md"
+}
+
+func ticketSlugify(title string) string {
+	var b strings.Builder
+	dash := false
+	for _, r := range strings.ToLower(title) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+			dash = false
+		case !dash:
+			b.WriteByte('-')
+			dash = true
+		}
+	}
+	slug := strings.Trim(b.String(), "-")
+	if len(slug) > 60 {
+		slug = strings.Trim(slug[:60], "-")
+	}
+	if slug == "" {
+		slug = "ticket"
+	}
+	return slug
 }
 
 // --- rendering ---

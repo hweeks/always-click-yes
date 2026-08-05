@@ -30,7 +30,7 @@ func newMCPCmd() *cobra.Command {
 				switch name {
 				case mcp.ToolAsk, mcp.ToolDispatch,
 					mcp.ToolLaunchEngineer, mcp.ToolAwait, mcp.ToolAnswerEngineer, mcp.ToolFleetStatus,
-					mcp.ToolReadTickets, mcp.ToolUpdateTicket:
+					mcp.ToolReadTickets, mcp.ToolUpdateTicket, mcp.ToolCreateTicket:
 					// All of these block on the supervisor: an ask until a human
 					// answers, a dispatch until a whole child process has run its
 					// task, and the fleet tools until the supervisor's own fleet.go

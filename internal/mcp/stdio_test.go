@@ -152,15 +152,16 @@ func TestParseRoleDefaultsToParent(t *testing.T) {
 }
 
 // An architect gets the parent's four delegation tools, the four fleet tools
-// — LaunchEngineer, Await, AnswerEngineer, FleetStatus — and the two ticket
-// tools — ReadTickets, UpdateTicket — ten in all, and nothing else. Every
-// schema must be valid JSON, or claude silently drops the tool.
-func TestArchitectRoleAdvertisesTenTools(t *testing.T) {
+// — LaunchEngineer, Await, AnswerEngineer, FleetStatus — and the three
+// ticket tools — ReadTickets, UpdateTicket, CreateTicket — eleven in all,
+// and nothing else. Every schema must be valid JSON, or claude silently
+// drops the tool.
+func TestArchitectRoleAdvertisesElevenTools(t *testing.T) {
 	defs := toolDefs(RoleArchitect)
 
 	want := []string{ToolAsk, ToolPlan, ToolDispatch, ToolFinish,
 		ToolLaunchEngineer, ToolAwait, ToolAnswerEngineer, ToolFleetStatus,
-		ToolReadTickets, ToolUpdateTicket}
+		ToolReadTickets, ToolUpdateTicket, ToolCreateTicket}
 	if len(defs) != len(want) {
 		t.Fatalf("toolDefs(RoleArchitect) returned %d tools, want %d: %v", len(defs), len(want), names(defs))
 	}
@@ -229,6 +230,7 @@ func TestNewSchemasRoundTripThroughJSON(t *testing.T) {
 		{ToolFleetStatus, fleetStatusSchema},
 		{ToolReadTickets, readTicketsSchema},
 		{ToolUpdateTicket, updateTicketSchema},
+		{ToolCreateTicket, createTicketSchema},
 	} {
 		var v map[string]any
 		if err := json.Unmarshal([]byte(tc.schema), &v); err != nil {

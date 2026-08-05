@@ -612,6 +612,7 @@ var intercepted = map[string]bool{
 	mcp.ToolFleetStatus:    true,
 	mcp.ToolReadTickets:    true,
 	mcp.ToolUpdateTicket:   true,
+	mcp.ToolCreateTicket:   true,
 }
 
 // baseToolName strips an "mcp__<server>__" prefix so an MCP-provided tool is
@@ -652,7 +653,7 @@ func (m *Model) ingestToolUse(b driver.ContentBlock) {
 		return // rendered by startDispatch, which owns the task
 	case mcp.ToolLaunchEngineer, mcp.ToolAwait, mcp.ToolAnswerEngineer, mcp.ToolFleetStatus:
 		return // rendered when the corresponding Pending resolves — see fleet.go
-	case mcp.ToolReadTickets, mcp.ToolUpdateTicket:
+	case mcp.ToolReadTickets, mcp.ToolUpdateTicket, mcp.ToolCreateTicket:
 		return // rendered when the corresponding Pending resolves — see tickets.go
 	case mcp.ToolFinish:
 		// The run ending, read from the tool call itself. The `acy mcp` child

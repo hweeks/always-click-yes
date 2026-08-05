@@ -23,6 +23,9 @@ type fakeTicketStore struct {
 	list    []tickets.Ticket
 	listErr error
 
+	puts   []tickets.Ticket
+	putErr error
+
 	updates    []ticketUpdateCall
 	updateErr  error
 	commitErr  error
@@ -35,6 +38,13 @@ func (f *fakeTicketStore) List() ([]tickets.Ticket, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.list, f.listErr
+}
+
+func (f *fakeTicketStore) Put(t tickets.Ticket) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.puts = append(f.puts, t)
+	return f.putErr
 }
 
 func (f *fakeTicketStore) UpdateStatus(id, status, note string) error {
@@ -219,6 +229,128 @@ func TestUpdateTicketSurfacesCommitError(t *testing.T) {
 	}
 }
 
+// --- CreateTicket ---
+
+func TestCreateTicketRefusedWithoutStore(t *testing.T) {
+	m := &Model{}
+	p, reply := ticketPending(mcp.ToolCreateTicket, `{"id":"t1","title":"add x","brief":"do the thing"}`)
+	m.startCreateTicket(p)
+	if got := answer(t, reply); got != mcp.TicketsUnavailable {
+		t.Errorf("answer = %q, want mcp.TicketsUnavailable", got)
+	}
+}
+
+// Strict parsing: a missing required field names itself rather than silently
+// no-op'ing, and nothing gets written.
+func TestCreateTicketMissingFieldsRefusesWithoutCreating(t *testing.T) {
+	fake := &fakeTicketStore{}
+	m := &Model{tickets: fake}
+	p, reply := ticketPending(mcp.ToolCreateTicket, `{}`)
+	m.startCreateTicket(p)
+
+	got := answer(t, reply)
+	for _, want := range []string{"id", "title", "brief"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("answer = %q, want it to name the missing field %q", got, want)
+		}
+	}
+	if len(fake.puts) != 0 {
+		t.Error("nothing should have been created with missing fields")
+	}
+}
+
+func TestCreateTicketDuplicateIDRefusesWithoutCreating(t *testing.T) {
+	fake := &fakeTicketStore{list: []tickets.Ticket{{ID: "t1", Title: "existing", Status: tickets.StatusTodo}}}
+	m := &Model{tickets: fake, ctx: context.Background()}
+	p, reply := ticketPending(mcp.ToolCreateTicket, `{"id":"t1","title":"add x","brief":"do the thing"}`)
+	m.startCreateTicket(p)
+
+	got := answer(t, reply)
+	if !strings.Contains(got, "already exists") {
+		t.Errorf("answer = %q, want it to refuse the duplicate id", got)
+	}
+	if len(fake.puts) != 0 {
+		t.Error("nothing should have been created for a duplicate id")
+	}
+	if len(fake.commitMsgs) != 0 {
+		t.Error("a refused create must not still commit")
+	}
+}
+
+func TestCreateTicketCreatesAndCommits(t *testing.T) {
+	fake := &fakeTicketStore{}
+	m := &Model{tickets: fake, ctx: context.Background()}
+	p, reply := ticketPending(mcp.ToolCreateTicket,
+		`{"id":"t1","title":"add x","brief":"do the thing","depends_on":["t0"]}`)
+	m.startCreateTicket(p)
+
+	if len(fake.puts) != 1 {
+		t.Fatalf("want 1 ticket put, got %d", len(fake.puts))
+	}
+	got := fake.puts[0]
+	if got.ID != "t1" || got.Title != "add x" || got.Body != "do the thing" || got.Status != tickets.StatusTodo {
+		t.Errorf("ticket put = %+v", got)
+	}
+	if len(got.DependsOn) != 1 || got.DependsOn[0] != "t0" {
+		t.Errorf("ticket put DependsOn = %v, want [t0]", got.DependsOn)
+	}
+	if len(fake.commitMsgs) != 1 || !strings.Contains(fake.commitMsgs[0], "t1") || !strings.Contains(fake.commitMsgs[0], "created") {
+		t.Fatalf("commit message = %+v, want it to name the ticket and say created", fake.commitMsgs)
+	}
+	if reply2 := answer(t, reply); !strings.Contains(reply2, "t1") {
+		t.Errorf("answer = %q, missing the ticket id", reply2)
+	}
+	if len(m.entries) != 1 {
+		t.Fatalf("want 1 transcript entry, got %d", len(m.entries))
+	}
+}
+
+// A push failure is not a failure of the call: the ticket file and the local
+// commit both already landed. The answer must say so, and must tell the
+// model to have the human push rather than reporting an error.
+func TestCreateTicketPushFailureStillSucceeds(t *testing.T) {
+	fake := &fakeTicketStore{commitErr: fmt.Errorf("%w: exit status 1", tickets.ErrPushFailed)}
+	m := &Model{tickets: fake, ctx: context.Background()}
+	p, reply := ticketPending(mcp.ToolCreateTicket, `{"id":"t1","title":"add x","brief":"do the thing"}`)
+	m.startCreateTicket(p)
+
+	got := answer(t, reply)
+	for _, want := range []string{"t1", "push failed", "human should push"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("answer = %q, missing %q", got, want)
+		}
+	}
+	if len(m.entries) != 1 {
+		t.Fatalf("want 1 transcript entry even though the push failed, got %d", len(m.entries))
+	}
+}
+
+func TestCreateTicketSurfacesPutError(t *testing.T) {
+	fake := &fakeTicketStore{putErr: errors.New(`tickets: invalid id "T1": must match [a-z0-9-]+`)}
+	m := &Model{tickets: fake, ctx: context.Background()}
+	p, reply := ticketPending(mcp.ToolCreateTicket, `{"id":"T1","title":"add x","brief":"do the thing"}`)
+	m.startCreateTicket(p)
+	if got := answer(t, reply); !strings.Contains(got, "must match") {
+		t.Errorf("answer = %q, want the store's error surfaced", got)
+	}
+	if len(fake.commitMsgs) != 0 {
+		t.Error("a failed put must not still commit")
+	}
+}
+
+func TestCreateTicketSurfacesCommitError(t *testing.T) {
+	fake := &fakeTicketStore{commitErr: errors.New("tickets: git commit: exit status 1")}
+	m := &Model{tickets: fake, ctx: context.Background()}
+	p, reply := ticketPending(mcp.ToolCreateTicket, `{"id":"t1","title":"add x","brief":"do the thing"}`)
+	m.startCreateTicket(p)
+	if got := answer(t, reply); !strings.Contains(got, "committing it failed") {
+		t.Errorf("answer = %q, want it to say committing failed (not a push failure)", got)
+	}
+	if len(m.entries) != 0 {
+		t.Error("a non-push commit failure should not append a success transcript entry")
+	}
+}
+
 // --- /tickets ---
 
 func TestTicketsSlashCommandRendersBoard(t *testing.T) {
@@ -249,8 +381,8 @@ func TestTicketsSlashCommandWithoutStore(t *testing.T) {
 
 // --- routing ---
 
-// The ask socket must dispatch both ticket tools through the real askMsg
-// switch, not just through calling the handler directly — mirroring
+// The ask socket must dispatch all three ticket tools through the real
+// askMsg switch, not just through calling the handler directly — mirroring
 // TestAskMsgRoutesFleetTools.
 func TestAskMsgRoutesTicketTools(t *testing.T) {
 	fake := &fakeTicketStore{list: []tickets.Ticket{{ID: "t1", Title: "x", Status: tickets.StatusTodo}}}
@@ -271,13 +403,21 @@ func TestAskMsgRoutesTicketTools(t *testing.T) {
 	if len(fake.updates) != 1 {
 		t.Fatal("askMsg did not route UpdateTicket to startUpdateTicket")
 	}
+
+	p, reply = ticketPending(mcp.ToolCreateTicket, `{"id":"t2","title":"y","brief":"do y"}`)
+	next, _ = m.Update(askMsg{p})
+	m = next.(Model)
+	answer(t, reply)
+	if len(fake.puts) != 1 {
+		t.Fatal("askMsg did not route CreateTicket to startCreateTicket")
+	}
 }
 
 // The PreToolUse hook matches "*", so without this the ticket tools would
 // raise a countdown that ticks invisibly behind the ask-socket answer acy
 // already gave — mirrors TestFleetToolsAreIntercepted.
 func TestTicketToolsAreIntercepted(t *testing.T) {
-	for _, tool := range []string{mcp.ToolReadTickets, mcp.ToolUpdateTicket} {
+	for _, tool := range []string{mcp.ToolReadTickets, mcp.ToolUpdateTicket, mcp.ToolCreateTicket} {
 		t.Run(tool, func(t *testing.T) {
 			m := New(nil, Config{Countdown: 30 * time.Second})
 			m.now = time.Now()
