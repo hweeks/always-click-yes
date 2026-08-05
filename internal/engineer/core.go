@@ -278,11 +278,19 @@ func (c *Core) exitReason(ctx context.Context) string {
 // briefText is the one message the engineer opens with: the whole of what it
 // tells claude about the job, plus the instruction to plan and then wait to
 // be armed.
+//
+// It also says, explicitly, not to push the branch or open a PR: drive (see
+// gitops.Push / gitops.CreatePR above) does both automatically once Finish is
+// called. Without this line a capable child reaches for `gh pr create` on its
+// own initiative — standard PR etiquette for a coding agent — and drive's own
+// PR ends up a duplicate.
 func briefText(spec engineerwire.Spec) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Ticket: %s\nTitle: %s\n\n%s\n\nSuccess criteria:\n%s\n\n",
 		spec.Ticket, spec.Title, spec.Brief, spec.Success)
-	b.WriteString("Plan briefly, then wait; the run will be armed for you.")
+	b.WriteString("Plan briefly, then wait; the run will be armed for you. Commit your work locally, " +
+		"but do not push the branch or open a pull request yourself: pushing and opening the PR happen " +
+		"automatically once you call Finish.")
 	return b.String()
 }
 
