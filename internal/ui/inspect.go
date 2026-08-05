@@ -56,6 +56,22 @@ func (m Model) FinishOutcome() string { return m.finishOutcome }
 // FinishSummary is the summary that came with FinishOutcome.
 func (m Model) FinishSummary() string { return m.finishSummary }
 
+// Busy reports whether the session has a turn, a gate, or a dispatched task in
+// flight — see busy().
+func (m Model) Busy() bool { return m.busy() }
+
+// Processing reports whether a turn is in flight right now, as opposed to a
+// gate or a dispatched task holding the session busy.
+func (m Model) Processing() bool { return m.processing }
+
+// GrandTotalCost is everything this run has spent, parent and child processes
+// combined — see grandTotalCost().
+func (m Model) GrandTotalCost() float64 { return m.grandTotalCost() }
+
+// Tasks is the delegated-task ledger, oldest first. Copied, so a caller cannot
+// mutate the model's own backing slice.
+func (m Model) Tasks() []state.Task { return append([]state.Task(nil), m.tasks...) }
+
 // StopDriver kills the claude process without any of the tidying a clean exit would
 // do. It is how the e2e suite simulates the crash a resume has to recover from.
 func (m *Model) StopDriver() {
