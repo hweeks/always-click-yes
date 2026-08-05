@@ -69,6 +69,18 @@ type Flags struct {
 	Cwd     string // working directory for claude; "" = acy's own
 	HookBin string // binary the PreToolUse hook re-invokes; "" = this executable
 
+	// Fleet wires arch mode's remote engineers into the parent session (nil =
+	// today's behavior: the fleet tools are refused with mcp.FleetUnavailable).
+	// acy arch is the only caller that sets this — it builds a fleet.Manager
+	// from the project's fleet config before calling NewSupervisor.
+	Fleet ui.FleetManager
+
+	// ArchMode runs the parent session as the architect (mcp.RoleArchitect,
+	// ui.ArchSystemPrompt) instead of the default parent (mcp.RoleParent,
+	// ui.ParentSystemPrompt). False in every existing caller, so run/serve are
+	// unchanged.
+	ArchMode bool
+
 	// ConfigPath is the .acy.json the settings were overlaid from, "" if none.
 	// Not a flag: runSupervisor stamps it so the UI can say where its settings
 	// came from.
@@ -170,6 +182,17 @@ func childModel(f Flags) string {
 		return f.ChildModel
 	}
 	return f.Model
+}
+
+// roleAndPrompt picks the parent session's MCP role and appended system
+// prompt. archMode is the only fork: everything else about the parent —
+// tools, hooks, the gate — stays identical between the two, which is what
+// lets a child never see the difference (it is always RoleChild).
+func roleAndPrompt(archMode bool) (mcp.Role, string) {
+	if archMode {
+		return mcp.RoleArchitect, ui.ArchSystemPrompt
+	}
+	return mcp.RoleParent, ui.ParentSystemPrompt
 }
 
 // resumeTarget resolves the session the run should restore, or "" for a cold start.
@@ -356,8 +379,11 @@ func NewSupervisor(ctx context.Context, f Flags) (*Supervisor, error) {
 	// Two configs, differing only in --role. A child is launched with the child
 	// one, so it never sees Dispatch: without that split it would inherit the
 	// parent's config, gain the ability to delegate, and spawn an unbounded tree
-	// of unsupervised processes.
-	mcpConfigPath, err := config.WriteMCPConfig(tmp, exe, bridge.SocketPath(), mcp.RoleParent)
+	// of unsupervised processes. The parent's own role varies with ArchMode —
+	// RoleArchitect gains the fleet tools, RoleChild never does — but a child is
+	// always RoleChild regardless, so it never sees them either.
+	parentRole, parentPrompt := roleAndPrompt(f.ArchMode)
+	mcpConfigPath, err := config.WriteMCPConfig(tmp, exe, bridge.SocketPath(), parentRole)
 	if err != nil {
 		return fail(fmt.Errorf("write mcp config: %w", err))
 	}
@@ -399,7 +425,7 @@ func NewSupervisor(ctx context.Context, f Flags) (*Supervisor, error) {
 		// what claude is: the supervising session can only ever read, and the
 		// work is done by children it dispatches.
 		opts.Tools = f.PlanTools
-		opts.AppendSystemPrompt = ui.ParentSystemPrompt
+		opts.AppendSystemPrompt = parentPrompt
 		// Only acy's MCP server: one from the user's own config would put tools
 		// straight back into the registry that --tools was chosen to keep out.
 		opts.StrictMCP = true
@@ -517,6 +543,7 @@ func NewSupervisor(ctx context.Context, f Flags) (*Supervisor, error) {
 		AltScreen:  f.AltScreen,
 		Resume:     resumeID,
 		Dispatcher: orch,
+		Fleet:      f.Fleet,
 		LoadState:  state.Load,
 		SaveState:  state.Save,
 		Replay:     func(id string) ([]driver.Event, error) { return session.Replay(cwd, id) },

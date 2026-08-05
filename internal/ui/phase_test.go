@@ -226,6 +226,36 @@ func TestArmFlipsPhaseInPlace(t *testing.T) {
 	}
 }
 
+// kickoffPrompt's "dispatch the work one task at a time" names the wrong tool
+// once the session has a fleet: TestArmFlipsPhaseInPlace already proves a
+// fleet-less run still gets that wording, so this covers the fork itself.
+func TestKickoffPromptForFleet(t *testing.T) {
+	if kickoffPromptFor(false) != kickoffPrompt {
+		t.Errorf("kickoffPromptFor(false) should be the local-dispatch prompt")
+	}
+	if kickoffPromptFor(true) != archKickoffPrompt {
+		t.Errorf("kickoffPromptFor(true) should be the fleet prompt")
+	}
+	if kickoffPromptFor(true) == kickoffPromptFor(false) {
+		t.Error("the two kickoff prompts must not be identical")
+	}
+}
+
+// Arming a session with a fleet wired sends the fleet kickoff, not the local
+// one — the same fork proven in isolation by TestKickoffPromptForFleet, now
+// through arm() itself.
+func TestArmWithAFleetSendsTheFleetKickoff(t *testing.T) {
+	m := New(nil, Config{Countdown: 30 * time.Second, Fleet: newFakeFleetManager()})
+	m.sessionID = "s1"
+	m.drv = driver.NewWithWriter(driver.Options{}, nopCloser{&strings.Builder{}})
+
+	m.arm()
+
+	if lastBody(&m) != archKickoffPrompt {
+		t.Errorf("arm() with a fleet sent %q, want the fleet kickoff prompt", lastBody(&m))
+	}
+}
+
 func TestCapturePlanFallsBackToTheLastAssistantTurn(t *testing.T) {
 	m := New(nil, Config{})
 	m.turnText = "  the plan, as prose  "

@@ -302,6 +302,48 @@ unknown key, a bare-number duration, or malformed JSON aborts the run rather
 than silently falling back to defaults the project tried to override. The
 transcript's opening lines say which file the settings came from.
 
+## Arch mode (experimental)
+
+`acy arch` is `acy run` for a whole fleet of machines instead of one checkout.
+The parent session becomes the **architect**: it still only reads the
+codebase (`Read`/`Grep`/`Glob`), but once armed it delegates whole tickets to
+**engineers** — full `acy` instances running unattended on the hosts your
+fleet config names — instead of local children. Each engineer plans its own
+subtasks in its own git worktree and finishes by opening a PR; the architect's
+loop is launch up to capacity, `Await` the next event, react, repeat.
+
+It requires a `"fleet"` section in `.acy.json`:
+
+```json
+{
+  "fleet": {
+    "baseBranch": "main",
+    "engineerModel": "sonnet",
+    "engineerBudgetUSD": 15,
+    "hosts": [
+      { "name": "local" },
+      { "name": "box2", "ssh": "you@box2.example.com", "repoPath": "/home/you/proj", "maxEngineers": 2 }
+    ]
+  }
+}
+```
+
+A host with no `ssh` runs engineers on this machine; anything else reaches the
+target over ssh. Check every configured host before trusting a run to it:
+
+```sh
+acy fleet doctor           # ssh, acy, claude, gh, git and state-dir health, per host
+acy arch                   # plan, arm, and the fleet takes it from there
+```
+
+**Read this before pointing it at real hosts.** An engineer is an unattended
+agent with `Bash` on whatever machine it runs, auto-approving its own tool
+calls on the same countdown `acy run` uses — nothing is watching it between
+launch and its result or a question. Only point `hosts` at machines and repos
+you'd trust an unsupervised process on, and reach them with **key-only SSH in
+`BatchMode`** — no interactive password or host-key prompt an engineer could
+get stuck behind unattended.
+
 ## Local development
 
 Working on `acy` itself? The Makefile keeps the dogfood loop one command away:
