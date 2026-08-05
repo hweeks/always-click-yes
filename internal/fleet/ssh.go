@@ -27,8 +27,8 @@ func NewSSHTransport(target, acyBin, clonePath string) Transport {
 	return &sshTransport{target: target, acyBin: acyBin, clonePath: clonePath}
 }
 
-// sshArgs wraps engineerArgs (an `acy engineer ...` argv) as a
-// non-interactive ssh invocation.
+// sshBatchArgs is the non-interactive ssh preamble shared by every command
+// this package sends to target, engineer argv or otherwise.
 //
 // BatchMode=yes is not negotiable: an unattended fleet run has nobody at a
 // terminal to answer a password or host-key prompt, so a broken key or an
@@ -38,15 +38,20 @@ func NewSSHTransport(target, acyBin, clonePath string) Transport {
 // for hours, and a dead connection has to be *detected*, not just eventually
 // time out on its own schedule, so Follow's reattach loop gets a chance to
 // run.
-func sshArgs(target, acyBin string, engineerArgs []string) []string {
-	args := []string{
+func sshBatchArgs(target string) []string {
+	return []string{
 		"-o", "BatchMode=yes",
 		"-o", "ServerAliveInterval=15",
 		"-o", "ServerAliveCountMax=4",
 		target,
 		"--",
-		acyBin,
 	}
+}
+
+// sshArgs wraps engineerArgs (an `acy engineer ...` argv) as a
+// non-interactive ssh invocation.
+func sshArgs(target, acyBin string, engineerArgs []string) []string {
+	args := append(sshBatchArgs(target), acyBin)
 	return append(args, engineerArgs...)
 }
 
