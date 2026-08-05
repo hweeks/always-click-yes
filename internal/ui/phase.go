@@ -373,6 +373,8 @@ func (m *Model) finish(outcome, summary string) {
 		return
 	}
 	m.phase = PhaseComplete
+	m.finishOutcome = outcome
+	m.finishSummary = summary
 	m.status = "complete — vet the work below"
 	if outcome == "abandoned" {
 		m.status = "abandoned — see the summary below"

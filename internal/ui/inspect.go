@@ -49,6 +49,13 @@ func (m Model) PendingGates() int { return len(m.pending) }
 // PlanBody is the approved plan the run was armed with.
 func (m Model) PlanBody() string { return m.planBody }
 
+// FinishOutcome is "completed" or "abandoned", set once the session calls
+// Finish; empty before then.
+func (m Model) FinishOutcome() string { return m.finishOutcome }
+
+// FinishSummary is the summary that came with FinishOutcome.
+func (m Model) FinishSummary() string { return m.finishSummary }
+
 // StopDriver kills the claude process without any of the tidying a clean exit would
 // do. It is how the e2e suite simulates the crash a resume has to recover from.
 func (m *Model) StopDriver() {

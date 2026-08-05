@@ -41,6 +41,12 @@ func TestFinishToolEndsTheRun(t *testing.T) {
 	if !strings.Contains(lastBody(&m), "Added the ledger") {
 		t.Errorf("the summary should reach the transcript, got %q", lastBody(&m))
 	}
+	if m.FinishOutcome() != "completed" {
+		t.Errorf("FinishOutcome() = %q, want %q", m.FinishOutcome(), "completed")
+	}
+	if m.FinishSummary() != "Added the ledger and verified it." {
+		t.Errorf("FinishSummary() = %q", m.FinishSummary())
+	}
 }
 
 func TestFinishAbandonedIsStillTerminal(t *testing.T) {

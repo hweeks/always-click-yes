@@ -87,6 +87,12 @@ type Flags struct {
 	// option, so the decision has to travel all the way into the model — and a
 	// headless caller (the e2e harness) leaves it alone by leaving it false.
 	AltScreen bool
+
+	// InterceptAsk, when set, is offered every AskUserQuestion request before
+	// the UI sees it. Return true to take ownership (the interceptor must
+	// eventually Resolve or Abandon the Pending); false forwards it to the
+	// model's picker as usual. Non-Ask tools are never offered.
+	InterceptAsk func(p *mcp.Pending) bool
 }
 
 // applyFileConfig overlays a .acy.json onto the flags. Precedence is
@@ -197,6 +203,25 @@ func resumeTarget(f Flags, cwd string) (string, error) {
 		return id, nil //nolint:nilerr // an unreadable snapshot is no reason not to try the id
 	}
 	return resolved, nil
+}
+
+// filterAskReqs wraps a bridge's request stream so an interceptor gets first
+// look at every AskUserQuestion. A request the interceptor claims (returns
+// true) never reaches the returned channel — the interceptor now owns
+// resolving or abandoning it. Everything else, including a declined Ask,
+// forwards unchanged. The returned channel closes once in does.
+func filterAskReqs(in <-chan *mcp.Pending, intercept func(p *mcp.Pending) bool) <-chan *mcp.Pending {
+	out := make(chan *mcp.Pending)
+	go func() {
+		defer close(out)
+		for p := range in {
+			if p.Req.Tool == mcp.ToolAsk && intercept(p) {
+				continue
+			}
+			out <- p
+		}
+	}()
+	return out
 }
 
 // Supervisor is a fully wired supervisor: the TUI model, and the resources it owns
@@ -470,11 +495,19 @@ func NewSupervisor(ctx context.Context, f Flags) (*Supervisor, error) {
 	// same list of resumable sessions, from the same cwd.
 	sessions := func() ([]session.Info, error) { return session.List(cwd) }
 
+	// Wiring stays exactly as before when no interceptor is set — no extra
+	// goroutine, no channel copy — so a future headless engineer runtime is the
+	// only caller that pays for this.
+	askReqs := bridge.Requests()
+	if f.InterceptAsk != nil {
+		askReqs = filterAskReqs(askReqs, f.InterceptAsk)
+	}
+
 	model := ui.New(nil, ui.Config{
 		Ctx:        ctx,
 		Launcher:   launcher,
 		GateReqs:   srv.Requests(),
-		AskReqs:    bridge.Requests(),
+		AskReqs:    askReqs,
 		Countdown:  f.Countdown,
 		LogPath:    logPath,
 		ConfigPath: f.ConfigPath,

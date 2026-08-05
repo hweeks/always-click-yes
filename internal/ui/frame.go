@@ -72,6 +72,13 @@ type Frame struct {
 	LogPath    string `json:"logPath"`
 	ConfigPath string `json:"configPath"`
 	Cwd        string `json:"cwd"`
+
+	// FinishOutcome and FinishSummary are set once the session calls Finish —
+	// "completed" or "abandoned", and the summary it gave. Both are omitted
+	// before then, so a client can tell "not finished" from "finished with an
+	// empty summary".
+	FinishOutcome string `json:"finishOutcome,omitempty"`
+	FinishSummary string `json:"finishSummary,omitempty"`
 }
 
 // Cost splits the bill by who spent it. Parent is every claude process this
@@ -275,6 +282,9 @@ func (m Model) Frame() Frame {
 		LogPath:    m.logPath,
 		ConfigPath: m.configPath,
 		Cwd:        m.cwd,
+
+		FinishOutcome: m.finishOutcome,
+		FinishSummary: m.finishSummary,
 	}
 }
 

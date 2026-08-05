@@ -154,6 +154,28 @@ func TestApplyResumeRestoresRunState(t *testing.T) {
 	}
 }
 
+// A finished run's outcome and summary must survive a restart, exactly as
+// PlanBody does — a resumed run comes back knowing how it ended, not just that
+// it did.
+func TestApplyResumeRestoresFinishOutcome(t *testing.T) {
+	snap := state.Snapshot{
+		SessionID:     "sess-1",
+		Phase:         "COMPLETE",
+		FinishOutcome: "abandoned",
+		FinishSummary: "the dependency broke upstream",
+	}
+	m, _ := resumeModel(t, snap, true, nil)
+
+	m.applyResume(resumeMsg{id: "sess-1", snap: snap, hasSnap: true})
+
+	if m.FinishOutcome() != "abandoned" {
+		t.Errorf("FinishOutcome() = %q, want %q", m.FinishOutcome(), "abandoned")
+	}
+	if m.FinishSummary() != "the dependency broke upstream" {
+		t.Errorf("FinishSummary() = %q", m.FinishSummary())
+	}
+}
+
 // A session acy never supervised still resumes — you just get the conversation
 // back, in a plan session, with no state to restore.
 func TestApplyResumeWithoutSnapshotDegradesToPlan(t *testing.T) {
@@ -238,6 +260,8 @@ func TestPersistWritesWhatResumeNeeds(t *testing.T) {
 	m.sessionID = "sess-9"
 	m.phase = PhaseAutoRun
 	m.planBody = "plan text"
+	m.finishOutcome = "completed"
+	m.finishSummary = "done"
 	m.dispatches = 2
 	m.costSettled = 1.0
 	m.costCurrent = 0.5
@@ -253,6 +277,9 @@ func TestPersistWritesWhatResumeNeeds(t *testing.T) {
 	}
 	if got.Dispatches != 2 || got.PlanBody != "plan text" || got.Cwd != "/proj" {
 		t.Errorf("snapshot = %+v", got)
+	}
+	if got.FinishOutcome != "completed" || got.FinishSummary != "done" {
+		t.Errorf("finish outcome/summary = %q/%q, want completed/done", got.FinishOutcome, got.FinishSummary)
 	}
 	// The running session's spend must be banked: on resume its process starts over
 	// at zero, so anything not settled here is lost.

@@ -104,6 +104,12 @@ type Snapshot struct {
 	// the run is resumed.
 	PlanBody string `json:"plan_body,omitempty"`
 
+	// FinishOutcome and FinishSummary are set once the session calls Finish —
+	// "completed" or "abandoned", and the summary it gave — so a resumed run
+	// still knows how it ended.
+	FinishOutcome string `json:"finish_outcome,omitempty"`
+	FinishSummary string `json:"finish_summary,omitempty"`
+
 	// Rounds counted auto-nudges of the completion loop, which no longer exists
 	// — a run now ends when the session calls Finish. Kept so that snapshots
 	// written by older builds still decode, and so their /resume rows still say

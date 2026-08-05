@@ -97,6 +97,8 @@ func (m *Model) applyResume(msg resumeMsg) tea.Cmd {
 	m.entries = nil
 	m.turnText = ""
 	m.planBody = ""
+	m.finishOutcome = ""
+	m.finishSummary = ""
 	m.costSettled = 0
 	m.costCurrent = 0
 	m.parentTokens = state.Tokens{}
@@ -115,6 +117,8 @@ func (m *Model) applyResume(msg resumeMsg) tea.Cmd {
 	phase := PhasePlan
 	if msg.hasSnap {
 		m.planBody = msg.snap.PlanBody
+		m.finishOutcome = msg.snap.FinishOutcome
+		m.finishSummary = msg.snap.FinishSummary
 		m.costSettled = msg.snap.CostSettled // a resumed process restarts its own total at zero
 		// Tokens carry over verbatim: they were counted per turn, so there is no
 		// per-process figure to reconcile — only a tally to keep going.
@@ -305,11 +309,15 @@ func parsePhase(s string) Phase {
 // snapshot is acy's current state, in the form that survives a restart.
 func (m *Model) snapshot() state.Snapshot {
 	return state.Snapshot{
-		SessionID:   m.sessionID,
-		Cwd:         m.cwd,
-		Phase:       m.phase.String(),
-		Model:       m.model,
-		PlanBody:    m.planBody,
+		SessionID: m.sessionID,
+		Cwd:       m.cwd,
+		Phase:     m.phase.String(),
+		Model:     m.model,
+		PlanBody:  m.planBody,
+
+		FinishOutcome: m.finishOutcome,
+		FinishSummary: m.finishSummary,
+
 		CostSettled: m.totalCost(), // bank the running session too: on resume it restarts at zero
 
 		ParentTokens: m.parentTokens,

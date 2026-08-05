@@ -242,8 +242,13 @@ had the token, which was printed to the process that launched acy.
 | `logPath` | string | the debug log, if one is open |
 | `configPath` | string | the `.acy.json` this run's settings came from |
 | `cwd` | string | the project this run belongs to |
+| `finishOutcome` | string | `"completed"` or `"abandoned"`, once the session calls Finish; omitted before then |
+| `finishSummary` | string | the summary that came with `finishOutcome`; omitted before then |
 
-Every list field is always an array, never `null`.
+Every list field is always an array, never `null`. `finishOutcome` and
+`finishSummary` are `omitempty` rather than empty strings, so a client can tell
+"not finished yet" from "finished with nothing to say" — check for the field's
+presence, not just its value.
 
 ### `Hint`
 

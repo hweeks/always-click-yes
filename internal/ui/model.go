@@ -212,16 +212,18 @@ type Model struct {
 	queued []string
 
 	// phase machine
-	ctx         context.Context
-	launcher    Launcher
-	phase       Phase
-	gen         int       // current driver generation
-	turnText    string    // assistant text accumulated for the current turn
-	planBody    string    // approved plan text, captured at ExitPlanMode
-	processing  bool      // a turn is in flight (model working)
-	interrupted bool      // user interrupted the current turn; don't auto-nudge
-	spinFrame   int       // advances every tick to animate the "working…" spinner
-	turnStart   time.Time // when the in-flight turn began, for the elapsed display
+	ctx           context.Context
+	launcher      Launcher
+	phase         Phase
+	gen           int       // current driver generation
+	turnText      string    // assistant text accumulated for the current turn
+	planBody      string    // approved plan text, captured at ExitPlanMode
+	finishOutcome string    // "completed" | "abandoned", set once the session calls Finish
+	finishSummary string    // the summary that came with it
+	processing    bool      // a turn is in flight (model working)
+	interrupted   bool      // user interrupted the current turn; don't auto-nudge
+	spinFrame     int       // advances every tick to animate the "working…" spinner
+	turnStart     time.Time // when the in-flight turn began, for the elapsed display
 }
 
 // New builds the initial model bound to a started driver.
