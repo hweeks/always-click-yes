@@ -31,9 +31,9 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/hweeks/always-click-yes/internal/cli"
 	"github.com/hweeks/always-click-yes/internal/hub"
 	"github.com/hweeks/always-click-yes/internal/state"
+	"github.com/hweeks/always-click-yes/internal/supervisor"
 	"github.com/hweeks/always-click-yes/internal/ui"
 )
 
@@ -74,7 +74,7 @@ var acyBinary = sync.OnceValues(func() (string, error) {
 // harness is one supervised run, driven without a terminal.
 type harness struct {
 	t   *testing.T
-	sup *cli.Supervisor
+	sup *supervisor.Supervisor
 	hub *hub.Hub
 
 	// crashed makes crash idempotent: a test that kills a run and then hits a
@@ -121,18 +121,18 @@ func newHarness(t *testing.T, opt options) *harness {
 		opt.Countdown = 2 * time.Second // long enough to veto in a test, short enough not to bore one
 	}
 	// An empty --tools list means the FULL registry, not the default one, so the
-	// default has to be applied here: the harness builds cli.Flags directly and
-	// never sees cobra's flag defaults. Getting this wrong would hand the
+	// default has to be applied here: the harness builds supervisor.Flags directly
+	// and never sees cobra's flag defaults. Getting this wrong would hand the
 	// supervising session Write and Edit and quietly invalidate every test that
 	// asserts it delegates.
 	if opt.ParentTools == nil {
-		opt.ParentTools = cli.DefaultParentTools
+		opt.ParentTools = supervisor.DefaultParentTools
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	sup, err := cli.NewSupervisor(ctx, cli.Flags{
+	sup, err := supervisor.NewSupervisor(ctx, supervisor.Flags{
 		Bin:       "claude",
 		Cwd:       opt.Cwd,
 		HookBin:   bin,

@@ -1,4 +1,4 @@
-package cli
+package supervisor
 
 import (
 	"reflect"
@@ -35,8 +35,8 @@ func defaultFlags() Flags {
 		MaxLines:   10,
 		PlanTools:  DefaultParentTools,
 		ChildModel: "sonnet",
-		TaskBudget: defaultTaskBudgetUSD,
-		RunBudget:  defaultRunBudgetUSD,
+		TaskBudget: DefaultTaskBudgetUSD,
+		RunBudget:  DefaultRunBudgetUSD,
 	}
 }
 
