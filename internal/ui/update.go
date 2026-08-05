@@ -262,6 +262,7 @@ func (m Model) update(msg tea.Msg) (Model, tea.Cmd) {
 		m.status = "session ended"
 		// Nothing is left to answer, and an open panel would swallow every key.
 		m.abandonAsk()
+		m.abandonFleetAwait()
 		m.appendEntry(entry{kind: eTurn, body: "──── session ended ────"})
 		// Whatever was still queued will never be sent now; say so rather than
 		// dropping it silently, which is the bug the queue exists to fix.
@@ -288,15 +289,36 @@ func (m Model) update(msg tea.Msg) (Model, tea.Cmd) {
 		return m, nil
 
 	case askMsg:
-		// One socket, two very different waits: a question blocks on a human, a
-		// dispatch blocks on a whole child process running a task.
-		if msg.p.Req.Tool == mcp.ToolDispatch {
+		// One socket, several different waits: a question blocks on a human, a
+		// dispatch blocks on a whole local child process running a task, and the
+		// fleet tools block on a remote engineer or on the fleet's own event
+		// stream (Await).
+		switch msg.p.Req.Tool {
+		case mcp.ToolDispatch:
 			m.startDispatch(msg.p)
-		} else {
+		case mcp.ToolLaunchEngineer:
+			m.startLaunchEngineer(msg.p)
+		case mcp.ToolAwait:
+			m.startAwait(msg.p)
+		case mcp.ToolAnswerEngineer:
+			m.startAnswerEngineer(msg.p)
+		case mcp.ToolFleetStatus:
+			m.startFleetStatus(msg.p)
+		default:
 			m.openAsk(msg.p)
 		}
 		m.rebuild()
 		cmds = append(cmds, waitAsk(m.askReqs))
+
+	case fleetMsg:
+		m.ingestFleet(msg.ev)
+		// A fleet event can be the last thing holding the queue, the same reason
+		// childMsg flushes: nothing else is guaranteed to arrive after it.
+		m.flushQueue()
+		m.rebuild()
+		if m.fleet != nil {
+			cmds = append(cmds, waitFleet(m.fleet.Events()))
+		}
 
 	case childMsg:
 		m.ingestChild(msg.ev)

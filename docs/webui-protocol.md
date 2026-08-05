@@ -238,6 +238,8 @@ had the token, which was printed to the process that launched acy.
 | `ask` | `Ask` or null | the question claude is blocked on |
 | `tasks` | `Task[]` | the delegated-task ledger, oldest first |
 | `picker` | `SessionRow[]` | the `/resume` rows; empty unless `picking` |
+| `engineers` | `Engineer[]` | the architect's fleet ledger, oldest first; empty for a session with no fleet wired |
+| `fleet` | `FleetSummary` | `{active, capacityUsed, capacityTotal}` across the fleet's hosts; all zero with no fleet wired |
 | `interruptedTasks` | string[] | tasks a restart caught mid-flight |
 | `logPath` | string | the debug log, if one is open |
 | `configPath` | string | the `.acy.json` this run's settings came from |
@@ -426,6 +428,35 @@ and the later ones are not being asked yet.
 
 `running` matters: a running task's blank `outcome` and zero `cost` are "not in
 yet", not "finished badly", and only this field tells the two apart.
+
+### `Engineer` and `FleetSummary`
+
+An architect session (`--role architect`) delegates whole tickets to remote
+engineers — each a fresh acy run on its own machine, in its own worktree —
+rather than editing code itself. `engineers` is that ledger, and `fleet` is
+capacity across the hosts it runs on.
+
+| field (`Engineer`) | type | meaning |
+|---|---|---|
+| `id` | string | the engineer's id (`e1`, `e2`, …) |
+| `ticket` | string | the ticket key it was launched with |
+| `title` | string | a few words naming the task |
+| `host` | string | which fleet host it is running on |
+| `state` | string | `launching`, `running`, `done`, `failed` or `cancelled` |
+| `outcome` | string | how it ended; empty while `state` is not yet terminal |
+| `prUrl` | string | the PR it opened, once it has one |
+| `costUsd` | float | USD |
+| `branch` | string | the branch it is working on |
+
+| field (`FleetSummary`) | type | meaning |
+|---|---|---|
+| `active` | int | engineers currently `launching` or `running` |
+| `capacityUsed` | int | host slots in use across every host |
+| `capacityTotal` | int | host slots that exist in total |
+
+Both are empty/zero for a session with no fleet configured — `.acy.json` has
+no `fleet` section, or acy was not started in architect mode — which is not an
+error, the same way an empty `tasks` ledger is not one.
 
 ### `SessionRow`
 

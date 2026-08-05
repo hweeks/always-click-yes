@@ -11,6 +11,7 @@
 [38;5;215m  /log[m  [38;5;244mshow the debug-log path[m                                                                     
 [38;5;215m  /tokens[m  [38;5;244mtoken ledger: context size, cache reads and cost by spender[m                              
 [38;5;215m  /tasks[m  [38;5;244mdelegated-task ledger: outcome, cost and cache reads per task[m                             
+[38;5;215m  /fleet[m  [38;5;244mthe architect's engineer ledger: state, host, outcome and cost per engineer[m               
 [38;5;215m  /done[m  [38;5;244mend the run by hand, if the session stopped without calling Finish[m                         
 [38;5;215m  /quit[m  [38;5;244mquit (same as Ctrl+C)[m                                                                      
                                                                                                     

@@ -314,6 +314,7 @@ func (m *Model) onDriverReady(msg driverReadyMsg) tea.Cmd {
 	// anyway rather than dropping it, and take the panel down before it starts
 	// eating keystrokes meant for the new session.
 	m.abandonAsk()
+	m.abandonFleetAwait()
 	alog.Printf("phase: %s (gen=%d)", msg.phase, m.gen)
 
 	cmds := []tea.Cmd{waitEvent(m.drv.Events(), m.gen)}

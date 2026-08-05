@@ -65,6 +65,12 @@ type Frame struct {
 	Tasks   []Task       `json:"tasks"`
 	Picker  []SessionRow `json:"picker"` // the /resume rows; empty unless Picking
 
+	// Engineers is the architect's fleet ledger, oldest first; empty for a
+	// session with no fleet wired. Fleet is capacity across the fleet's hosts —
+	// zero/zero for the same reason.
+	Engineers []Engineer   `json:"engineers"`
+	Fleet     FleetSummary `json:"fleet"`
+
 	// InterruptedTasks names the tasks a restart caught mid-flight, so a client
 	// can say what a resumed run may have left half-done.
 	InterruptedTasks []string `json:"interruptedTasks"`
@@ -195,6 +201,28 @@ type Task struct {
 	Running bool `json:"running"`
 }
 
+// Engineer is one remote engineer in the architect's fleet, as the ledger
+// remembers it.
+type Engineer struct {
+	ID      string  `json:"id"`
+	Ticket  string  `json:"ticket"`
+	Title   string  `json:"title"`
+	Host    string  `json:"host"`
+	State   string  `json:"state"` // launching | running | done | failed | cancelled
+	Outcome string  `json:"outcome"`
+	PRURL   string  `json:"prUrl"`
+	CostUSD float64 `json:"costUsd"`
+	Branch  string  `json:"branch"`
+}
+
+// FleetSummary is capacity across the fleet's hosts, plus how many engineers
+// are counted as active within it.
+type FleetSummary struct {
+	Active        int `json:"active"`
+	CapacityUsed  int `json:"capacityUsed"`
+	CapacityTotal int `json:"capacityTotal"`
+}
+
 // SessionRow is one line of the /resume picker.
 type SessionRow struct {
 	ID            string `json:"id"`
@@ -276,6 +304,9 @@ func (m Model) Frame() Frame {
 		Ask:    m.frameAsk(),
 		Tasks:  m.frameTasks(),
 		Picker: m.framePicker(),
+
+		Engineers: m.frameEngineers(),
+		Fleet:     m.frameFleet(),
 
 		InterruptedTasks: strs(m.interruptedTasks),
 
@@ -372,6 +403,35 @@ func (m Model) frameTasks() []Task {
 		})
 	}
 	return out
+}
+
+// frameEngineers projects the fleet mirror syncFleet keeps — see fleet.go —
+// rather than calling back into m.fleet, so Frame stays a read of the model's
+// own state even when a fleet is wired.
+func (m Model) frameEngineers() []Engineer {
+	out := make([]Engineer, 0, len(m.engineers))
+	for _, e := range m.engineers {
+		out = append(out, Engineer{
+			ID:      e.EngineerID,
+			Ticket:  e.Ticket,
+			Title:   e.Title,
+			Host:    e.Host,
+			State:   e.State,
+			Outcome: e.Outcome,
+			PRURL:   e.PRURL,
+			CostUSD: e.CostUSD,
+			Branch:  e.Branch,
+		})
+	}
+	return out
+}
+
+func (m Model) frameFleet() FleetSummary {
+	return FleetSummary{
+		Active:        m.fleetActive,
+		CapacityUsed:  m.fleetCapUsed,
+		CapacityTotal: m.fleetCapTotal,
+	}
 }
 
 func (m Model) framePicker() []SessionRow {
