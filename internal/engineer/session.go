@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/hweeks/always-click-yes/internal/hub"
+	"github.com/hweeks/always-click-yes/internal/state"
 	"github.com/hweeks/always-click-yes/internal/supervisor"
 	"github.com/hweeks/always-click-yes/internal/ui"
 )
@@ -62,6 +63,7 @@ type Snapshot struct {
 	FinishOutcome string
 	FinishSummary string
 	CostUSD       float64
+	Tokens        state.Tokens
 	Tasks         []TaskRow
 }
 
@@ -123,6 +125,10 @@ func (s *hubSession) Snapshot() Snapshot {
 				Running: t.Unfinished(),
 			})
 		}
+		// Tokens is the parent and every dispatched child summed together —
+		// the run's total, not either half of it.
+		tokens := m.ParentTokens()
+		tokens.Add(m.ChildTokens())
 		snap = Snapshot{
 			Ready:         m.HasDriver(),
 			Phase:         Phase(m.Phase().String()),
@@ -131,6 +137,7 @@ func (s *hubSession) Snapshot() Snapshot {
 			FinishOutcome: m.FinishOutcome(),
 			FinishSummary: m.FinishSummary(),
 			CostUSD:       m.GrandTotalCost(),
+			Tokens:        tokens,
 			Tasks:         rows,
 		}
 	})

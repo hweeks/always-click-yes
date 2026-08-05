@@ -11,6 +11,7 @@ import (
 	"github.com/hweeks/always-click-yes/internal/engineerwire"
 	"github.com/hweeks/always-click-yes/internal/gitops"
 	"github.com/hweeks/always-click-yes/internal/mcp"
+	"github.com/hweeks/always-click-yes/internal/state"
 	"github.com/hweeks/always-click-yes/internal/supervisor"
 )
 
@@ -239,13 +240,16 @@ func TestRunHappyPathPushesAndOpensPR(t *testing.T) {
 		case 1:
 			f.cur.Tasks = []TaskRow{{ID: "t1", Title: "add spin()", Running: true}}
 			f.cur.CostUSD = 0.10
+			f.cur.Tokens = state.Tokens{Input: 100, Output: 50, CacheCreate: 10, CacheRead: 1000}
 		case 2:
 			f.cur.Tasks = []TaskRow{{ID: "t1", Title: "add spin()", Outcome: "completed", CostUSD: 0.42}}
 			f.cur.CostUSD = 0.42
+			f.cur.Tokens = state.Tokens{Input: 200, Output: 90, CacheCreate: 10, CacheRead: 5000}
 		default:
 			f.cur.FinishOutcome = "completed"
 			f.cur.FinishSummary = "added spin() and verified with widget_test.go"
 			f.cur.CostUSD = 0.50
+			f.cur.Tokens = state.Tokens{Input: 250, Output: 120, CacheCreate: 10, CacheRead: 8_000}
 		}
 	}
 
@@ -266,6 +270,10 @@ func TestRunHappyPathPushesAndOpensPR(t *testing.T) {
 	}
 	if result.CostUSD != 0.50 {
 		t.Fatalf("cost = %v, want 0.50", result.CostUSD)
+	}
+	wantTokens := state.Tokens{Input: 250, Output: 120, CacheCreate: 10, CacheRead: 8_000}
+	if result.Tokens != wantTokens {
+		t.Fatalf("tokens = %+v, want %+v", result.Tokens, wantTokens)
 	}
 	if len(result.Files) != 2 || result.Files[0] != "widget.go" {
 		t.Fatalf("files = %v, want [widget.go widget_test.go]", result.Files)

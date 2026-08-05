@@ -192,11 +192,11 @@ func (c *Core) Run(ctx context.Context) engineerwire.Result {
 	dr := c.drive(ctx, sess)
 	switch dr.kind {
 	case driveFinished:
-		return c.finish(c.finalize(ctx, dr.outcome, dr.summary, dr.cost))
+		return c.finish(c.finalize(ctx, dr.outcome, dr.summary, dr.cost, dr.tokens))
 	case driveCancelled:
-		return c.finish(engineerwire.Result{Outcome: "cancelled", Summary: dr.summary, CostUSD: dr.cost})
+		return c.finish(engineerwire.Result{Outcome: "cancelled", Summary: dr.summary, CostUSD: dr.cost, Tokens: dr.tokens})
 	default: // driveStalled
-		return c.finish(engineerwire.Result{Outcome: "stalled", Summary: dr.summary, CostUSD: dr.cost})
+		return c.finish(engineerwire.Result{Outcome: "stalled", Summary: dr.summary, CostUSD: dr.cost, Tokens: dr.tokens})
 	}
 }
 

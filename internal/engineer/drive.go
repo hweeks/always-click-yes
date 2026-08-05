@@ -10,6 +10,7 @@ import (
 	"github.com/hweeks/always-click-yes/internal/alog"
 	"github.com/hweeks/always-click-yes/internal/engineerwire"
 	"github.com/hweeks/always-click-yes/internal/gitops"
+	"github.com/hweeks/always-click-yes/internal/state"
 )
 
 // driveKind names how the AUTO-RUN polling loop ended.
@@ -29,6 +30,7 @@ type driveResult struct {
 	outcome string
 	summary string
 	cost    float64
+	tokens  state.Tokens
 }
 
 // drive polls sess once every c.pollInterval until the session calls Finish,
@@ -50,7 +52,7 @@ func (c *Core) drive(ctx context.Context, sess session) driveResult {
 		c.emitEvents(snap, &lastPhase, &lastCost, lastTasks)
 
 		if snap.FinishOutcome != "" {
-			return driveResult{kind: driveFinished, outcome: snap.FinishOutcome, summary: snap.FinishSummary, cost: snap.CostUSD}
+			return driveResult{kind: driveFinished, outcome: snap.FinishOutcome, summary: snap.FinishSummary, cost: snap.CostUSD, tokens: snap.Tokens}
 		}
 
 		if snap.Phase != PhaseAutoRun {
@@ -62,7 +64,7 @@ func (c *Core) drive(ctx context.Context, sess session) driveResult {
 				idleSince = time.Now()
 			} else if time.Since(idleSince) >= c.stallIdle {
 				if nudges >= maxNudges {
-					return driveResult{kind: driveStalled, summary: stallSummary(nudges, snap), cost: snap.CostUSD}
+					return driveResult{kind: driveStalled, summary: stallSummary(nudges, snap), cost: snap.CostUSD, tokens: snap.Tokens}
 				}
 				nudges++
 				sess.Submit(continuationPrompt)
@@ -72,9 +74,9 @@ func (c *Core) drive(ctx context.Context, sess session) driveResult {
 
 		select {
 		case <-ctx.Done():
-			return driveResult{kind: driveCancelled, summary: c.exitReason(ctx), cost: snap.CostUSD}
+			return driveResult{kind: driveCancelled, summary: c.exitReason(ctx), cost: snap.CostUSD, tokens: snap.Tokens}
 		case <-c.cancelCh:
-			return driveResult{kind: driveCancelled, summary: c.exitReason(ctx), cost: snap.CostUSD}
+			return driveResult{kind: driveCancelled, summary: c.exitReason(ctx), cost: snap.CostUSD, tokens: snap.Tokens}
 		case <-ticker.C:
 		}
 	}
@@ -141,30 +143,31 @@ func stallSummary(nudges int, snap Snapshot) string {
 // pushes the branch and opens the PR. A push or PR failure overrides outcome
 // with "failed" — the model may believe it finished, but nothing reached a
 // remote anyone can review.
-func (c *Core) finalize(ctx context.Context, outcome, summary string, cost float64) engineerwire.Result {
+func (c *Core) finalize(ctx context.Context, outcome, summary string, cost float64, tokens state.Tokens) engineerwire.Result {
 	spec := c.cfg.Spec
 
 	ahead, err := gitops.CommitsAhead(ctx, c.cfg.GitRunner, c.cfg.WorktreeDir, spec.BaseBranch)
 	if err != nil {
-		return engineerwire.Result{Outcome: "failed", Summary: "checking commits ahead: " + err.Error(), CostUSD: cost}
+		return engineerwire.Result{Outcome: "failed", Summary: "checking commits ahead: " + err.Error(), CostUSD: cost, Tokens: tokens}
 	}
 	if ahead == 0 {
 		return engineerwire.Result{
 			Outcome: outcome,
 			Summary: summary + " (no commits were made; nothing to push)",
 			CostUSD: cost,
+			Tokens:  tokens,
 		}
 	}
 
 	if err := gitops.Push(ctx, c.cfg.GitRunner, c.cfg.WorktreeDir, spec.Branch); err != nil {
-		return engineerwire.Result{Outcome: "failed", Summary: "pushing branch: " + err.Error(), Branch: spec.Branch, CostUSD: cost}
+		return engineerwire.Result{Outcome: "failed", Summary: "pushing branch: " + err.Error(), Branch: spec.Branch, CostUSD: cost, Tokens: tokens}
 	}
 
 	title := fmt.Sprintf("%s: %s", spec.Ticket, spec.Title)
 	body := summary + prFooter(c.cfg.EngineerID, spec.Ticket)
 	prURL, err := gitops.CreatePR(ctx, c.cfg.GitRunner, c.cfg.WorktreeDir, spec.BaseBranch, spec.Branch, title, body)
 	if err != nil {
-		return engineerwire.Result{Outcome: "failed", Summary: "opening PR: " + err.Error(), Branch: spec.Branch, CostUSD: cost}
+		return engineerwire.Result{Outcome: "failed", Summary: "opening PR: " + err.Error(), Branch: spec.Branch, CostUSD: cost, Tokens: tokens}
 	}
 
 	return engineerwire.Result{
@@ -173,6 +176,7 @@ func (c *Core) finalize(ctx context.Context, outcome, summary string, cost float
 		Branch:  spec.Branch,
 		PRURL:   prURL,
 		CostUSD: cost,
+		Tokens:  tokens,
 		Files:   changedFiles(ctx, c.cfg.GitRunner, c.cfg.WorktreeDir, spec.BaseBranch),
 	}
 }
