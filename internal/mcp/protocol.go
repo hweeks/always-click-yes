@@ -36,11 +36,18 @@ const (
 	ToolPlan     = "PresentPlan"
 	ToolDispatch = "Dispatch"
 	ToolFinish   = "Finish"
+
+	ToolLaunchEngineer = "LaunchEngineer"
+	ToolAwait          = "Await"
+	ToolAnswerEngineer = "AnswerEngineer"
+	ToolFleetStatus    = "FleetStatus"
 )
 
 // Role says which side of the run an `acy mcp` process is serving. It is fixed
-// at spawn time by the --role flag, because the two sides need different tools:
-// a parent delegates, a child does the work.
+// at spawn time by the --role flag, because the different sides need different
+// tools: a parent delegates to local children, an architect delegates to
+// remote engineer instances as well as local children, and a child does the
+// work.
 //
 // Without this a child would inherit --mcp-config from its parent, gain Dispatch
 // along with everything else, and be able to spawn children of its own — an
@@ -48,17 +55,22 @@ const (
 type Role string
 
 const (
-	RoleParent Role = "parent"
-	RoleChild  Role = "child"
+	RoleParent    Role = "parent"
+	RoleChild     Role = "child"
+	RoleArchitect Role = "architect"
 )
 
 // ParseRole defaults to parent: an unrecognised or absent role should produce
 // the supervised, fully-featured session rather than silently disarming it.
 func ParseRole(s string) Role {
-	if Role(s) == RoleChild {
+	switch Role(s) {
+	case RoleChild:
 		return RoleChild
+	case RoleArchitect:
+		return RoleArchitect
+	default:
+		return RoleParent
 	}
-	return RoleParent
 }
 
 // Qualified returns the name claude uses for one of our tools in the event stream
@@ -231,10 +243,21 @@ func toolDefs(role Role) []toolDef {
 		// deliberately does not delegate.
 		return defs
 	}
-	return append(defs,
+	defs = append(defs,
 		toolDef{Name: ToolPlan, Description: planDescription, InputSchema: json.RawMessage(planSchema)},
 		toolDef{Name: ToolDispatch, Description: dispatchDescription, InputSchema: json.RawMessage(DispatchSchema)},
 		toolDef{Name: ToolFinish, Description: finishDescription, InputSchema: json.RawMessage(finishSchema)},
+	)
+	if role != RoleArchitect {
+		// A parent delegates to local children only; the fleet tools below are
+		// the architect's alone.
+		return defs
+	}
+	return append(defs,
+		toolDef{Name: ToolLaunchEngineer, Description: launchEngineerDescription, InputSchema: json.RawMessage(launchEngineerSchema)},
+		toolDef{Name: ToolAwait, Description: awaitDescription, InputSchema: json.RawMessage(awaitSchema)},
+		toolDef{Name: ToolAnswerEngineer, Description: answerEngineerDescription, InputSchema: json.RawMessage(answerEngineerSchema)},
+		toolDef{Name: ToolFleetStatus, Description: fleetStatusDescription, InputSchema: json.RawMessage(fleetStatusSchema)},
 	)
 }
 
@@ -314,6 +337,129 @@ const DispatchSchema = `{
     }
   }
 }`
+
+// --- the architect's fleet tools ---
+//
+// These four are advertised only for RoleArchitect. An architect does not edit
+// code itself — it delegates whole tickets to remote engineer instances (each a
+// fresh acy run on its own machine, in its own worktree) the same way a parent
+// delegates a task to a local child, except an engineer is unattended, takes
+// unbounded wall-clock, and reports back through Await rather than a blocking
+// call.
+
+const launchEngineerDescription = "Launch a remote engineer on a ticket. Non-blocking — returns " +
+	"immediately with the engineer's id, host and branch; the engineer works unattended in its own " +
+	"worktree and ends by opening a PR. Launch up to capacity, then Await. One ticket per engineer."
+
+// launchEngineerSchema is the parameter shape the architect sees for
+// LaunchEngineer. "brief" carries the same weight DispatchSchema's
+// "instruction" does, for the same reason: the engineer is a fresh acy
+// instance on another machine with no memory of this conversation, and plans
+// its own subtasks from this brief alone — a vague one fails silently, days
+// later, on a machine nobody is watching.
+const launchEngineerSchema = `{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["ticket", "title", "brief", "success"],
+  "properties": {
+    "ticket": {
+      "type": "string",
+      "maxLength": 64,
+      "description": "A short identifier for this unit of work, e.g. a ticket key. One ticket per engineer."
+    },
+    "title": {
+      "type": "string",
+      "maxLength": 120,
+      "description": "A few words naming the task, for the human watching. For example: add the token ledger"
+    },
+    "brief": {
+      "type": "string",
+      "maxLength": 8000,
+      "description": "The full standalone work order. The engineer is a fresh acy instance on another machine with no memory of this conversation, and plans its own subtasks from this brief alone — state the change, where it goes, and every constraint that matters."
+    },
+    "success": {
+      "type": "string",
+      "maxLength": 1000,
+      "description": "A concrete check proving the ticket is done. Without this the engineer decides for itself what done means."
+    },
+    "host": {
+      "type": "string",
+      "description": "Pin this engineer to a named fleet host. Omit to let the fleet auto-place it."
+    },
+    "budget_usd": {
+      "type": "number",
+      "description": "Optional spend ceiling for this engineer. Omit unless you have a reason; the default is the fleet's."
+    }
+  }
+}`
+
+const awaitDescription = "Block until the next fleet event and return it — an engineer's result " +
+	"(with PR URL and cost), an escalated question (answer it with AnswerEngineer), a PR merge/close, " +
+	"or a reconnection notice. This is your main loop: launch to capacity, Await, react, repeat. Do " +
+	"not poll FleetStatus in a loop; Await is the cheap wait."
+
+const awaitSchema = `{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {}
+}`
+
+const answerEngineerDescription = "Answer an escalated question from the plan and tickets; the " +
+	"engineer is blocked on it."
+
+const answerEngineerSchema = `{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["engineer_id", "question_id", "answer"],
+  "properties": {
+    "engineer_id": {
+      "type": "string",
+      "description": "The engineer this question came from."
+    },
+    "question_id": {
+      "type": "string",
+      "description": "The question being answered, from the escalation Await returned."
+    },
+    "answer": {
+      "type": "string",
+      "maxLength": 2000,
+      "description": "The answer. The engineer is blocked on it and resumes as soon as it arrives."
+    }
+  }
+}`
+
+const fleetStatusDescription = "A snapshot of every engineer (state, host, branch, PR, cost) and " +
+	"host capacity; for taking stock, not for waiting — use Await to wait."
+
+const fleetStatusSchema = `{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {}
+}`
+
+// LaunchNotArmed is returned when the architect calls LaunchEngineer before the
+// human has armed the run. Mirrors DispatchNotArmed: launching an engineer
+// starts real unattended work on a real machine, and only a human's Ctrl+G
+// starts it.
+const LaunchNotArmed = "LaunchEngineer is not available yet: this run has not been armed.\n\n" +
+	"Launching engineers starts real, unattended work on real machines. A human reads your plan and " +
+	"presses Ctrl+G, and that keystroke is the only thing that starts it. Present your plan and stop."
+
+// AwaitNothingRunning is returned when the architect calls Await with nothing
+// that could ever produce an event: no engineer running and no PR open.
+// Without this the call blocks forever on a fleet that will never speak.
+const AwaitNothingRunning = "Await has nothing to wait for: no engineer is running and no PR is " +
+	"open.\n\nBlocking here would wait forever. Launch an engineer first, or call Finish if there is " +
+	"nothing left to do."
+
+// FleetUnavailable is returned when the session has no fleet wired at all —
+// no fleet section in .acy.json, or acy was not started in architect mode.
+// Like SupervisorGone and DispatchUnavailable this fails open: the caller's
+// turn is blocked on this reply, and the honest answer is to say plainly that
+// no engineers exist rather than let the model believe a fleet is out there.
+const FleetUnavailable = "(this session has no fleet configured — .acy.json has no fleet section, " +
+	"or acy was not started in architect mode — so no engineers exist in this session; say so " +
+	"plainly rather than pretending they do)"
 
 func serverInfo() map[string]any {
 	return map[string]any{"name": ServerName, "version": version.String()}
