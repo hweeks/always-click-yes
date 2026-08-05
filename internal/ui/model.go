@@ -64,6 +64,11 @@ type Config struct {
 	// half-served). Only ever wired for a RoleArchitect session.
 	Fleet FleetManager
 
+	// Tickets is the architect's ticket board (nil = disabled, and ReadTickets/
+	// UpdateTicket are then refused with mcp.TicketsUnavailable). Only ever
+	// wired for a RoleArchitect session, alongside Fleet.
+	Tickets TicketStore
+
 	// Resume is a session id to restore at startup: --resume/--continue set it, and
 	// Init then rebuilds the run instead of cold-starting a plan session.
 	Resume string
@@ -204,6 +209,11 @@ type Model struct {
 	fleetCapUsed  int
 	fleetCapTotal int
 
+	// tickets is the architect's ticket board. nil disables it, the same way
+	// fleet does: ReadTickets/UpdateTicket are then refused rather than
+	// half-served.
+	tickets TicketStore
+
 	// gate / countdown state
 	gateReqs  <-chan *gate.Pending
 	askReqs   <-chan *mcp.Pending
@@ -308,6 +318,7 @@ func New(drv *driver.Driver, cfg Config) Model {
 		sessionLister: cfg.Sessions,
 		dispatcher:    cfg.Dispatcher,
 		fleet:         cfg.Fleet,
+		tickets:       cfg.Tickets,
 
 		cwd:       cfg.Cwd,
 		resumeID:  cfg.Resume,
@@ -599,6 +610,8 @@ var intercepted = map[string]bool{
 	mcp.ToolAwait:          true,
 	mcp.ToolAnswerEngineer: true,
 	mcp.ToolFleetStatus:    true,
+	mcp.ToolReadTickets:    true,
+	mcp.ToolUpdateTicket:   true,
 }
 
 // baseToolName strips an "mcp__<server>__" prefix so an MCP-provided tool is
@@ -639,6 +652,8 @@ func (m *Model) ingestToolUse(b driver.ContentBlock) {
 		return // rendered by startDispatch, which owns the task
 	case mcp.ToolLaunchEngineer, mcp.ToolAwait, mcp.ToolAnswerEngineer, mcp.ToolFleetStatus:
 		return // rendered when the corresponding Pending resolves — see fleet.go
+	case mcp.ToolReadTickets, mcp.ToolUpdateTicket:
+		return // rendered when the corresponding Pending resolves — see tickets.go
 	case mcp.ToolFinish:
 		// The run ending, read from the tool call itself. The `acy mcp` child
 		// answers Finish locally, so this event is the only place the outcome

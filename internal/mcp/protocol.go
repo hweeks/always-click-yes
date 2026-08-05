@@ -41,6 +41,9 @@ const (
 	ToolAwait          = "Await"
 	ToolAnswerEngineer = "AnswerEngineer"
 	ToolFleetStatus    = "FleetStatus"
+
+	ToolReadTickets  = "ReadTickets"
+	ToolUpdateTicket = "UpdateTicket"
 )
 
 // Role says which side of the run an `acy mcp` process is serving. It is fixed
@@ -258,6 +261,8 @@ func toolDefs(role Role) []toolDef {
 		toolDef{Name: ToolAwait, Description: awaitDescription, InputSchema: json.RawMessage(awaitSchema)},
 		toolDef{Name: ToolAnswerEngineer, Description: answerEngineerDescription, InputSchema: json.RawMessage(answerEngineerSchema)},
 		toolDef{Name: ToolFleetStatus, Description: fleetStatusDescription, InputSchema: json.RawMessage(fleetStatusSchema)},
+		toolDef{Name: ToolReadTickets, Description: readTicketsDescription, InputSchema: json.RawMessage(readTicketsSchema)},
+		toolDef{Name: ToolUpdateTicket, Description: updateTicketDescription, InputSchema: json.RawMessage(updateTicketSchema)},
 	)
 }
 
@@ -460,6 +465,55 @@ const AwaitNothingRunning = "Await has nothing to wait for: no engineer is runni
 const FleetUnavailable = "(this session has no fleet configured — .acy.json has no fleet section, " +
 	"or acy was not started in architect mode — so no engineers exist in this session; say so " +
 	"plainly rather than pretending they do)"
+
+// --- the architect's ticket board ---
+//
+// The ticket board is the run's memory: a markdown file per ticket under
+// .acy/tickets, in the repo itself rather than in acy's own state directory,
+// so it survives a resumed run and travels with a clone or a PR diff. These
+// two tools are the architect's only way to read or change it — advertised
+// for RoleArchitect alone, the same as the fleet tools above.
+
+const readTicketsDescription = "The ticket board under .acy/tickets: every ticket with id, title, " +
+	"status, branch, PR, dependencies, and brief. Read it at the start of a run and after every merge."
+
+const readTicketsSchema = `{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {}
+}`
+
+const updateTicketDescription = "Record a ticket's new state the moment it changes — in-progress when " +
+	"its engineer launches, in-review when its PR opens, merged when the human merges, blocked with a " +
+	"note when stuck. Writes and commits the ticket file deterministically; you never edit tickets by hand."
+
+const updateTicketSchema = `{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "status"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "The ticket's id, as ReadTickets reported it."
+    },
+    "status": {
+      "type": "string",
+      "enum": ["todo", "in-progress", "in-review", "merged", "blocked"],
+      "description": "The ticket's new status."
+    },
+    "note": {
+      "type": "string",
+      "maxLength": 1000,
+      "description": "Optional. Appended to the ticket's log, timestamped — say why, especially for blocked."
+    }
+  }
+}`
+
+// TicketsUnavailable is returned when the session has no ticket store wired at
+// all — this is not an arch run. Like FleetUnavailable this fails open: the
+// caller's turn is blocked on this reply.
+const TicketsUnavailable = "(this session has no ticket store — it is not an arch run — so there is " +
+	"no board to read or update; say so plainly rather than pretending one exists)"
 
 func serverInfo() map[string]any {
 	return map[string]any{"name": ServerName, "version": version.String()}

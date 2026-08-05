@@ -71,6 +71,10 @@ type Frame struct {
 	Engineers []Engineer   `json:"engineers"`
 	Fleet     FleetSummary `json:"fleet"`
 
+	// Tickets is the architect's ticket board, sorted by id; empty for a
+	// session with no ticket store wired.
+	Tickets []Ticket `json:"tickets"`
+
 	// InterruptedTasks names the tasks a restart caught mid-flight, so a client
 	// can say what a resumed run may have left half-done.
 	InterruptedTasks []string `json:"interruptedTasks"`
@@ -223,6 +227,16 @@ type FleetSummary struct {
 	CapacityTotal int `json:"capacityTotal"`
 }
 
+// Ticket is one line of the architect's ticket board, as Frame projects it —
+// the summary a client lists, not the full brief ReadTickets/UpdateTicket
+// hand the model.
+type Ticket struct {
+	ID     string `json:"id"`
+	Title  string `json:"title"`
+	Status string `json:"status"`
+	PRURL  string `json:"prUrl"`
+}
+
 // SessionRow is one line of the /resume picker.
 type SessionRow struct {
 	ID            string `json:"id"`
@@ -307,6 +321,7 @@ func (m Model) Frame() Frame {
 
 		Engineers: m.frameEngineers(),
 		Fleet:     m.frameFleet(),
+		Tickets:   m.frameTickets(),
 
 		InterruptedTasks: strs(m.interruptedTasks),
 
@@ -432,6 +447,26 @@ func (m Model) frameFleet() FleetSummary {
 		CapacityUsed:  m.fleetCapUsed,
 		CapacityTotal: m.fleetCapTotal,
 	}
+}
+
+// frameTickets reads the board directly rather than through a mirror kept in
+// sync by an event stream — unlike the fleet, there is no push side to
+// tickets, so a read is the only way to know its current state. A nil store
+// or a read error both project as no tickets, matching how an unwired fleet
+// projects as no engineers.
+func (m Model) frameTickets() []Ticket {
+	if m.tickets == nil {
+		return []Ticket{}
+	}
+	ts, err := m.tickets.List()
+	if err != nil {
+		return []Ticket{}
+	}
+	out := make([]Ticket, 0, len(ts))
+	for _, t := range ts {
+		out = append(out, Ticket{ID: t.ID, Title: t.Title, Status: t.Status, PRURL: t.PR})
+	}
+	return out
 }
 
 func (m Model) framePicker() []SessionRow {

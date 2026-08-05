@@ -188,6 +188,7 @@ func helpContent() []HelpSection {
 			{"/tokens", "token ledger: context size, cache reads and cost by spender"},
 			{"/tasks", "delegated-task ledger: outcome, cost and cache reads per task"},
 			{"/fleet", "the architect's engineer ledger: state, host, outcome and cost per engineer"},
+			{"/tickets", "the architect's ticket board: every ticket's status, branch, PR and brief"},
 			{"/done", "end the run by hand, if the session stopped without calling Finish"},
 			{"/quit", "quit (same as Ctrl+C)"},
 		},

@@ -151,14 +151,16 @@ func TestParseRoleDefaultsToParent(t *testing.T) {
 	}
 }
 
-// An architect gets the parent's four delegation tools plus the four fleet
-// tools — LaunchEngineer, Await, AnswerEngineer, FleetStatus — and nothing else.
-// Every schema must be valid JSON, or claude silently drops the tool.
-func TestArchitectRoleAdvertisesFleetTools(t *testing.T) {
+// An architect gets the parent's four delegation tools, the four fleet tools
+// — LaunchEngineer, Await, AnswerEngineer, FleetStatus — and the two ticket
+// tools — ReadTickets, UpdateTicket — ten in all, and nothing else. Every
+// schema must be valid JSON, or claude silently drops the tool.
+func TestArchitectRoleAdvertisesTenTools(t *testing.T) {
 	defs := toolDefs(RoleArchitect)
 
 	want := []string{ToolAsk, ToolPlan, ToolDispatch, ToolFinish,
-		ToolLaunchEngineer, ToolAwait, ToolAnswerEngineer, ToolFleetStatus}
+		ToolLaunchEngineer, ToolAwait, ToolAnswerEngineer, ToolFleetStatus,
+		ToolReadTickets, ToolUpdateTicket}
 	if len(defs) != len(want) {
 		t.Fatalf("toolDefs(RoleArchitect) returned %d tools, want %d: %v", len(defs), len(want), names(defs))
 	}
@@ -225,6 +227,8 @@ func TestNewSchemasRoundTripThroughJSON(t *testing.T) {
 		{ToolAwait, awaitSchema},
 		{ToolAnswerEngineer, answerEngineerSchema},
 		{ToolFleetStatus, fleetStatusSchema},
+		{ToolReadTickets, readTicketsSchema},
+		{ToolUpdateTicket, updateTicketSchema},
 	} {
 		var v map[string]any
 		if err := json.Unmarshal([]byte(tc.schema), &v); err != nil {
@@ -251,6 +255,7 @@ func TestFleetRefusalConstantsExist(t *testing.T) {
 		"LaunchNotArmed":      LaunchNotArmed,
 		"AwaitNothingRunning": AwaitNothingRunning,
 		"FleetUnavailable":    FleetUnavailable,
+		"TicketsUnavailable":  TicketsUnavailable,
 	} {
 		if s == "" {
 			t.Errorf("%s is empty", name)

@@ -15,6 +15,7 @@ import (
 	"github.com/hweeks/always-click-yes/internal/state"
 	"github.com/hweeks/always-click-yes/internal/supervisor"
 	"github.com/hweeks/always-click-yes/internal/term"
+	"github.com/hweeks/always-click-yes/internal/tickets"
 )
 
 // defaultArchModel is what --model becomes when arch mode is started with
@@ -110,6 +111,7 @@ func runArch(ctx context.Context, f supervisor.Flags, changed func(string) bool)
 	manager := fleet.NewManager(*fleetCfg, fleet.ForHost, fleet.WithPRWatcher(watcher, prCap))
 	f.ArchMode = true
 	f.Fleet = manager
+	f.Tickets = tickets.New(cwd, fleetCfg.TicketCommit, gitops.DefaultRunner)
 
 	// Alt-screen by default; ACY_NO_ALTSCREEN=1 keeps output inline, exactly as
 	// `acy run` decides it.

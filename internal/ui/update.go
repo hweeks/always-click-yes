@@ -290,9 +290,10 @@ func (m Model) update(msg tea.Msg) (Model, tea.Cmd) {
 
 	case askMsg:
 		// One socket, several different waits: a question blocks on a human, a
-		// dispatch blocks on a whole local child process running a task, and the
+		// dispatch blocks on a whole local child process running a task, the
 		// fleet tools block on a remote engineer or on the fleet's own event
-		// stream (Await).
+		// stream (Await), and the ticket tools resolve immediately from the
+		// board on disk.
 		switch msg.p.Req.Tool {
 		case mcp.ToolDispatch:
 			m.startDispatch(msg.p)
@@ -304,6 +305,10 @@ func (m Model) update(msg tea.Msg) (Model, tea.Cmd) {
 			m.startAnswerEngineer(msg.p)
 		case mcp.ToolFleetStatus:
 			m.startFleetStatus(msg.p)
+		case mcp.ToolReadTickets:
+			m.startReadTickets(msg.p)
+		case mcp.ToolUpdateTicket:
+			m.startUpdateTicket(msg.p)
 		default:
 			m.openAsk(msg.p)
 		}

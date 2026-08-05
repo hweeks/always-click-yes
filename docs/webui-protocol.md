@@ -240,6 +240,7 @@ had the token, which was printed to the process that launched acy.
 | `picker` | `SessionRow[]` | the `/resume` rows; empty unless `picking` |
 | `engineers` | `Engineer[]` | the architect's fleet ledger, oldest first; empty for a session with no fleet wired |
 | `fleet` | `FleetSummary` | `{active, capacityUsed, capacityTotal}` across the fleet's hosts; all zero with no fleet wired |
+| `tickets` | `Ticket[]` | the architect's ticket board, sorted by id; empty for a session with no ticket store wired |
 | `interruptedTasks` | string[] | tasks a restart caught mid-flight |
 | `logPath` | string | the debug log, if one is open |
 | `configPath` | string | the `.acy.json` this run's settings came from |
@@ -457,6 +458,27 @@ capacity across the hosts it runs on.
 Both are empty/zero for a session with no fleet configured — `.acy.json` has
 no `fleet` section, or acy was not started in architect mode — which is not an
 error, the same way an empty `tasks` ledger is not one.
+
+### `Ticket`
+
+The architect's ticket board, read from the markdown files under
+`.acy/tickets` in the project itself rather than from acy's own state
+directory — the run's memory, kept current by the model's own
+`ReadTickets`/`UpdateTicket` calls (see `internal/mcp/protocol.go`) rather than
+inferred by acy. `tickets` is the summary a client lists; the full brief each
+ticket carries is what the model itself reads via `ReadTickets`, not part of
+this projection.
+
+| field | type | meaning |
+|---|---|---|
+| `id` | string | the ticket's id |
+| `title` | string | its title |
+| `status` | string | `todo`, `in-progress`, `in-review`, `merged` or `blocked` |
+| `prUrl` | string | the PR it is associated with, once it has one |
+
+Empty for a session with no ticket store wired — `acy arch` is the only
+caller that wires one — which is not an error, the same way an empty
+`engineers` ledger is not one.
 
 ### `SessionRow`
 

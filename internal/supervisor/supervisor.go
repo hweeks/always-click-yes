@@ -75,6 +75,11 @@ type Flags struct {
 	// from the project's fleet config before calling NewSupervisor.
 	Fleet ui.FleetManager
 
+	// Tickets wires arch mode's ticket board into the parent session (nil =
+	// ReadTickets/UpdateTicket are refused with mcp.TicketsUnavailable). acy
+	// arch is the only caller that sets this, alongside Fleet.
+	Tickets ui.TicketStore
+
 	// ArchMode runs the parent session as the architect (mcp.RoleArchitect,
 	// ui.ArchSystemPrompt) instead of the default parent (mcp.RoleParent,
 	// ui.ParentSystemPrompt). False in every existing caller, so run/serve are
@@ -544,6 +549,7 @@ func NewSupervisor(ctx context.Context, f Flags) (*Supervisor, error) {
 		Resume:     resumeID,
 		Dispatcher: orch,
 		Fleet:      f.Fleet,
+		Tickets:    f.Tickets,
 		LoadState:  state.Load,
 		SaveState:  state.Save,
 		Replay:     func(id string) ([]driver.Event, error) { return session.Replay(cwd, id) },
