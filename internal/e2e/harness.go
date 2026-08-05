@@ -95,12 +95,14 @@ type options struct {
 	// the product default, which is what a test of real behaviour wants.
 	ParentTools []string
 
-	// ArchMode and Fleet mirror internal/cli/arch.go's own assembly of
-	// supervisor.Flags: ArchMode picks the architect role/prompt and Fleet
-	// wires its manager in. Both zero values (false, nil) leave every
-	// existing caller's behavior — a plain `acy run` session — unchanged.
+	// ArchMode, Fleet and Tickets mirror internal/cli/arch.go's own assembly
+	// of supervisor.Flags: ArchMode picks the architect role/prompt, Fleet
+	// wires its manager in, and Tickets wires the ticket board in. All three
+	// zero values (false, nil, nil) leave every existing caller's behavior —
+	// a plain `acy run` session — unchanged.
 	ArchMode bool
 	Fleet    ui.FleetManager
+	Tickets  ui.TicketStore
 }
 
 // newHarness wires a real supervisor — real gate socket, real hook settings, real
@@ -159,6 +161,7 @@ func newHarness(t *testing.T, opt options) *harness {
 		Continue:  opt.Continue,
 		ArchMode:  opt.ArchMode,
 		Fleet:     opt.Fleet,
+		Tickets:   opt.Tickets,
 	})
 	if err != nil {
 		t.Fatalf("wire supervisor: %v", err)
