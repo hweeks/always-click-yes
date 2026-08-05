@@ -625,3 +625,147 @@ func TestManagerLaunchEmptyTicketRejected(t *testing.T) {
 		t.Error("Launch with a blank ticket: want error, got nil")
 	}
 }
+
+// --- PR watcher integration ---
+
+// Launch refuses at the cap, names the cap/count/URLs, and recovers once a
+// live Refresh (triggered by the refusal path itself) sees the PR merge —
+// all without a second real gh call inside the 10s rate-limit window.
+func TestManagerLaunchRefusedAtPRCapThenRecoversAfterMerge(t *testing.T) {
+	mt := newMockTransport()
+	gh := &fakeGHRunner{}
+	gh.queue(`[{"url":"https://example/pr/1","state":"OPEN","headRefName":"acy/a","number":1}]`, nil)
+	clock := newFakeClock(time.Unix(1000, 0))
+	watcher := NewPRWatcher("/repo", gh.run, time.Minute, clock.Now)
+	if err := watcher.poll(context.Background()); err != nil {
+		t.Fatalf("bootstrap poll: %v", err)
+	}
+	if got := watcher.OpenCount(); got != 1 {
+		t.Fatalf("OpenCount() after bootstrap poll = %d, want 1", got)
+	}
+
+	m := NewManager(testFleetConfig(testHost("a", 1)), mt.forHost, WithPRWatcher(watcher, 1))
+	t.Cleanup(m.Close)
+
+	_, err := m.Launch(context.Background(), LaunchReq{Ticket: "T1"})
+	if err == nil {
+		t.Fatal("Launch at the PR cap: want error, got nil")
+	}
+	for _, want := range []string{"1/1", "https://example/pr/1", "Await"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal %q missing %q", err.Error(), want)
+		}
+	}
+
+	// Still inside the 10s refresh window: refuses again with no new gh call.
+	if _, err := m.Launch(context.Background(), LaunchReq{Ticket: "T1b"}); err == nil {
+		t.Fatal("second Launch inside the refresh window: want error, got nil")
+	}
+	if got := gh.callCount(); got != 1 {
+		t.Errorf("gh calls = %d, want 1 (Refresh rate-limited)", got)
+	}
+
+	// The PR merges; move past the rate-limit window so the next Launch's
+	// cheap re-check actually re-polls and sees it.
+	clock.Advance(11 * time.Second)
+	gh.queue(`[{"url":"https://example/pr/1","state":"MERGED","headRefName":"acy/a","number":1}]`, nil)
+
+	st, err := m.Launch(context.Background(), LaunchReq{Ticket: "T2"})
+	if err != nil {
+		t.Fatalf("Launch after the PR merged: %v", err)
+	}
+	if st.Host != "a" {
+		t.Errorf("Host = %q, want %q", st.Host, "a")
+	}
+	if got := watcher.OpenCount(); got != 0 {
+		t.Errorf("OpenCount() after the merge = %d, want 0", got)
+	}
+
+	// The merge diff must also have reached the manager's own Events()
+	// stream as a KindPR event, alongside the launch's own KindStarted —
+	// order between the two is not guaranteed, since one is relayed by the
+	// forwarding goroutine and the other emitted directly by Launch.
+	var sawMerged, sawStarted bool
+	for range 2 {
+		ev := drainEvent(t, m, time.Second)
+		switch ev.Kind {
+		case KindPR:
+			if ev.PR != nil && ev.PR.State == "merged" && ev.PR.Head == "acy/a" {
+				sawMerged = true
+			}
+		case KindStarted:
+			sawStarted = true
+		}
+	}
+	if !sawMerged {
+		t.Error("want a KindPR merged event forwarded onto Events()")
+	}
+	if !sawStarted {
+		t.Error("want the KindStarted event from the successful launch")
+	}
+}
+
+// prCap <= 0 means uncapped: Launch never consults the watcher at all.
+func TestManagerLaunchUncappedIgnoresWatcher(t *testing.T) {
+	mt := newMockTransport()
+	gh := &fakeGHRunner{}
+	gh.queue(`[{"url":"https://example/pr/1","state":"OPEN","headRefName":"acy/a","number":1}]`, nil)
+	watcher := NewPRWatcher("/repo", gh.run, time.Minute, nil)
+	if err := watcher.poll(context.Background()); err != nil {
+		t.Fatalf("bootstrap poll: %v", err)
+	}
+
+	m := NewManager(testFleetConfig(testHost("a", 2)), mt.forHost, WithPRWatcher(watcher, 0))
+	t.Cleanup(m.Close)
+
+	if _, err := m.Launch(context.Background(), LaunchReq{Ticket: "T1"}); err != nil {
+		t.Fatalf("Launch with prCap disabled: %v", err)
+	}
+	if got := gh.callCount(); got != 1 {
+		t.Errorf("gh calls = %d, want 1 (only the bootstrap poll, no cap check)", got)
+	}
+}
+
+// A pr event must never be dropped, even behind a full Events() buffer that
+// has already dropped a progress frame — the same guarantee KindResult gets.
+func TestManagerPREventsNeverDropped(t *testing.T) {
+	mt := newMockTransport()
+	watcher := NewPRWatcher("/repo", (&fakeGHRunner{}).run, time.Minute, nil)
+	m := NewManager(testFleetConfig(testHost("a", 1)), mt.forHost, WithPRWatcher(watcher, 0), WithEventsBuffer(1))
+	t.Cleanup(m.Close)
+
+	m.emit(Event{Kind: KindProgress, EngineerID: "e0"})
+	m.emit(Event{Kind: KindProgress, EngineerID: "e0-dropped"}) // buffer full, dropped
+
+	watcher.events <- PREvent{URL: "https://example/pr/9", Head: "acy/x", Number: 9, State: "merged"}
+
+	first := drainEvent(t, m, time.Second)
+	if first.Kind != KindProgress || first.EngineerID != "e0" {
+		t.Fatalf("first event = %+v, want the occupying progress event", first)
+	}
+
+	second := drainEvent(t, m, time.Second)
+	if second.Kind != KindPR || second.PR == nil || second.PR.URL != "https://example/pr/9" {
+		t.Fatalf("second event = %+v, want the pr event that was blocked behind the full buffer", second)
+	}
+}
+
+// Close must stop the forwarding goroutine rather than hang waiting on it —
+// this is the deadlock WithPRWatcher's forwarder has to avoid: it cannot
+// wait on baseCtx, since baseCancel only runs after Close's own wg.Wait.
+func TestManagerCloseStopsPRForwarder(t *testing.T) {
+	mt := newMockTransport()
+	watcher := NewPRWatcher("/repo", (&fakeGHRunner{}).run, time.Minute, nil)
+	m := NewManager(testFleetConfig(testHost("a", 1)), mt.forHost, WithPRWatcher(watcher, 0))
+
+	done := make(chan struct{})
+	go func() {
+		m.Close()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close did not return; the pr forwarding goroutine likely deadlocked")
+	}
+}

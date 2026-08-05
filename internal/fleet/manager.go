@@ -78,10 +78,15 @@ const (
 	KindResult                       // wraps an engineerwire.Result; terminal
 	KindReconnected                  // Follow reattached after a drop
 	KindFailed                       // terminal: Start failed, or the engineer was cancelled
+	KindPR                           // wraps a PREvent from a PRWatcher; never dropped, like a result
 )
 
 // Event is anything an engineer produces, tagged with which one it came
 // from. Status is a snapshot taken at the moment of emission.
+//
+// A KindPR event carries no EngineerID/Host/Ticket — a PR merge or close is
+// observed from GitHub, not attributed to a particular engineer's Follow
+// loop — so consumers must switch on Kind before reading those fields.
 type Event struct {
 	EngineerID string
 	Host       string
@@ -91,6 +96,7 @@ type Event struct {
 	Progress *engineerwire.Event
 	Question *engineerwire.Question
 	Result   *engineerwire.Result
+	PR       *PREvent
 
 	Gap     int64
 	Attempt int
@@ -155,6 +161,10 @@ type Manager struct {
 	baseCtx    context.Context
 	baseCancel context.CancelFunc
 
+	prWatcher       *PRWatcher
+	prCap           int
+	prWatcherCancel context.CancelFunc // stops the forwarding goroutine; nil unless WithPRWatcher was used
+
 	mu       sync.Mutex
 	seq      int
 	byID     map[string]*engineer
@@ -184,6 +194,22 @@ func WithEventsBuffer(n int) Option {
 	}
 }
 
+// WithPRWatcher wires w's PREvents into Events() as KindPR — never dropped,
+// the same rule a result gets — and makes Launch refuse once OpenCount()
+// reaches prCap open acy/* PRs. prCap <= 0 disables the cap check.
+//
+// The manager only forwards w's events; it does not call w.Run itself. A
+// caller that wants the watcher actually polling starts that loop
+// separately (arch mode ties it to the supervisor's own ctx so its lifetime
+// doesn't depend on the manager's), but Close still stops the forwarding
+// goroutine this option starts.
+func WithPRWatcher(w *PRWatcher, prCap int) Option {
+	return func(m *Manager) {
+		m.prWatcher = w
+		m.prCap = prCap
+	}
+}
+
 // NewManager builds a Manager for cfg. transports is injectable so tests can
 // supply fakes instead of real processes; a nil transports defaults to
 // ForHost.
@@ -210,7 +236,35 @@ func NewManager(cfg config.FleetConfig, transports func(config.FleetHost) Transp
 	for _, opt := range opts {
 		opt(m)
 	}
+	if m.prWatcher != nil {
+		prCtx, prCancel := context.WithCancel(context.Background())
+		m.prWatcherCancel = prCancel
+		m.wg.Add(1)
+		go m.forwardPRWatcher(prCtx)
+	}
 	return m
+}
+
+// forwardPRWatcher relays m.prWatcher's PREvents onto Events() as KindPR
+// until ctx ends (Close cancels it via prWatcherCancel, before waiting on
+// m.wg — using baseCtx here instead would deadlock, since baseCancel is only
+// called after that wait).
+func (m *Manager) forwardPRWatcher(ctx context.Context) {
+	defer m.wg.Done()
+	defer alog.Recover("fleet.Manager.forwardPRWatcher")
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case ev, ok := <-m.prWatcher.Events():
+			if !ok {
+				return
+			}
+			pr := ev
+			m.emit(Event{Kind: KindPR, PR: &pr})
+		}
+	}
 }
 
 // Events is the unified stream of everything every engineer does. Created
@@ -307,6 +361,10 @@ func (m *Manager) Launch(ctx context.Context, req LaunchReq) (EngineerStatus, er
 		return EngineerStatus{}, errors.New("fleet: launch requires a ticket")
 	}
 
+	if err := m.checkPRCap(ctx); err != nil {
+		return EngineerStatus{}, err
+	}
+
 	m.mu.Lock()
 	if m.closed {
 		m.mu.Unlock()
@@ -368,6 +426,36 @@ func (m *Manager) Launch(ctx context.Context, req LaunchReq) (EngineerStatus, er
 	go m.runEngineer(engCtx, eng, transport)
 
 	return st, nil
+}
+
+// checkPRCap refuses a launch when m.prWatcher shows prCap or more open
+// acy/* PRs. It re-checks with a live Refresh before refusing — the cached
+// snapshot may be up to a whole poll interval stale, and a merge that just
+// landed shouldn't cost the architect a refusal it didn't need. nil when no
+// watcher is configured or prCap <= 0 (uncapped).
+func (m *Manager) checkPRCap(ctx context.Context) error {
+	if m.prWatcher == nil || m.prCap <= 0 {
+		return nil
+	}
+	if m.prWatcher.OpenCount() < m.prCap {
+		return nil
+	}
+	if err := m.prWatcher.Refresh(ctx); err != nil {
+		alog.Printf("fleet: pr cap refresh failed: %v", err)
+	}
+	if open := m.prWatcher.OpenCount(); open >= m.prCap {
+		return prCapError(m.prCap, open, m.prWatcher.OpenURLs())
+	}
+	return nil
+}
+
+// prCapError is the refusal Launch hands back verbatim to the architect
+// (through startLaunchEngineer's wrapper): it names the cap, the count, and
+// every open URL, and tells the model what to do next rather than just what
+// it cannot do — the same shape as the mcp package's own refusal constants.
+func prCapError(prCap, open int, urls []string) error {
+	return fmt.Errorf("fleet: %d/%d acy PRs are open (%s) — Await merges before launching more",
+		open, prCap, strings.Join(urls, ", "))
 }
 
 // runEngineer keeps Follow attached to eng for the rest of its life. Follow
@@ -571,6 +659,9 @@ func (m *Manager) Close() {
 	m.closed = true
 	m.mu.Unlock()
 
+	if m.prWatcherCancel != nil {
+		m.prWatcherCancel()
+	}
 	m.CancelAll("the fleet is shutting down")
 	m.wg.Wait()
 	m.baseCancel()

@@ -279,10 +279,11 @@ func (m *Model) ingestFleet(ev fleet.Event) {
 }
 
 // bufferFleetEvent appends ev, evicting the oldest KindProgress event first if
-// the buffer is already at capacity. A question or a result is never evicted
-// to make room — mirroring the tradeoff fleet.Manager.emit already makes on
-// its own channel: a lost progress line costs a transcript entry, a lost
-// question or result corrupts the architect's view of the fleet.
+// the buffer is already at capacity. A question, a result, or a pr event is
+// never evicted to make room — mirroring the tradeoff fleet.Manager.emit
+// already makes on its own channel: a lost progress line costs a transcript
+// entry, a lost question, result, or PR merge/close corrupts the architect's
+// view of the fleet.
 func bufferFleetEvent(buf []fleet.Event, ev fleet.Event) []fleet.Event {
 	if len(buf) >= fleetBufferCap {
 		for i, b := range buf {
@@ -387,8 +388,29 @@ func fleetEntry(ev fleet.Event) entry {
 			body += ": " + ev.Err.Error()
 		}
 		return entry{kind: eToolErr, body: body}
+
+	case fleet.KindPR:
+		if ev.PR == nil {
+			return entry{kind: eMeta, body: "PR event: unrecognized"}
+		}
+		return entry{kind: eMeta, body: fmt.Sprintf("PR %s: %s (%s)", prVerb(ev.PR.State), ev.PR.URL, ev.PR.Head)}
 	}
 	return entry{kind: eMeta, body: fmt.Sprintf("engineer %s: unrecognized event", ev.EngineerID)}
+}
+
+// prVerb turns a PREvent's raw gh state into the past-tense verb the
+// transcript and Await's text both read naturally with.
+func prVerb(state string) string {
+	switch state {
+	case "open":
+		return "opened"
+	case "merged":
+		return "merged"
+	case "closed":
+		return "closed"
+	default:
+		return state
+	}
 }
 
 // fleetEventText is what Await (or the buffer it drains) hands back to the
@@ -434,6 +456,12 @@ func fleetEventText(ev fleet.Event) string {
 			text += ": " + ev.Err.Error()
 		}
 		return text
+
+	case fleet.KindPR:
+		if ev.PR == nil {
+			return "a PR event could not be read"
+		}
+		return fmt.Sprintf("pr %s: %s (head %s)", prVerb(ev.PR.State), ev.PR.URL, ev.PR.Head)
 	}
 	return fmt.Sprintf("engineer_id %s: unrecognized event", ev.EngineerID)
 }

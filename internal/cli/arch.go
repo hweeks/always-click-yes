@@ -11,6 +11,7 @@ import (
 
 	"github.com/hweeks/always-click-yes/internal/config"
 	"github.com/hweeks/always-click-yes/internal/fleet"
+	"github.com/hweeks/always-click-yes/internal/gitops"
 	"github.com/hweeks/always-click-yes/internal/state"
 	"github.com/hweeks/always-click-yes/internal/supervisor"
 	"github.com/hweeks/always-click-yes/internal/term"
@@ -92,7 +93,21 @@ func runArch(ctx context.Context, f supervisor.Flags, changed func(string) bool)
 		return err
 	}
 
-	manager := fleet.NewManager(*fleetCfg, fleet.ForHost)
+	cwd := f.Cwd
+	if cwd == "" {
+		if cwd, err = os.Getwd(); err != nil {
+			return err
+		}
+	}
+
+	prCap := 0
+	if fleetCfg.PRCap != nil {
+		prCap = *fleetCfg.PRCap
+	}
+	watcher := fleet.NewPRWatcher(cwd, gitops.DefaultRunner, 0, nil)
+	go watcher.Run(ctx)
+
+	manager := fleet.NewManager(*fleetCfg, fleet.ForHost, fleet.WithPRWatcher(watcher, prCap))
 	f.ArchMode = true
 	f.Fleet = manager
 

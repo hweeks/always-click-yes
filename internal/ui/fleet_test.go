@@ -494,6 +494,48 @@ func TestFleetToolsAreIntercepted(t *testing.T) {
 	}
 }
 
+// --- pr events ---
+
+// A pr event renders in the transcript and, held behind an Await, resolves
+// it with text carrying the URL and head — mirroring TestAwaitHoldsThenResolvesOnEvent
+// for the new Kind.
+func TestAwaitReturnsPREvent(t *testing.T) {
+	fake := newFakeFleetManager()
+	fake.active = 1
+	m := &Model{phase: PhaseAutoRun, fleet: fake}
+	p, reply := fleetPending(mcp.ToolAwait, `{}`)
+	m.startAwait(p)
+
+	if m.fleetAwait == nil {
+		t.Fatal("Await with an engineer running and nothing buffered should hold, not resolve")
+	}
+
+	m.ingestFleet(fleet.Event{
+		Kind: fleet.KindPR,
+		PR:   &fleet.PREvent{URL: "https://example.com/pr/9", Head: "acy/t9-fix", Number: 9, State: "merged"},
+	})
+
+	if m.fleetAwait != nil {
+		t.Error("the held Await should be cleared once the pr event resolves it")
+	}
+	got := answer(t, reply)
+	for _, want := range []string{"merged", "https://example.com/pr/9", "acy/t9-fix"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("Await's answer = %q, missing %q", got, want)
+		}
+	}
+
+	if len(m.entries) != 1 {
+		t.Fatalf("want 1 transcript entry for the pr event, got %d", len(m.entries))
+	}
+	body := m.entries[0].body
+	for _, want := range []string{"PR merged", "https://example.com/pr/9", "acy/t9-fix"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("transcript entry = %q, missing %q", body, want)
+		}
+	}
+}
+
 // --- abandonment ---
 
 // An Await left holding when the session ends must still be answered, or the
