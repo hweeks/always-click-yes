@@ -84,15 +84,23 @@ type harness struct {
 
 // options configures a harness. The zero value is a fresh run in a scratch project.
 type options struct {
-	Cwd       string        // scratch project; defaults to a new temp dir
-	Resume    string        // resume this session id
-	Continue  bool          // resume the newest run in Cwd
-	Countdown time.Duration // gate countdown; short, so tests don't wait 30s per tool
-	Model     string
+	Cwd        string        // scratch project; defaults to a new temp dir
+	Resume     string        // resume this session id
+	Continue   bool          // resume the newest run in Cwd
+	Countdown  time.Duration // gate countdown; short, so tests don't wait 30s per tool
+	Model      string
+	ChildModel string
 
 	// ParentTools is the supervising session's --tools registry. Empty means
 	// the product default, which is what a test of real behaviour wants.
 	ParentTools []string
+
+	// ArchMode and Fleet mirror internal/cli/arch.go's own assembly of
+	// supervisor.Flags: ArchMode picks the architect role/prompt and Fleet
+	// wires its manager in. Both zero values (false, nil) leave every
+	// existing caller's behavior — a plain `acy run` session — unchanged.
+	ArchMode bool
+	Fleet    ui.FleetManager
 }
 
 // newHarness wires a real supervisor — real gate socket, real hook settings, real
@@ -133,12 +141,13 @@ func newHarness(t *testing.T, opt options) *harness {
 	t.Cleanup(cancel)
 
 	sup, err := supervisor.NewSupervisor(ctx, supervisor.Flags{
-		Bin:       "claude",
-		Cwd:       opt.Cwd,
-		HookBin:   bin,
-		Model:     opt.Model,
-		Countdown: opt.Countdown,
-		MaxLines:  10,
+		Bin:        "claude",
+		Cwd:        opt.Cwd,
+		HookBin:    bin,
+		Model:      opt.Model,
+		ChildModel: opt.ChildModel,
+		Countdown:  opt.Countdown,
+		MaxLines:   10,
 		// The real parent registry, not a stub. It used to be a deliberately
 		// useless single tool, which was fine when the plan phase only had to
 		// avoid writing — but the supervising session's registry is now the
@@ -148,6 +157,8 @@ func newHarness(t *testing.T, opt options) *harness {
 		LogPath:   filepath.Join(t.TempDir(), "acy-debug.log"),
 		Resume:    opt.Resume,
 		Continue:  opt.Continue,
+		ArchMode:  opt.ArchMode,
+		Fleet:     opt.Fleet,
 	})
 	if err != nil {
 		t.Fatalf("wire supervisor: %v", err)
