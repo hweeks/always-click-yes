@@ -28,9 +28,13 @@ func newMCPCmd() *cobra.Command {
 			r := mcp.ParseRole(role)
 			return mcp.Serve(os.Stdin, os.Stdout, r, func(name string, args json.RawMessage, toolUseID string) (string, error) {
 				switch name {
-				case mcp.ToolAsk, mcp.ToolDispatch:
-					// Both block on the supervisor: an ask until a human answers,
-					// a dispatch until a whole child process has run its task.
+				case mcp.ToolAsk, mcp.ToolDispatch,
+					mcp.ToolLaunchEngineer, mcp.ToolAwait, mcp.ToolAnswerEngineer, mcp.ToolFleetStatus:
+					// All of these block on the supervisor: an ask until a human
+					// answers, a dispatch until a whole child process has run its
+					// task, and the fleet tools until the supervisor's own fleet.go
+					// handlers resolve them (LaunchEngineer and AnswerEngineer are
+					// quick; Await can block for as long as an engineer takes).
 					// mcp.Ask's read is deliberately unbounded, which is already
 					// what a twenty-minute task needs.
 					a, err := mcp.Ask(socket, mcp.Request{
