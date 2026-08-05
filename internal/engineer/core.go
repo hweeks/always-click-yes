@@ -217,6 +217,13 @@ func (c *Core) build(ctx context.Context) (session, func(), error) {
 		Countdown:    instantApproveCountdown,
 		LogPath:      c.cfg.LogPath,
 		InterceptAsk: c.interceptAsk,
+		// Left unset, supervisor.Flags.PlanTools is empty, which driver.Options
+		// reads as "the full built-in registry" — the same Write/Edit/Bash acy
+		// run always keeps out of the supervising session. Without this, an
+		// engineer's supervising session could write and commit directly
+		// instead of delegating through Dispatch, the one guarantee this
+		// architecture exists to make (AGENTS.md, "Why the parent cannot write").
+		PlanTools: supervisor.DefaultParentTools,
 	}
 	return b(ctx, f)
 }
