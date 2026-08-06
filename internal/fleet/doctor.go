@@ -21,7 +21,7 @@ type Check struct {
 }
 
 // checkNames is the fixed order Doctor runs — and reports — checks in.
-var checkNames = []string{"ssh", "acy", "claude", "gh", "repo", "state"}
+var checkNames = []string{"ssh", "acy", "claude", "gh", "go", "repo", "state"}
 
 // Runner runs name with args, either on this machine or wrapped for a
 // remote host, and reports stdout and stderr separately. Doctor needs both:
@@ -138,6 +138,7 @@ func doctorWith(ctx context.Context, h config.FleetHost, base string, bare, path
 		checkACY(ctx, h, run),
 		checkClaude(ctx, h, run),
 		checkGH(ctx, h, run),
+		checkGo(ctx, h, run),
 		checkRepo(ctx, h, base, run),
 		checkState(ctx, run),
 	}
@@ -292,6 +293,32 @@ func checkGH(ctx context.Context, h config.FleetHost, run Runner) Check {
 		return Check{Name: "gh", OK: false, Detail: detail}
 	}
 	return Check{Name: "gh", OK: true}
+}
+
+// checkGo probes for a Go toolchain via `go version`, so an operator finds
+// out whether a host can build acy from source before a release ships with
+// no binaries to download — GitHub Actions has already done that once (see
+// AGENTS.md), and the fleet's only recourse then is building from each
+// host's own clone. Go is frequently missing from a non-interactive ssh
+// PATH even when installed (real example: /opt/homebrew/bin/go, reachable
+// only because that directory is listed in the host's fleet `path`), so a
+// not-found result gets the same withPathHint treatment as claude and gh.
+// Unlike those checks, though, a missing toolchain is not a failure: a host
+// that only ever runs a prebuilt acy binary is a perfectly good fleet
+// member — it just cannot build from source — so this reports OK:true with
+// an explanatory Detail either way, the same "OK anyway" call checkACY
+// makes for version skew. It never invokes a build itself; probing for the
+// toolchain and its version is the entire scope.
+func checkGo(ctx context.Context, h config.FleetHost, run Runner) Check {
+	stdout, stderr, err := run(ctx, "go", "version")
+	if err != nil {
+		detail := "no Go toolchain (host cannot build acy from source): " + detailFrom(stderr, err)
+		if looksNotFound(detail) {
+			detail = withPathHint(detail, h)
+		}
+		return Check{Name: "go", OK: true, Detail: detail}
+	}
+	return Check{Name: "go", OK: true, Detail: strings.TrimSpace(stdout)}
 }
 
 // checkRepo confirms h.RepoPath is a git worktree with base reachable on

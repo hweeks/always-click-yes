@@ -164,7 +164,7 @@ and let the interface enforce the rest.
   `local.go` / `ssh.go` (exec `acy engineer start`/`attach` directly, or over a hard-wired
   `BatchMode=yes` ssh), `follow.go` (reattach forever with backoff across a dropped
   connection), `prwatch.go` (poll `gh pr list` for `acy/`-headed PRs), `doctor.go` (the
-  six-check host health probe behind `acy fleet doctor`), `manager.go` (the orchestration
+  seven-check host health probe behind `acy fleet doctor`), `manager.go` (the orchestration
   core: per-host capacity, the fleet-wide run-budget ceiling, PR-cap backpressure). It owns
   no ticket state (`internal/tickets`) and decides nothing about *what* work to dispatch —
   that judgment call is the architect's alone.
@@ -677,6 +677,18 @@ are never paths — a token needs a separator or a leading `~`, or a sentence me
   input and the viewport — so typing those letters scrolled the transcript.
   `transcriptKeyMap()` in `update.go` restricts scrolling to the arrows and `PgUp`/`PgDn`.
   Don't hand the viewport an unrestricted keymap.
+- **A hand-run multi-argument ssh probe silently lies instead of erroring.** `ssh host --
+  zsh -c 'ls -l path'` gets joined into one space-separated string before the remote
+  side ever sees it, so `zsh -c` takes only its first word as the script and the rest
+  become `$0`/`$1` it never reads — `ls` runs with no arguments and lists `$HOME`
+  instead of failing loudly. `stat`, `command -v`, `type`, and a bare multi-word `echo`
+  all misbehave the same way, and a command placed after a `;` in the same string is
+  unaffected (the remote login shell parses that part directly), which is what makes it
+  so easy to misdiagnose live. Pass the remote command as one argument instead —
+  `ssh host 'zsh -lc "ls -l path"'` — and canary any hand-run probe with
+  `ssh host 'zsh -lc "echo A B C"'`: it must print `A B C`, not `A`. acy's own transport
+  (`quoteArgv`/`sshBatchArgs` in `internal/fleet`) already composes commands this way;
+  this only bites a human typing a probe by hand.
 
 ## Commands
 
@@ -689,7 +701,7 @@ go build -o acy .            # build (= make build)
 ./acy serve --port 7777      # ...on a fixed port; the host is always 127.0.0.1
 ./acy arch                   # plan -> arm -> a fleet of engineers, one PR per ticket
                               #   (requires a "fleet" section in .acy.json)
-./acy fleet doctor           # ssh/acy/claude/gh/git/state-dir health, per configured host
+./acy fleet doctor           # ssh/acy/claude/gh/go/git/state-dir health, per configured host
 ./acy engineer tail <id>     # replay + follow one engineer's journal, human-readable
 go test ./...                # unit tests (no network; = make test)
 go test -race ./...          # what CI runs (= make race)
