@@ -1,6 +1,7 @@
 package config
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -87,7 +88,7 @@ func TestLoadFileFleetExplicitValues(t *testing.T) {
 			"ticketCommit": "none",
 			"hosts": [
 				{"name": "local", "maxEngineers": 3},
-				{"name": "box1", "ssh": "user@box1", "repoPath": "/srv/repo", "maxEngineers": 2, "acyBin": "/opt/acy"}
+				{"name": "box1", "ssh": "user@box1", "repoPath": "/srv/repo", "maxEngineers": 2, "acyBin": "/opt/acy", "path": ["/opt/homebrew/bin", "/home/box1/.local/bin"]}
 			]
 		}
 	}`)
@@ -131,6 +132,13 @@ func TestLoadFileFleetExplicitValues(t *testing.T) {
 	if box1.SSH != "user@box1" || box1.RepoPath != "/srv/repo" || *box1.MaxEngineers != 2 || box1.ACYBin != "/opt/acy" {
 		t.Errorf("box1 host: %+v", box1)
 	}
+	wantPath := []string{"/opt/homebrew/bin", "/home/box1/.local/bin"}
+	if !reflect.DeepEqual(box1.Path, wantPath) {
+		t.Errorf("box1.Path = %v, want %v", box1.Path, wantPath)
+	}
+	if len(local.Path) != 0 {
+		t.Errorf("local.Path = %v, want empty (not set)", local.Path)
+	}
 }
 
 func TestLoadFileFleetRejectsBadInput(t *testing.T) {
@@ -147,6 +155,8 @@ func TestLoadFileFleetRejectsBadInput(t *testing.T) {
 		"negative run budget":      `{"fleet": {"runBudgetUSD": -1}}`,
 		"unknown key in fleet":     `{"fleet": {"bogusKey": "main"}}`,
 		"unknown key in host":      `{"fleet": {"hosts": [{"name": "a", "bogusKey": 2}]}}`,
+		"relative path entry":      `{"fleet": {"hosts": [{"name": "a", "path": ["bin"]}]}}`,
+		"tilde path entry":         `{"fleet": {"hosts": [{"name": "a", "path": ["~/bin"]}]}}`,
 	}
 	for name, content := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -175,5 +185,47 @@ func TestLoadFileFleetPRCapZeroIsAllowed(t *testing.T) {
 	}
 	if f.Fleet.PRCap == nil || *f.Fleet.PRCap != 0 {
 		t.Errorf("PRCap = %v, want explicit 0", f.Fleet.PRCap)
+	}
+}
+
+// A relative or "~"-prefixed path entry is rejected with an error naming
+// both the offending host and why: it is spliced into a remote shell
+// command, where "~" never expands and a relative entry resolves against
+// whatever directory ssh happens to land in.
+func TestLoadFileFleetPathRejectsNonAbsoluteEntries(t *testing.T) {
+	cases := map[string]string{
+		"relative": "bin",
+		"tilde":    "~/bin",
+	}
+	for name, entry := range cases {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeFile(t, dir, `{"fleet": {"hosts": [{"name": "box2", "path": ["`+entry+`"]}]}}`)
+			_, _, err := LoadFile(dir)
+			if err == nil {
+				t.Fatalf("want an error for path entry %q, got none", entry)
+			}
+			if !strings.Contains(err.Error(), "box2") {
+				t.Errorf("error should name the host: %v", err)
+			}
+			if !strings.Contains(err.Error(), "absolute") {
+				t.Errorf("error should say why: %v", err)
+			}
+		})
+	}
+}
+
+// Absolute path entries are accepted and preserved verbatim, in order.
+func TestLoadFileFleetPathAcceptsAbsoluteEntries(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, `{"fleet": {"hosts": [{"name": "local", "path": ["/opt/homebrew/bin", "/home/you/.local/bin"]}]}}`)
+
+	f, _, err := LoadFile(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"/opt/homebrew/bin", "/home/you/.local/bin"}
+	if !reflect.DeepEqual(f.Fleet.Hosts[0].Path, want) {
+		t.Errorf("Path = %v, want %v", f.Fleet.Hosts[0].Path, want)
 	}
 }

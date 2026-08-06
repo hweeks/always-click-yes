@@ -145,7 +145,7 @@ func TestCheckClaude(t *testing.T) {
 		sr := newScriptedRunner(map[string]response{
 			"claude auth status --json": {stdout: `{"loggedIn":true,"authMethod":"claude.ai","email":"a@b.com"}`},
 		})
-		c := checkClaude(context.Background(), sr.run)
+		c := checkClaude(context.Background(), config.FleetHost{}, sr.run)
 		if !c.OK || !strings.Contains(c.Detail, "a@b.com") {
 			t.Errorf("checkClaude = %+v", c)
 		}
@@ -155,9 +155,12 @@ func TestCheckClaude(t *testing.T) {
 		sr := newScriptedRunner(map[string]response{
 			"claude auth status --json": {stdout: `{"loggedIn":false}`},
 		})
-		c := checkClaude(context.Background(), sr.run)
+		c := checkClaude(context.Background(), config.FleetHost{}, sr.run)
 		if c.OK {
 			t.Fatal("not logged in should fail the check")
+		}
+		if strings.Contains(c.Detail, "fleet `path`") {
+			t.Errorf("Detail = %q, should not hint at path for a not-logged-in host", c.Detail)
 		}
 	})
 
@@ -166,7 +169,7 @@ func TestCheckClaude(t *testing.T) {
 			"claude auth status --json": {err: errors.New("exit status 1")},
 			"sh -c command -v claude":   {stdout: "/usr/local/bin/claude"},
 		})
-		c := checkClaude(context.Background(), sr.run)
+		c := checkClaude(context.Background(), config.FleetHost{}, sr.run)
 		if !c.OK {
 			t.Errorf("checkClaude = %+v, want OK from the PATH fallback", c)
 		}
@@ -175,17 +178,34 @@ func TestCheckClaude(t *testing.T) {
 		}
 	})
 
-	t.Run("claude missing entirely", func(t *testing.T) {
+	t.Run("claude missing entirely, no path configured, hints at the config", func(t *testing.T) {
 		sr := newScriptedRunner(map[string]response{
 			"claude auth status --json": {err: errors.New("exec: \"claude\": executable file not found in $PATH")},
 			"sh -c command -v claude":   {err: errors.New("exit status 1")},
 		})
-		c := checkClaude(context.Background(), sr.run)
+		c := checkClaude(context.Background(), config.FleetHost{}, sr.run)
 		if c.OK {
 			t.Fatal("want a failure when claude is nowhere to be found")
 		}
 		if !strings.Contains(c.Detail, "not found on PATH") {
 			t.Errorf("Detail = %q", c.Detail)
+		}
+		if !strings.Contains(c.Detail, "fleet `path`") {
+			t.Errorf("Detail = %q, want a hint about fleet `path`", c.Detail)
+		}
+	})
+
+	t.Run("claude missing entirely, path already configured, no hint", func(t *testing.T) {
+		sr := newScriptedRunner(map[string]response{
+			"claude auth status --json": {err: errors.New("exec: \"claude\": executable file not found in $PATH")},
+			"sh -c command -v claude":   {err: errors.New("exit status 1")},
+		})
+		c := checkClaude(context.Background(), config.FleetHost{Path: []string{"/opt/homebrew/bin"}}, sr.run)
+		if c.OK {
+			t.Fatal("want a failure when claude is nowhere to be found")
+		}
+		if strings.Contains(c.Detail, "fleet `path`") {
+			t.Errorf("Detail = %q, should not hint when path is already configured", c.Detail)
 		}
 	})
 }
@@ -193,7 +213,7 @@ func TestCheckClaude(t *testing.T) {
 func TestCheckGH(t *testing.T) {
 	t.Run("logged in", func(t *testing.T) {
 		sr := newScriptedRunner(map[string]response{"gh auth status": {}})
-		c := checkGH(context.Background(), sr.run)
+		c := checkGH(context.Background(), config.FleetHost{}, sr.run)
 		if !c.OK {
 			t.Errorf("checkGH = %+v", c)
 		}
@@ -203,9 +223,38 @@ func TestCheckGH(t *testing.T) {
 		sr := newScriptedRunner(map[string]response{
 			"gh auth status": {stderr: "You are not logged into any GitHub hosts.", err: errors.New("exit status 1")},
 		})
-		c := checkGH(context.Background(), sr.run)
+		c := checkGH(context.Background(), config.FleetHost{}, sr.run)
 		if c.OK || !strings.Contains(c.Detail, "not logged into") {
 			t.Errorf("checkGH = %+v", c)
+		}
+		if strings.Contains(c.Detail, "fleet `path`") {
+			t.Errorf("Detail = %q, should not hint at path for a not-logged-in host", c.Detail)
+		}
+	})
+
+	t.Run("not found, no path configured, hints at the config", func(t *testing.T) {
+		sr := newScriptedRunner(map[string]response{
+			"gh auth status": {stderr: "bash: line 1: gh: command not found", err: errors.New("exit status 127")},
+		})
+		c := checkGH(context.Background(), config.FleetHost{}, sr.run)
+		if c.OK {
+			t.Fatal("want a failure when gh is nowhere to be found")
+		}
+		if !strings.Contains(c.Detail, "fleet `path`") {
+			t.Errorf("Detail = %q, want a hint about fleet `path`", c.Detail)
+		}
+	})
+
+	t.Run("not found, path already configured, no hint", func(t *testing.T) {
+		sr := newScriptedRunner(map[string]response{
+			"gh auth status": {stderr: "bash: line 1: gh: command not found", err: errors.New("exit status 127")},
+		})
+		c := checkGH(context.Background(), config.FleetHost{Path: []string{"/opt/homebrew/bin"}}, sr.run)
+		if c.OK {
+			t.Fatal("want a failure when gh is nowhere to be found")
+		}
+		if strings.Contains(c.Detail, "fleet `path`") {
+			t.Errorf("Detail = %q, should not hint when path is already configured", c.Detail)
 		}
 	})
 }

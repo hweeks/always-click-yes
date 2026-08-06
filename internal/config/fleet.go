@@ -1,6 +1,9 @@
 package config
 
-import "fmt"
+import (
+	"fmt"
+	"path/filepath"
+)
 
 // FleetHost describes one machine an engineer can be launched on: the local
 // machine when SSH is empty, or a remote target reached over ssh.
@@ -10,6 +13,16 @@ type FleetHost struct {
 	RepoPath     string `json:"repoPath,omitempty"` // required when SSH is set; defaults to the project dir when local
 	MaxEngineers *int   `json:"maxEngineers,omitempty"`
 	ACYBin       string `json:"acyBin,omitempty"`
+	// Path is extra directories to prepend to PATH on this host, e.g.
+	// ["/opt/homebrew/bin", "/home/you/.local/bin"]. Non-interactive ssh
+	// (`ssh host cmd`) hands the remote command a minimal PATH — usually just
+	// /usr/bin:/bin — so a binary claude or gh actually depend on that lives
+	// somewhere like ~/.local/bin is simply not found, for the doctor checks
+	// and for the detached engineer daemon (and everything it execs) alike.
+	// Every entry must be an absolute path: it is spliced into a remote shell
+	// command, so a "~" entry would never expand there, and a relative one
+	// would resolve against whatever directory ssh happens to land in.
+	Path []string `json:"path,omitempty"`
 }
 
 // FleetConfig is the optional "fleet" object in .acy.json: shared defaults
@@ -103,6 +116,12 @@ func (f *FleetConfig) resolve(dir, path string) error {
 
 		if h.ACYBin == "" {
 			h.ACYBin = defaultACYBin
+		}
+
+		for j, p := range h.Path {
+			if !filepath.IsAbs(p) {
+				return fmt.Errorf("%s: fleet.hosts[%q].path[%d] must be an absolute path, got %q (a \"~\" entry won't expand where this runs)", path, h.Name, j, p)
+			}
 		}
 	}
 	return nil

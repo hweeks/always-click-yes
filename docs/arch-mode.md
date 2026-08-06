@@ -95,7 +95,8 @@ Arch mode requires a `"fleet"` section in `.acy.json`. Every field is optional e
         "ssh": "you@box2.example.com",
         "repoPath": "/home/you/proj",
         "maxEngineers": 2,
-        "acyBin": "acy"
+        "acyBin": "acy",
+        "path": ["/opt/homebrew/bin", "/home/you/.local/bin"]
       }
     ]
   }
@@ -136,6 +137,15 @@ Arch mode requires a `"fleet"` section in `.acy.json`. Every field is optional e
     separate fleet-wide cap beyond that.
   - **`acyBin`** (default `"acy"`) — how to invoke `acy` on that host, if it's not on
     `PATH` under the usual name.
+  - **`path`** — extra directories to prepend to `PATH` on that host, absolute only (a
+    relative or `~` entry is rejected at load time, since it never expands where this
+    runs). A non-interactive `ssh host cmd` hands the remote command a minimal PATH —
+    typically just `/usr/bin:/bin` — which is not where `claude` or `gh` actually live on
+    plenty of real machines (`~/.local/bin`, `/opt/homebrew/bin`, an nvm/asdf shim
+    directory). Without `path`, that starved PATH is what both `acy fleet doctor`'s checks
+    and the detached engineer daemon itself see — and the daemon's own children (`claude`,
+    `gh`, `git`) inherit that same environment, so a missing entry here breaks a real run,
+    not just a diagnostic.
 
 ## Running `acy arch`
 

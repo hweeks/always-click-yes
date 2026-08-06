@@ -37,26 +37,29 @@ func runnerForHost(h config.FleetHost) Runner {
 	if h.SSH == "" {
 		return runLocal
 	}
-	return sshRunner(h.SSH)
+	return sshRunner(h.SSH, h.Path)
 }
 
 func runLocal(ctx context.Context, name string, args ...string) (string, string, error) {
 	return runCaptured(exec.CommandContext(ctx, name, args...)) //nolint:gosec // name/args are doctor's own fixed argv, never user input
 }
 
-// sshRunner wraps every command in target's BatchMode ssh preamble. ssh
-// itself joins its trailing arguments with a bare space before handing them
-// to the remote shell, so a multi-word argument like "command -v claude"
-// would come apart into extra positional parameters unless it is quoted —
-// shellQuote is what keeps each argv element intact on the other end.
-func sshRunner(target string) Runner {
+// sshDoctorArgs composes the full ssh argv for running name+args on target,
+// extending PATH first when dirs (FleetHost.Path) is set. ssh itself joins
+// its trailing arguments with a bare space before handing them to the
+// remote shell, so a multi-word argument like "command -v claude" would
+// come apart into extra positional parameters unless the whole thing is
+// quoted and passed as one — which is also what lets pathPreamble's
+// `export PATH=...; exec ` sit in front of it as a single command.
+func sshDoctorArgs(target string, dirs []string, name string, args []string) []string {
+	cmd := pathPreamble(dirs) + quoteArgv(append([]string{name}, args...))
+	return append(sshBatchArgs(target), cmd)
+}
+
+// sshRunner wraps every command in target's BatchMode ssh preamble.
+func sshRunner(target string, dirs []string) Runner {
 	return func(ctx context.Context, name string, args ...string) (string, string, error) {
-		parts := make([]string, 0, len(args)+1)
-		parts = append(parts, shellQuote(name))
-		for _, a := range args {
-			parts = append(parts, shellQuote(a))
-		}
-		argv := append(sshBatchArgs(target), strings.Join(parts, " "))
+		argv := sshDoctorArgs(target, dirs, name, args)
 		return runCaptured(exec.CommandContext(ctx, "ssh", argv...)) //nolint:gosec // target/argv are operator-configured, not user input
 	}
 }
@@ -108,8 +111,8 @@ func doctorWith(ctx context.Context, h config.FleetHost, base string, run Runner
 	return []Check{
 		ssh,
 		checkACY(ctx, h, run),
-		checkClaude(ctx, run),
-		checkGH(ctx, run),
+		checkClaude(ctx, h, run),
+		checkGH(ctx, h, run),
 		checkRepo(ctx, h, base, run),
 		checkState(ctx, run),
 	}
@@ -170,13 +173,38 @@ type claudeAuthStatus struct {
 	Email      string `json:"email"`
 }
 
+// pathHintSuffix is appended to a doctor Detail when "claude" or "gh" comes
+// back not-found and the host has no fleet `path` configured to fix it.
+// Non-interactive ssh hands the remote command a minimal PATH, so a binary
+// living somewhere non-standard (~/.local/bin, /opt/homebrew/bin — where
+// claude and gh actually live on plenty of real machines) is invisible to
+// this check and to the detached engineer daemon it stands in for.
+const pathHintSuffix = "; if it is installed somewhere non-standard, add its directory to this host's fleet `path` in .acy.json"
+
+// withPathHint appends pathHintSuffix to detail when h has no fleet `path`
+// configured, so the hint never duplicates advice an operator has already
+// acted on.
+func withPathHint(detail string, h config.FleetHost) string {
+	if len(h.Path) == 0 {
+		return detail + pathHintSuffix
+	}
+	return detail
+}
+
+// looksNotFound reports whether detail describes a missing binary rather
+// than some other failure — a local exec.ErrNotFound message, or the
+// remote shell's "not found"/"command not found" wording over ssh.
+func looksNotFound(detail string) bool {
+	return strings.Contains(strings.ToLower(detail), "not found")
+}
+
 // checkClaude prefers `claude auth status --json`: it is free (no model
 // call) and answers the real question, whether this host can actually
 // authenticate, not just whether a binary exists. If that command itself
 // isn't there — an older claude, or claude missing entirely — this falls
 // back to a bare PATH check and says plainly that auth was not verified,
 // rather than guessing.
-func checkClaude(ctx context.Context, run Runner) Check {
+func checkClaude(ctx context.Context, h config.FleetHost, run Runner) Check {
 	stdout, _, err := run(ctx, "claude", "auth", "status", "--json")
 	if err == nil {
 		var st claudeAuthStatus
@@ -189,17 +217,21 @@ func checkClaude(ctx context.Context, run Runner) Check {
 	}
 
 	if _, _, pathErr := run(ctx, "sh", "-c", "command -v claude"); pathErr != nil {
-		return Check{Name: "claude", OK: false, Detail: "claude not found on PATH"}
+		return Check{Name: "claude", OK: false, Detail: withPathHint("claude not found on PATH", h)}
 	}
 	return Check{Name: "claude", OK: true, Detail: "claude found on PATH; auth was not verified (claude auth status unavailable)"}
 }
 
 // checkGH is a bare gh auth status: gh already prints exactly what a human
 // needs on stderr and exits nonzero on anything short of a logged-in host.
-func checkGH(ctx context.Context, run Runner) Check {
+func checkGH(ctx context.Context, h config.FleetHost, run Runner) Check {
 	_, stderr, err := run(ctx, "gh", "auth", "status")
 	if err != nil {
-		return Check{Name: "gh", OK: false, Detail: detailFrom(stderr, err)}
+		detail := detailFrom(stderr, err)
+		if looksNotFound(detail) {
+			detail = withPathHint(detail, h)
+		}
+		return Check{Name: "gh", OK: false, Detail: detail}
 	}
 	return Check{Name: "gh", OK: true}
 }

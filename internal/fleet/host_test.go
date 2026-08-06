@@ -102,3 +102,17 @@ func TestForHostSSH(t *testing.T) {
 		})
 	}
 }
+
+// FleetHost.Path must reach the sshTransport unchanged — that's what makes
+// it available to sshArgs when Start/Attach build the remote command.
+func TestForHostSSHCarriesPath(t *testing.T) {
+	h := config.FleetHost{Name: "box1", SSH: "user@box1", RepoPath: "/srv/repo", Path: []string{"/opt/homebrew/bin"}}
+	tr := ForHost(h)
+	st, ok := tr.(*sshTransport)
+	if !ok {
+		t.Fatalf("ForHost(%+v) = %T, want *sshTransport", h, tr)
+	}
+	if len(st.path) != 1 || st.path[0] != "/opt/homebrew/bin" {
+		t.Errorf("path = %v, want [/opt/homebrew/bin]", st.path)
+	}
+}
