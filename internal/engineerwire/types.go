@@ -52,6 +52,9 @@ type Spec struct {
 
 	BudgetUSD    float64 `json:"budget_usd,omitempty"`
 	DeadmanHours float64 `json:"deadman_hours,omitempty"`
+
+	VerifyCommands       []string `json:"verify_commands,omitempty"`
+	VerifyTimeoutSeconds int      `json:"verify_timeout_seconds,omitempty"`
 }
 
 // Answer resolves one Question, matched by QuestionID.

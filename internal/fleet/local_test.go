@@ -47,11 +47,9 @@ func TestLocalTransportStartRoundTrip(t *testing.T) {
 	if err := json.Unmarshal([]byte(readFile(t, stdinFile)), &gotSpec); err != nil {
 		t.Fatalf("stdin was not a valid spec line: %v", err)
 	}
-	if gotSpec != spec {
-		// Spec has a Type field Marshal stamps; compare the fields we set.
-		if gotSpec.Ticket != spec.Ticket || gotSpec.Title != spec.Title || gotSpec.Brief != spec.Brief {
-			t.Errorf("stdin spec = %+v, want %+v", gotSpec, spec)
-		}
+	// Spec has a Type field Marshal stamps; compare the fields we set.
+	if gotSpec.Ticket != spec.Ticket || gotSpec.Title != spec.Title || gotSpec.Brief != spec.Brief {
+		t.Errorf("stdin spec = %+v, want %+v", gotSpec, spec)
 	}
 }
 

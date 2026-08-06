@@ -802,3 +802,41 @@ func TestManagerCloseStopsPRForwarder(t *testing.T) {
 		t.Fatal("Close did not return; the pr forwarding goroutine likely deadlocked")
 	}
 }
+
+// buildSpec carries the fleet's verify config through to the engineer's
+// Spec, dereferencing VerifyTimeoutSeconds the same way DeadmanHours already
+// is a few lines above it.
+func TestBuildSpecCarriesVerifyConfig(t *testing.T) {
+	cfg := testFleetConfig(testHost("a", 1))
+	cfg.VerifyCommands = []string{"go build ./...", "go test ./..."}
+	cfg.VerifyTimeoutSeconds = new(120)
+
+	spec := buildSpec(cfg, LaunchReq{Ticket: "T1"}, "T1", "eng/t1", 1.0)
+
+	if got, want := spec.VerifyCommands, cfg.VerifyCommands; len(got) != len(want) {
+		t.Fatalf("VerifyCommands = %v, want %v", got, want)
+	} else {
+		for i := range want {
+			if got[i] != want[i] {
+				t.Errorf("VerifyCommands[%d] = %q, want %q", i, got[i], want[i])
+			}
+		}
+	}
+	if spec.VerifyTimeoutSeconds != 120 {
+		t.Errorf("VerifyTimeoutSeconds = %d, want 120", spec.VerifyTimeoutSeconds)
+	}
+}
+
+// A FleetConfig a test constructs directly, rather than through
+// config.FleetConfig's resolve, may leave VerifyTimeoutSeconds nil —
+// buildSpec must not panic dereferencing it, and should fall back to 0.
+func TestBuildSpecVerifyTimeoutNilDefaultsToZero(t *testing.T) {
+	cfg := testFleetConfig(testHost("a", 1))
+	cfg.VerifyTimeoutSeconds = nil
+
+	spec := buildSpec(cfg, LaunchReq{Ticket: "T1"}, "T1", "eng/t1", 1.0)
+
+	if spec.VerifyTimeoutSeconds != 0 {
+		t.Errorf("VerifyTimeoutSeconds = %d, want 0", spec.VerifyTimeoutSeconds)
+	}
+}
