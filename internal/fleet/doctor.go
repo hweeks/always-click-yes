@@ -205,15 +205,17 @@ func looksNotFound(detail string) bool {
 // back to a bare PATH check and says plainly that auth was not verified,
 // rather than guessing.
 func checkClaude(ctx context.Context, h config.FleetHost, run Runner) Check {
-	stdout, _, err := run(ctx, "claude", "auth", "status", "--json")
-	if err == nil {
-		var st claudeAuthStatus
-		if jsonErr := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &st); jsonErr == nil {
-			if st.LoggedIn {
-				return Check{Name: "claude", OK: true, Detail: fmt.Sprintf("logged in via %s as %s", st.AuthMethod, st.Email)}
-			}
-			return Check{Name: "claude", OK: false, Detail: "claude is installed but not logged in"}
+	stdout, _, _ := run(ctx, "claude", "auth", "status", "--json")
+	// claude exits nonzero when not logged in, even though it still prints
+	// valid, informative JSON on stdout — so this parses stdout regardless
+	// of the command's exit status, and only falls back to a bare PATH check
+	// when stdout itself isn't the JSON this subcommand promises.
+	var st claudeAuthStatus
+	if jsonErr := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &st); jsonErr == nil {
+		if st.LoggedIn {
+			return Check{Name: "claude", OK: true, Detail: fmt.Sprintf("logged in via %s as %s", st.AuthMethod, st.Email)}
 		}
+		return Check{Name: "claude", OK: false, Detail: "claude is installed but not logged in"}
 	}
 
 	if _, _, pathErr := run(ctx, "sh", "-c", "command -v claude"); pathErr != nil {

@@ -164,6 +164,21 @@ func TestCheckClaude(t *testing.T) {
 		}
 	})
 
+	t.Run("not logged in with a nonzero exit still parses the JSON", func(t *testing.T) {
+		// Real claude exits 1 when not logged in, even though it still
+		// prints valid, informative JSON on stdout.
+		sr := newScriptedRunner(map[string]response{
+			"claude auth status --json": {stdout: `{"loggedIn":false,"authMethod":"none"}`, err: errors.New("exit status 1")},
+		})
+		c := checkClaude(context.Background(), config.FleetHost{}, sr.run)
+		if c.OK {
+			t.Fatal("not logged in should fail the check even when the command itself exits nonzero")
+		}
+		if !strings.Contains(c.Detail, "not logged in") {
+			t.Errorf("Detail = %q", c.Detail)
+		}
+	})
+
 	t.Run("auth status unavailable, falls back to PATH and says so", func(t *testing.T) {
 		sr := newScriptedRunner(map[string]response{
 			"claude auth status --json": {err: errors.New("exit status 1")},
