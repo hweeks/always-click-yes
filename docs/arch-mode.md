@@ -1,0 +1,242 @@
+# Arch mode: running a fleet of engineers
+
+`acy arch` is `acy run` for a whole fleet of machines instead of one checkout. This is
+the operator's guide — what to prepare before you point it at real hosts, what the
+config means, and what a run actually looks like. For the wire format between the
+architect and its engineers, see [`docs/engineer-protocol.md`](engineer-protocol.md).
+For what took real probing to get right, see [`AGENTS.md`](../AGENTS.md)'s "Arch mode"
+section — this document assumes that's correct and doesn't repeat it.
+
+## What arch mode is
+
+A plain `acy run` has one supervising session that reads your codebase and delegates
+tasks to disposable local children. `acy arch` scales that up one level: the
+supervising session becomes the **architect**, and instead of dispatching a local
+child for each task, it launches a whole **engineer** — a full, unattended `acy`
+instance — for each ticket. An engineer gets its own git worktree and branch, plans
+its own subtasks the same way a plain `acy run` would, and finishes by opening a PR.
+The architect's job shrinks to exactly what a human orchestrating several engineers
+by hand would do: decide the tickets, launch them up to capacity, react to results
+and questions, and keep the board honest.
+
+Nothing here is simulated. An engineer is a real `acy engineer` process running on a
+real host, driving a real `claude` session, with the same PreToolUse gate and
+countdown a plain `acy run` has — just with nobody local watching it.
+
+## Preparing a host
+
+Every host you point `hosts` at should be one you'd trust an unattended process on —
+read the [trust paragraph](#the-trust-paragraph) before you configure a single one.
+Concretely, each host needs:
+
+- **A dedicated or disposable machine, or at least a dedicated checkout.** An engineer
+  runs `git`, `gh`, and arbitrary shell in a worktree of its own, but it shares the
+  host's `claude` auth, `gh` auth, and everything else on the box. Don't point it at a
+  machine that also holds work you can't afford an unattended agent to touch.
+  `internal/gitops` scopes what it does to the worktree it creates, not to what the
+  engineer's own shell commands can reach.
+- **Key-only SSH, in `BatchMode`.** `internal/fleet/ssh.go` hard-wires
+  `-o BatchMode=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=4` into every ssh
+  invocation — this is not configurable, on purpose. An interactive password or
+  host-key prompt is exactly the kind of thing an unattended engineer would hang
+  behind forever, so the fleet transport refuses to offer one a chance to appear. Get
+  your key onto the host and accept its host key by hand (`ssh -o BatchMode=yes
+  you@host true` should succeed silently) before you ever put it in `.acy.json`.
+- **A clone of the repo already on the host**, at the path you'll put in
+  `hosts[].repoPath`. Arch mode doesn't clone anything for you.
+- **`claude` authenticated on that host.** However you normally authenticate (login or
+  `ANTHROPIC_API_KEY`), it has to already work there — an engineer inherits whatever
+  the host's `claude` sees.
+- **`gh` authenticated, scoped to the repo the engineers will open PRs against.** The
+  engineer's own deterministic `gitops.CreatePR` call is the only thing that ever
+  opens a PR (see AGENTS.md on why the *model* is never told to), but it still runs as
+  whatever `gh` identity the host has.
+- **An `acy` binary on the host, version-matched to the one driving the architect.**
+  `acy fleet doctor` checks this and warns (not fails) on a mismatch — a skewed
+  version is the kind of thing that's fine until the wire protocol changes underneath
+  it.
+
+Run `acy fleet doctor` against every host before trusting a real run to it:
+
+```sh
+acy fleet doctor            # table output, one row per host
+acy fleet doctor --json     # machine-readable, same checks
+```
+
+It runs six checks per host, in order, and stops early if `ssh` itself fails (nothing
+past that point can succeed anyway): `ssh` reachability, the `acy` binary's presence
+and version, `claude auth status` (or a bare PATH check if that subcommand doesn't
+exist), `gh auth status`, the git worktree and `origin` reachability, and whether
+`$ACY_STATE_DIR/engineers` (or its OS-default equivalent) is actually writable on
+that host. Fix everything doctor flags before running `acy arch` for real — a host
+that fails silently mid-run is a stuck engineer nobody is watching.
+
+## The fleet config
+
+Arch mode requires a `"fleet"` section in `.acy.json`. Every field is optional except
+`hosts[].name`; nothing below runs at all if `"fleet"` is absent.
+
+```json
+{
+  "fleet": {
+    "baseBranch": "main",
+    "prCap": 4,
+    "engineerModel": "sonnet",
+    "engineerChildModel": "sonnet",
+    "engineerEffort": "medium",
+    "engineerBudgetUSD": 15,
+    "runBudgetUSD": 200,
+    "deadmanHours": 24,
+    "ticketCommit": "direct",
+    "hosts": [
+      { "name": "local" },
+      {
+        "name": "box2",
+        "ssh": "you@box2.example.com",
+        "repoPath": "/home/you/proj",
+        "maxEngineers": 2,
+        "acyBin": "acy"
+      }
+    ]
+  }
+}
+```
+
+- **`baseBranch`** (default `"main"`) — the branch every engineer's worktree and PR
+  target.
+- **`prCap`** (default `4`) — how many `acy/`-headed PRs may be open at once, across
+  the whole fleet, before `LaunchEngineer` refuses and the architect has to `Await` a
+  merge first. This is the fleet's backpressure valve — see
+  [PR-cap backpressure](#pr-cap-backpressure).
+- **`engineerModel`** / **`engineerChildModel`** / **`engineerEffort`** — the model an
+  engineer's own supervising session uses, the model its own dispatched children use,
+  and the reasoning effort for those children. Same knobs as `acy run --model` /
+  `--child-model` / `--child-effort`, just applied per-engineer instead of per-run.
+- **`engineerBudgetUSD`** — a spend ceiling for one engineer (default: unlimited).
+  Clamped down further by whatever's left under `runBudgetUSD` — see
+  [Budgets](#budgets).
+- **`runBudgetUSD`** — a spend ceiling for the *whole fleet*, summed across every
+  engineer that's ever launched this run (default: unlimited). `LaunchEngineer` itself
+  refuses once this is exhausted.
+- **`deadmanHours`** (default `24`) — the hard ceiling on one engineer's own runtime,
+  regardless of what the architect does. See [the trust paragraph](#the-trust-paragraph)
+  — this is what bounds an orphan.
+- **`ticketCommit`** (default `"direct"`, or `"none"`) — whether the ticket board
+  (`.acy/tickets/*.md` in the repo) is committed and pushed as it changes, or left as
+  local, uncommitted state.
+- **`hosts`** — the machines engineers may run on. A host with no `ssh` runs engineers
+  locally, as direct child processes of the architect's own host; anything with `ssh`
+  reaches the target over the hard-wired `BatchMode` ssh described above.
+  - **`name`** — required, unique. What `FleetStatus` and the ticket board refer to it as.
+  - **`ssh`** — an ssh target (`user@host`); omit for the local host.
+  - **`repoPath`** — the clone's path on that host. Required if `ssh` is set; defaults
+    to the current project directory for a local host.
+  - **`maxEngineers`** (default `1`) — how many engineers may run concurrently on this
+    one host. Fleet-wide concurrency is just the sum across hosts — there's no
+    separate fleet-wide cap beyond that.
+  - **`acyBin`** (default `"acy"`) — how to invoke `acy` on that host, if it's not on
+    `PATH` under the usual name.
+
+## Running `acy arch`
+
+```sh
+acy arch
+```
+
+opens the same TUI a plain `acy run` does, in PLAN phase, with the architect's
+system prompt in place of the parent's. The flow:
+
+1. **Plan.** You talk to the architect the way you'd talk to a plain `acy run`'s
+   parent session — it can read the codebase (`Read`/`Grep`/`Glob`) and nothing else.
+   Work out what needs doing.
+2. **Tickets.** Once you approve the plan, the architect turns it into board entries —
+   one `CreateTicket` call per PR-sized unit of work — *before* launching anything.
+   Each ticket's brief has to stand completely alone, the same way a `Dispatch`
+   instruction does: the engineer that eventually runs it starts with no memory of
+   this conversation.
+3. **Arm (`Ctrl+G`).** Flips the session into AUTO-RUN, same keystroke as a plain run.
+   The architect gets one kickoff prompt: launch engineers for the first tickets up
+   to capacity, then `Await`.
+4. **Launch / `Await` loop.** This is the architect's main loop, and it's a loop, not
+   a queue it drains once: launch up to whatever capacity `hosts[].maxEngineers` and
+   `prCap` allow, then block on `Await` for the next fleet event — an engineer's
+   result, an escalated question, a PR merge or close, or a reconnect notice after a
+   dropped connection — react to it, and loop. `FleetStatus` gives it (and you, via
+   `/fleet`) a non-blocking snapshot of every engineer's state, host, branch, PR and
+   cost without waiting for the next event.
+5. **PR-cap backpressure.** <a name="pr-cap-backpressure"></a> Once `prCap` PRs are
+   open, `LaunchEngineer` refuses with a message telling the architect to `Await`
+   merges first. This is deliberate: it's the difference between a fleet that keeps
+   working ahead of what a human can review, and one that piles up PRs faster than
+   anyone can merge them. Raise `prCap` if you actually have the review bandwidth for
+   it, not as a way around the refusal.
+6. **Merge-driven ticket updates.** `internal/fleet`'s `PRWatcher` polls `gh pr list`
+   and turns a merged or closed `acy/`-headed PR into a fleet event, but nothing in
+   `fleet` or `ui` writes the ticket board on its own — the architect's system prompt
+   tells it to call `UpdateTicket` at every transition (launch → in-progress → PR
+   opened → in-review → merged, or blocked with a note), so the board is prompt-driven
+   state, not code-driven state. `/tickets` shows you the same board the architect
+   reads.
+7. **Finish.** The architect calls `Finish` once every ticket is merged or otherwise
+   accounted for (blocked with a note is accounted for; silently unmentioned isn't).
+
+## Resuming after a crash
+
+Nothing about a crash here is unusual by arch mode's standards — it's the normal
+case a fleet has to survive, not an edge case. Two independent things get restored:
+
+- **The architect's own session and board** resume exactly the way a plain `acy run`
+  does: `acy --continue` (or `--resume <id>`) restores the transcript, phase, plan and
+  cost from `acy`'s own state snapshot, the same as any other run.
+- **Each engineer's progress** is never lost, because it was never only in the
+  architect's head to begin with — it's in that engineer's own journal
+  (`internal/engineerwire`), on whichever host it's running on, independent of
+  whether the architect is even alive to watch it. A resumed architect re-attaches to
+  every engineer the ledger remembers, replays each journal from wherever it left
+  off, and picks the loop back up — it does not re-launch anything the ledger already
+  has a record of. This is what `TestE2EArchResumeRecoversEngineer` proves: kill the
+  architect mid-flight, and its detached engineer finishes the ticket and opens the PR
+  with nobody attached to it the whole time; a resumed architect only has to notice
+  the `Result` sitting in the journal.
+
+If the architect crashes *and* you never resume it, the engineers it launched don't
+notice or care — they keep running until they finish, hit their own budget, or hit
+`deadmanHours`. That's a feature: an unattended engineer's job doesn't depend on an
+unattended architect staying alive to supervise it.
+
+## Budgets
+
+Two independent ceilings, checked in order:
+
+- **`fleet.engineerBudgetUSD`** bounds what any one engineer may spend. It's further
+  clamped to whatever's left under the fleet-wide ceiling at launch time, so a
+  generous per-engineer budget can't outbid a tighter fleet-wide one.
+- **`fleet.runBudgetUSD`** bounds the *fleet*, summed across every engineer launched
+  this run. `LaunchEngineer` itself refuses once this is exhausted, with a message
+  telling the architect to ask a human to raise it or `Finish` — not to retry on its
+  own.
+
+Neither has a default ceiling (both are unlimited unless you set them). Set
+`runBudgetUSD` before a real run the same way you'd think about `--task-budget` on a
+plain `acy run` — it's the number that keeps a fleet that's misbehaving from being a
+number you only find out about later.
+
+## The trust paragraph
+
+An engineer is an unattended agent with `Bash` on whatever machine it runs, auto-
+approving its own tool calls on exactly the countdown `acy run` uses. Nothing is
+watching it between the moment the architect launches it and the moment it reports
+back a result or a question. Detached, it keeps working with no ssh connection, no
+attach, and no architect at all — that's not a bug in the detachment model, that's
+the entire point of it, and it means the usual instinct to "just go check on it" does
+not apply the way it would to a process you can see. The `deadmanHours` ceiling is
+what actually bounds an orphaned engineer if nobody ever comes back for it; without
+it, a stuck or looping engineer runs until its own task budget or the host itself
+stops it.
+
+Point `hosts` only at machines and repos you would trust an unsupervised process on,
+for exactly the same reason `acy run` itself is worth sitting with: this tool is
+built to find out what happens when you stop pretending a human needs to watch every
+step, and to be honest about the failure modes when it does, rather than quietly
+cleaning them up before anyone notices. A fleet of engineers is that bet multiplied
+by however many hosts you configure.
