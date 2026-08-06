@@ -398,6 +398,27 @@ func fleetEntry(ev fleet.Event) entry {
 				body += "\nPR: " + ev.Result.PRURL
 			}
 			body += fmt.Sprintf("\n$%.4f", ev.Result.CostUSD)
+			if len(ev.Result.Verification) > 0 {
+				vs := summarizeVerification(ev.Result.Verification)
+				body += "\nverification: " + vs.countLine
+				if vs.anyFailed() {
+					lines := make([]string, 0, len(vs.failed)+1)
+					for _, c := range vs.failed {
+						lines = append(lines, fmt.Sprintf("  FAILED: %s (exit %d)", c.Name, c.ExitCode))
+					}
+					if vs.moreFailed > 0 {
+						lines = append(lines, fmt.Sprintf("  ...and %d more", vs.moreFailed))
+					}
+					lines[len(lines)-1] += " (see journal for output)"
+					body += "\n" + strings.Join(lines, "\n")
+					// Checked directly, not inferred from Outcome: finalize
+					// (internal/engineer) already flips Outcome to "failed"
+					// when a check fails, but that lives in a different
+					// package — a later change there must not silently make
+					// a red verification result render green here.
+					kind = eWarn
+				}
+			}
 		}
 		return entry{kind: kind, body: body}
 
@@ -467,6 +488,21 @@ func fleetEventText(ev fleet.Event) string {
 			text += "\npr_url " + ev.Result.PRURL
 		}
 		text += fmt.Sprintf("\ncost_usd %.4f", ev.Result.CostUSD)
+		if len(ev.Result.Verification) > 0 {
+			vs := summarizeVerification(ev.Result.Verification)
+			text += "\nverification " + vs.countLine
+			if vs.anyFailed() {
+				lines := make([]string, 0, len(vs.failed)+1)
+				for _, c := range vs.failed {
+					lines = append(lines, fmt.Sprintf("verification FAILED: %s (exit %d)", c.Name, c.ExitCode))
+				}
+				if vs.moreFailed > 0 {
+					lines = append(lines, fmt.Sprintf("verification ...and %d more", vs.moreFailed))
+				}
+				lines[len(lines)-1] += " (see journal for output)"
+				text += "\n" + strings.Join(lines, "\n")
+			}
+		}
 		return text
 
 	case fleet.KindReconnected:
@@ -486,6 +522,72 @@ func fleetEventText(ev fleet.Event) string {
 		return fmt.Sprintf("pr %s: %s (head %s)", prVerb(ev.PR.State), ev.PR.URL, ev.PR.Head)
 	}
 	return fmt.Sprintf("engineer_id %s: unrecognized event", ev.EngineerID)
+}
+
+// verifyFailedListCap bounds how many failing checks fleetEventText and
+// fleetEntry name individually — enough to point at the culprits without a
+// run with dozens of failing checks ballooning either rendering.
+const verifyFailedListCap = 3
+
+// verifyStatusOrder fixes the order status counts render in (passed before
+// failed before skipped before timeout before error), so the same checks
+// always summarize identically regardless of the order acy ran them in.
+var verifyStatusOrder = []engineerwire.VerifyStatus{
+	engineerwire.VerifyPassed,
+	engineerwire.VerifyFailed,
+	engineerwire.VerifySkipped,
+	engineerwire.VerifyTimeout,
+	engineerwire.VerifyError,
+}
+
+// verifySummary is the shared shape fleetEventText and fleetEntry both
+// render a Result's Verification from, so the two views — the architect's
+// terse context and the human transcript — can never disagree about how
+// many checks count as which status or which ones made the failing list.
+type verifySummary struct {
+	// countLine is e.g. "2 passed, 1 failed, 1 skipped" — statuses with a
+	// zero count are omitted.
+	countLine string
+	// failed holds up to verifyFailedListCap checks with Status == "failed",
+	// in the order they appear in the input.
+	failed []engineerwire.VerifyCheck
+	// moreFailed is how many additional failing checks did not fit in failed.
+	moreFailed int
+}
+
+// anyFailed reports whether at least one check failed — the signal a caller
+// should use to make a failure unmissable, regardless of Outcome.
+func (vs verifySummary) anyFailed() bool {
+	return len(vs.failed) > 0 || vs.moreFailed > 0
+}
+
+// summarizeVerification counts checks by status and picks out up to
+// verifyFailedListCap failing ones. Call with a non-empty checks; a nil or
+// empty slice has nothing to summarize.
+func summarizeVerification(checks []engineerwire.VerifyCheck) verifySummary {
+	counts := make(map[engineerwire.VerifyStatus]int, len(verifyStatusOrder))
+	var failed []engineerwire.VerifyCheck
+	for _, c := range checks {
+		counts[c.Status]++
+		if c.Status == engineerwire.VerifyFailed {
+			failed = append(failed, c)
+		}
+	}
+
+	parts := make([]string, 0, len(verifyStatusOrder))
+	for _, status := range verifyStatusOrder {
+		if n := counts[status]; n > 0 {
+			parts = append(parts, fmt.Sprintf("%d %s", n, status))
+		}
+	}
+
+	vs := verifySummary{countLine: strings.Join(parts, ", ")}
+	if len(failed) > verifyFailedListCap {
+		vs.moreFailed = len(failed) - verifyFailedListCap
+		failed = failed[:verifyFailedListCap]
+	}
+	vs.failed = failed
+	return vs
 }
 
 // questionsText renders an engineer's escalated questions into one line per
