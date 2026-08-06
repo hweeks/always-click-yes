@@ -164,7 +164,7 @@ and let the interface enforce the rest.
   `local.go` / `ssh.go` (exec `acy engineer start`/`attach` directly, or over a hard-wired
   `BatchMode=yes` ssh), `follow.go` (reattach forever with backoff across a dropped
   connection), `prwatch.go` (poll `gh pr list` for `acy/`-headed PRs), `doctor.go` (the
-  six-check host health probe behind `acy fleet doctor`), `manager.go` (the orchestration
+  seven-check host health probe behind `acy fleet doctor`), `manager.go` (the orchestration
   core: per-host capacity, the fleet-wide run-budget ceiling, PR-cap backpressure). It owns
   no ticket state (`internal/tickets`) and decides nothing about *what* work to dispatch —
   that judgment call is the architect's alone.
@@ -701,7 +701,7 @@ go build -o acy .            # build (= make build)
 ./acy serve --port 7777      # ...on a fixed port; the host is always 127.0.0.1
 ./acy arch                   # plan -> arm -> a fleet of engineers, one PR per ticket
                               #   (requires a "fleet" section in .acy.json)
-./acy fleet doctor           # ssh/acy/claude/gh/git/state-dir health, per configured host
+./acy fleet doctor           # ssh/acy/claude/gh/go/git/state-dir health, per configured host
 ./acy engineer tail <id>     # replay + follow one engineer's journal, human-readable
 go test ./...                # unit tests (no network; = make test)
 go test -race ./...          # what CI runs (= make race)

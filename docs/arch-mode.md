@@ -63,13 +63,20 @@ acy fleet doctor            # table output, one row per host
 acy fleet doctor --json     # machine-readable, same checks
 ```
 
-It runs six checks per host, in order, and stops early if `ssh` itself fails (nothing
+It runs seven checks per host, in order, and stops early if `ssh` itself fails (nothing
 past that point can succeed anyway): `ssh` reachability, the `acy` binary's presence
 and version, `claude auth status` (or a bare PATH check if that subcommand doesn't
-exist), `gh auth status`, the git worktree and `origin` reachability, and whether
+exist), `gh auth status`, whether a Go toolchain is on the host (and its version, if
+so — see below), the git worktree and `origin` reachability, and whether
 `$ACY_STATE_DIR/engineers` (or its OS-default equivalent) is actually writable on
 that host. Fix everything doctor flags before running `acy arch` for real — a host
 that fails silently mid-run is a stuck engineer nobody is watching.
+
+The Go-toolchain check is informational, not a gate: it reports `OK` either way, with
+a Detail naming the version when one is found or explaining it's absent when it
+isn't. A host with only a prebuilt `acy` binary and no compiler is a perfectly good
+fleet member day-to-day — the toolchain only matters as a fallback for the scenario
+below, and a host lacking it shouldn't read as broken.
 
 When a host sets `rc`, every one of these checks — the `ssh` check included — runs
 behind the same `zsh -c 'source <rc>; ...'` wrap the engineer transport uses, so a

@@ -395,6 +395,55 @@ func TestCheckGH(t *testing.T) {
 	})
 }
 
+// TestCheckGo proves a missing Go toolchain is deliberately OK:true — a
+// host with a prebuilt acy binary and no compiler (the real "spark" host is
+// exactly this) is a working fleet member, not a broken one — while still
+// reporting the version when a toolchain is present and hinting at fleet
+// `path` when it's absent and unconfigured, same as claude and gh.
+func TestCheckGo(t *testing.T) {
+	t.Run("toolchain present reports its version", func(t *testing.T) {
+		sr := newScriptedRunner(map[string]response{
+			"go version": {stdout: "go version go1.22.1 darwin/arm64\n"},
+		})
+		c := checkGo(context.Background(), config.FleetHost{}, sr.run)
+		if !c.OK {
+			t.Errorf("checkGo = %+v, want OK", c)
+		}
+		if !strings.Contains(c.Detail, "go1.22.1") {
+			t.Errorf("Detail = %q, want it to report the version", c.Detail)
+		}
+	})
+
+	t.Run("toolchain missing is OK with an explanatory detail, not a failure", func(t *testing.T) {
+		sr := newScriptedRunner(map[string]response{
+			"go version": {stderr: "bash: line 1: go: command not found", err: errors.New("exit status 127")},
+		})
+		c := checkGo(context.Background(), config.FleetHost{Path: []string{"/opt/homebrew/bin"}}, sr.run)
+		if !c.OK {
+			t.Fatal("a missing Go toolchain must not fail the check — a prebuilt-binary-only host is a good fleet member")
+		}
+		if !strings.Contains(c.Detail, "no Go toolchain") {
+			t.Errorf("Detail = %q, want it to explain the toolchain is absent", c.Detail)
+		}
+		if strings.Contains(c.Detail, "fleet `path`") {
+			t.Errorf("Detail = %q, should not hint when path is already configured", c.Detail)
+		}
+	})
+
+	t.Run("toolchain missing, no fleet path configured, hints at the config", func(t *testing.T) {
+		sr := newScriptedRunner(map[string]response{
+			"go version": {err: errors.New("exec: \"go\": executable file not found in $PATH")},
+		})
+		c := checkGo(context.Background(), config.FleetHost{}, sr.run)
+		if !c.OK {
+			t.Fatal("a missing Go toolchain must not fail the check")
+		}
+		if !strings.Contains(c.Detail, "fleet `path`") {
+			t.Errorf("Detail = %q, want a hint about fleet `path`", c.Detail)
+		}
+	})
+}
+
 func TestCheckRepo(t *testing.T) {
 	t.Run("origin has base", func(t *testing.T) {
 		sr := newScriptedRunner(map[string]response{
@@ -515,6 +564,7 @@ func TestDoctorWithRunsEveryCheckInOrder(t *testing.T) {
 		"acy engineer --help":       {},
 		"claude auth status --json": {stdout: `{"loggedIn":true}`},
 		"gh auth status":            {},
+		"go version":                {stdout: "go version go1.22.1 darwin/arm64\n"},
 		"git -C /srv/repo rev-parse --is-inside-work-tree":   {},
 		"git -C /srv/repo ls-remote --exit-code origin main": {},
 		"sh -c " + stateProbeScript:                          {},
@@ -552,6 +602,7 @@ func TestDoctorWithRunsRemainingChecksThroughPathOnlyWhenRcBroken(t *testing.T) 
 		"acy engineer --help":       {},
 		"claude auth status --json": {stdout: `{"loggedIn":true}`},
 		"gh auth status":            {},
+		"go version":                {stdout: "go version go1.22.1 linux/arm64\n"},
 		"git -C /srv/repo rev-parse --is-inside-work-tree":   {},
 		"git -C /srv/repo ls-remote --exit-code origin main": {},
 		"sh -c " + stateProbeScript:                          {},
