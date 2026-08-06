@@ -240,6 +240,75 @@ func TestPrune(t *testing.T) {
 	}
 }
 
+// Engineers is additive: it round-trips like Tasks, and Unfinished tells a
+// still-running entry from a terminal one the same way Task.Unfinished does.
+func TestEngineerRoundTripAndUnfinished(t *testing.T) {
+	stateDir(t)
+
+	want := Snapshot{
+		SessionID: "arch-1",
+		Cwd:       "/tmp/project",
+		Phase:     "AUTO-RUN",
+		Engineers: []Engineer{
+			{
+				EngineerID: "e1", WireID: "w1", Ticket: "T1", Title: "fix it",
+				Host: "host-a", Branch: "acy/t1", State: "running",
+				LastSeq: 7, Tokens: Tokens{Input: 10, Output: 20},
+				StartedAt: time.Now().UTC().Truncate(time.Second),
+			},
+			{
+				EngineerID: "e2", WireID: "w2", Ticket: "T2", Title: "ship it",
+				Host: "host-b", Branch: "acy/t2", State: "done",
+				Outcome: "completed", PRURL: "https://example/pr/2", CostUSD: 1.5,
+				StartedAt: time.Now().UTC().Truncate(time.Second),
+				EndedAt:   time.Now().UTC().Truncate(time.Second),
+			},
+		},
+	}
+	if err := Save(want); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	got, ok, err := Load("arch-1")
+	if err != nil || !ok {
+		t.Fatalf("load: ok=%v err=%v", ok, err)
+	}
+	if len(got.Engineers) != 2 {
+		t.Fatalf("Engineers = %+v, want 2 entries", got.Engineers)
+	}
+	e1, e2 := got.Engineers[0], got.Engineers[1]
+	if e1.EngineerID != "e1" || e1.WireID != "w1" || e1.Ticket != "T1" || e1.Host != "host-a" ||
+		e1.Branch != "acy/t1" || e1.State != "running" || e1.LastSeq != 7 || e1.Tokens.Input != 10 {
+		t.Fatalf("e1 round trip lost fields: %+v", e1)
+	}
+	if !e1.Unfinished() {
+		t.Error("e1.Unfinished() = false, want true (state running)")
+	}
+	if e2.State != "done" || e2.Outcome != "completed" || e2.PRURL != "https://example/pr/2" || e2.CostUSD != 1.5 {
+		t.Fatalf("e2 round trip lost fields: %+v", e2)
+	}
+	if e2.Unfinished() {
+		t.Error("e2.Unfinished() = true, want false (state done)")
+	}
+}
+
+// A snapshot with no fleet must round-trip with no Engineers at all — the
+// additive-field guarantee non-arch runs depend on.
+func TestEngineersOmittedWhenNil(t *testing.T) {
+	stateDir(t)
+
+	if err := Save(snap("plain", "/p", "PLAN")); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := Load("plain")
+	if err != nil || !ok {
+		t.Fatalf("load: ok=%v err=%v", ok, err)
+	}
+	if len(got.Engineers) != 0 {
+		t.Fatalf("Engineers = %+v, want none", got.Engineers)
+	}
+}
+
 func mustSave(t *testing.T, s Snapshot) {
 	t.Helper()
 	if err := Save(s); err != nil {

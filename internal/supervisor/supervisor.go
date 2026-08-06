@@ -518,7 +518,14 @@ func NewSupervisor(ctx context.Context, f Flags) (*Supervisor, error) {
 		if snap, ok, loadErr := state.Load(resumeID); loadErr != nil {
 			alog.Printf("resume: could not seed child budget: %v", loadErr)
 		} else if ok {
-			orch.SeedSpent(snap.ChildCost)
+			// Engineer spend counts against the same run-budget ceiling as
+			// local child dispatches — both are money this run has already
+			// spent, and a resumed run must not forget either half of it.
+			spent := snap.ChildCost
+			for _, e := range snap.Engineers {
+				spent += e.CostUSD
+			}
+			orch.SeedSpent(spent)
 		}
 	}
 

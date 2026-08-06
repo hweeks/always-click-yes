@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -63,8 +64,12 @@ type EngineerStatus struct {
 	PRURL      string
 	CostUSD    float64
 	Tokens     state.Tokens
-	Started    time.Time
-	Ended      time.Time
+	// LastSeq is the highest engineerwire seq this manager has observed for
+	// the engineer — what a resume needs to re-follow from LastSeq+1 rather
+	// than replaying its whole journal again.
+	LastSeq int64
+	Started time.Time
+	Ended   time.Time
 }
 
 // EventKind distinguishes what an Event is carrying, so a consumer never has
@@ -121,6 +126,7 @@ type engineer struct {
 	prURL   string
 	cost    float64
 	tokens  state.Tokens
+	lastSeq int64
 	started time.Time
 	ended   time.Time
 
@@ -141,6 +147,7 @@ func (e *engineer) toStatus() EngineerStatus {
 		PRURL:      e.prURL,
 		CostUSD:    e.cost,
 		Tokens:     e.tokens,
+		LastSeq:    e.lastSeq,
 		Started:    e.started,
 		Ended:      e.ended,
 	}
@@ -171,6 +178,12 @@ type Manager struct {
 	ledger   []*engineer // oldest first
 	hostLoad map[string]int
 	closed   bool
+	// launched is set by the first Launch or Resume call. Resume must run
+	// before any engineer is launched — a launch already assigns its "e1",
+	// "e2" ids from seq, and admitting one before Resume has replayed a
+	// prior ledger would let a fresh engineer collide with the ids Resume is
+	// about to restore.
+	launched bool
 
 	events chan Event
 	wg     sync.WaitGroup
@@ -370,6 +383,7 @@ func (m *Manager) Launch(ctx context.Context, req LaunchReq) (EngineerStatus, er
 		m.mu.Unlock()
 		return EngineerStatus{}, errClosed
 	}
+	m.launched = true
 	host, err := m.pickHostLocked(req.Host)
 	if err != nil {
 		m.mu.Unlock()
@@ -468,7 +482,7 @@ func (m *Manager) runEngineer(engCtx context.Context, eng *engineer, t Transport
 	defer m.wg.Done()
 	defer alog.Recover("fleet.Manager.runEngineer")
 
-	onMsg := func(msg any) { m.handleMsg(eng, msg) }
+	onMsg := func(msg any) { m.noteSeq(eng, msg); m.handleMsg(eng, msg) }
 	onReconnect := func(gap int64, attempt int) {
 		m.mu.Lock()
 		st := eng.toStatus()
@@ -478,6 +492,62 @@ func (m *Manager) runEngineer(engCtx context.Context, eng *engineer, t Transport
 	}
 
 	_ = Follow(engCtx, t, eng.wireID, 1, eng.answers, onMsg, onReconnect)
+}
+
+// noteSeq records the highest engineerwire seq observed for eng, so a later
+// snapshot's Ledger() can tell a resume where to re-follow from.
+func (m *Manager) noteSeq(eng *engineer, msg any) {
+	s, ok := seqOf(msg)
+	if !ok {
+		return
+	}
+	m.mu.Lock()
+	if s > eng.lastSeq {
+		eng.lastSeq = s
+	}
+	m.mu.Unlock()
+}
+
+// runResumedEngineer re-attaches an engineer restored from a prior process's
+// ledger, from fromSeq. Unlike runEngineer's forever-retrying Follow loop —
+// which only ever meets a just-launched, just-acknowledged engineer — a
+// resumed engineer may belong to a process that is simply gone: the host
+// rebooted, the daemon crashed, its journal was cleaned up. So the first
+// reattach failure that replays nothing at all is treated as terminal rather
+// than transient: it marks the engineer failed, frees its slot, and stops
+// retrying. A reattach that manages to replay even one message before a
+// later drop is presumed alive and gets the ordinary KindReconnected
+// treatment runEngineer gives any other drop.
+func (m *Manager) runResumedEngineer(engCtx context.Context, cancel context.CancelFunc, eng *engineer, t Transport, fromSeq int64) {
+	defer m.wg.Done()
+	defer alog.Recover("fleet.Manager.runResumedEngineer")
+
+	onMsg := func(msg any) { m.noteSeq(eng, msg); m.handleMsg(eng, msg) }
+	onReconnect := func(gap int64, attempt int) {
+		if attempt == 1 && gap == fromSeq-1 {
+			m.mu.Lock()
+			if !isTerminal(eng.state) {
+				eng.state = StateFailed
+				eng.outcome = "could not reattach after resume"
+				eng.ended = m.now()
+				m.freeSlotLocked(eng)
+			}
+			st := eng.toStatus()
+			m.mu.Unlock()
+			alog.Printf("fleet: %s resume: reattach failed with nothing replayed, giving up", eng.id)
+			m.emit(Event{EngineerID: eng.id, Host: eng.hostName, Ticket: eng.ticket, Kind: KindFailed,
+				Err: errors.New("could not reattach after resume — the daemon may be gone or its journal missing"), Status: st})
+			cancel()
+			return
+		}
+		m.mu.Lock()
+		st := eng.toStatus()
+		m.mu.Unlock()
+		alog.Printf("fleet: %s reconnecting host=%s gap=%d attempt=%d", eng.id, eng.hostName, gap, attempt)
+		m.emit(Event{EngineerID: eng.id, Host: eng.hostName, Ticket: eng.ticket, Kind: KindReconnected, Gap: gap, Attempt: attempt, Status: st})
+	}
+
+	_ = Follow(engCtx, t, eng.wireID, fromSeq, eng.answers, onMsg, onReconnect)
 }
 
 // handleMsg records what one decoded engineerwire message means for eng's
@@ -621,6 +691,140 @@ func (m *Manager) Statuses() []EngineerStatus {
 		out = append(out, eng.toStatus())
 	}
 	return out
+}
+
+// Ledger is the run's engineers in the form the snapshot stores — the fleet's
+// counterpart to orchestrator.Ledger. An engineer still running has a
+// non-terminal State and no EndedAt, which is what Resume reads to tell a
+// finished engineer from one that needs re-following.
+func (m *Manager) Ledger() []state.Engineer {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]state.Engineer, 0, len(m.ledger))
+	for _, eng := range m.ledger {
+		out = append(out, state.Engineer{
+			EngineerID: eng.id,
+			WireID:     eng.wireID,
+			Ticket:     eng.ticket,
+			Title:      eng.title,
+			Host:       eng.hostName,
+			Branch:     eng.branch,
+			State:      eng.state,
+			Outcome:    eng.outcome,
+			PRURL:      eng.prURL,
+			CostUSD:    eng.cost,
+			Tokens:     eng.tokens,
+			LastSeq:    eng.lastSeq,
+			StartedAt:  eng.started,
+			EndedAt:    eng.ended,
+		})
+	}
+	return out
+}
+
+// Resume re-establishes the fleet's ledger from a prior process's snapshot:
+// every entry is restored into the ledger as-is, and every entry still
+// non-terminal gets its Follow loop re-attached from LastSeq+1 on its
+// recorded host — the journal replays anything missed, including a Result
+// that landed while the architect was dead, so a finished engineer resolves
+// itself without any further action here.
+//
+// It must run before any engineer is launched: a launch assigns its own
+// "e1", "e2" ids starting from the manager's own counter, and admitting one
+// before the prior ledger is restored would risk a fresh engineer's id
+// colliding with — or simply outrunning — the ids being restored.
+func (m *Manager) Resume(ctx context.Context, entries []state.Engineer) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	if m.launched {
+		m.mu.Unlock()
+		return errors.New("fleet: Resume must run before any engineer is launched")
+	}
+	m.launched = true
+	for _, e := range entries {
+		if n, ok := parseEngineerSeq(e.EngineerID); ok && n > m.seq {
+			m.seq = n
+		}
+	}
+	m.mu.Unlock()
+
+	for _, e := range entries {
+		m.resumeOne(e)
+	}
+	return nil
+}
+
+// parseEngineerSeq extracts n from an "eN"-shaped ledger id, so Resume can
+// seed the manager's own counter past every id it is restoring — otherwise
+// the next fresh Launch would start back at "e1" and collide with a restored
+// entry of the same name.
+func parseEngineerSeq(id string) (int, bool) {
+	if !strings.HasPrefix(id, "e") {
+		return 0, false
+	}
+	n, err := strconv.Atoi(id[1:])
+	if err != nil {
+		return 0, false
+	}
+	return n, true
+}
+
+// resumeOne restores one ledger entry. A terminal entry is simply
+// re-recorded, so Statuses/frame show it in history; a non-terminal one also
+// gets a Follow loop re-attached in the background.
+func (m *Manager) resumeOne(e state.Engineer) {
+	eng := &engineer{
+		id:       e.EngineerID,
+		wireID:   e.WireID,
+		ticket:   e.Ticket,
+		title:    e.Title,
+		hostName: e.Host,
+		branch:   e.Branch,
+		state:    e.State,
+		outcome:  e.Outcome,
+		prURL:    e.PRURL,
+		cost:     e.CostUSD,
+		tokens:   e.Tokens,
+		lastSeq:  e.LastSeq,
+		started:  e.StartedAt,
+		ended:    e.EndedAt,
+		answers:  make(chan any, answerBuffer),
+	}
+
+	m.mu.Lock()
+	m.byID[eng.id] = eng
+	m.ledger = append(m.ledger, eng)
+	if !e.Unfinished() {
+		m.mu.Unlock()
+		return
+	}
+
+	host, ok := m.hostsByName[e.Host]
+	if !ok {
+		eng.state = StateFailed
+		eng.outcome = fmt.Sprintf("unknown host %q on resume", e.Host)
+		eng.ended = m.now()
+		st := eng.toStatus()
+		m.mu.Unlock()
+		alog.Printf("fleet: resume %s: unknown host %q", eng.id, e.Host)
+		m.emit(Event{EngineerID: eng.id, Host: e.Host, Ticket: eng.ticket, Kind: KindFailed,
+			Err: fmt.Errorf("fleet: unknown host %q", e.Host), Status: st})
+		return
+	}
+	m.hostLoad[host.Name]++
+	eng.counted = true
+	engCtx, cancel := context.WithCancel(m.baseCtx)
+	eng.cancel = cancel
+	m.mu.Unlock()
+
+	fromSeq := e.LastSeq + 1
+	alog.Printf("fleet: resuming %s ticket=%q host=%s from seq=%d", eng.id, eng.ticket, host.Name, fromSeq)
+
+	transport := m.transports(host)
+	m.wg.Add(1)
+	go m.runResumedEngineer(engCtx, cancel, eng, transport, fromSeq)
 }
 
 // Active is how many engineers are launching or running.

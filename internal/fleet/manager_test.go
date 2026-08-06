@@ -65,14 +65,36 @@ type mockTransport struct {
 	n         int
 	engines   map[string]*mockEngine
 	byTicket  map[string]*mockEngine
-	startErrs map[int]error // 1-based call index -> error to return instead of starting
+	startErrs map[int]error      // 1-based call index -> error to return instead of starting
+	fromSeqs  map[string][]int64 // engineerID -> fromSeq per Attach call, in order
 }
 
 func newMockTransport() *mockTransport {
 	return &mockTransport{
 		engines:  map[string]*mockEngine{},
 		byTicket: map[string]*mockEngine{},
+		fromSeqs: map[string][]int64{},
 	}
+}
+
+// registerEngine seats an engine directly, bypassing Start — for tests that
+// resume an engineer whose process (and wire id) predates this transport
+// instance.
+func (mt *mockTransport) registerEngine(id string) *mockEngine {
+	mt.mu.Lock()
+	defer mt.mu.Unlock()
+	eng := &mockEngine{id: id, msgs: make(chan any, 16)}
+	mt.engines[id] = eng
+	return eng
+}
+
+// fromSeqCalls is every fromSeq Attach was called with for engineerID, in order.
+func (mt *mockTransport) fromSeqCalls(id string) []int64 {
+	mt.mu.Lock()
+	defer mt.mu.Unlock()
+	out := make([]int64, len(mt.fromSeqs[id]))
+	copy(out, mt.fromSeqs[id])
+	return out
 }
 
 // failNthStart makes the n'th Start call (1-based, across the whole
@@ -104,9 +126,10 @@ func (mt *mockTransport) Start(_ context.Context, spec engineerwire.Spec) (Start
 	return StartAck{EngineerID: id, PID: 1000 + n}, nil
 }
 
-func (mt *mockTransport) Attach(ctx context.Context, engineerID string, _ int64, in io.Reader, onMsg func(any)) error {
+func (mt *mockTransport) Attach(ctx context.Context, engineerID string, fromSeq int64, in io.Reader, onMsg func(any)) error {
 	mt.mu.Lock()
 	eng := mt.engines[engineerID]
+	mt.fromSeqs[engineerID] = append(mt.fromSeqs[engineerID], fromSeq)
 	mt.mu.Unlock()
 	if eng == nil {
 		return fmt.Errorf("mock: unknown engineer %q", engineerID)

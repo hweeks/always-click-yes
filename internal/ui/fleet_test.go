@@ -13,6 +13,7 @@ import (
 	"github.com/hweeks/always-click-yes/internal/fleet"
 	"github.com/hweeks/always-click-yes/internal/gate"
 	"github.com/hweeks/always-click-yes/internal/mcp"
+	"github.com/hweeks/always-click-yes/internal/state"
 )
 
 // fakeFleetManager answers only what fleet.go's tool handlers need, mirroring
@@ -34,6 +35,11 @@ type fakeFleetManager struct {
 	used, total int
 
 	cancels []string
+
+	ledger      []state.Engineer
+	resumed     []state.Engineer
+	resumeCalls int
+	resumeErr   error
 }
 
 type fleetAnswerCall struct{ engineerID, questionID, text string }
@@ -65,6 +71,14 @@ func (f *fakeFleetManager) CancelAll(reason string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.cancels = append(f.cancels, reason)
+}
+func (f *fakeFleetManager) Ledger() []state.Engineer { return f.ledger }
+func (f *fakeFleetManager) Resume(_ context.Context, entries []state.Engineer) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.resumeCalls++
+	f.resumed = entries
+	return f.resumeErr
 }
 
 // fleetPending builds an in-flight fleet tool call the way the ask bridge

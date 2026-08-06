@@ -384,6 +384,7 @@ func (m *Model) onDriverReady(msg driverReadyMsg) tea.Cmd {
 		m.beginTurn()
 		m.appendEntry(entry{kind: eYou, body: prompt})
 		m.interruptedTasks = nil
+		m.resumedEngineers = nil
 	}
 
 	m.persist()

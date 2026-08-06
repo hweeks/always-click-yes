@@ -13,6 +13,7 @@ import (
 	"github.com/hweeks/always-click-yes/internal/engineerwire"
 	"github.com/hweeks/always-click-yes/internal/fleet"
 	"github.com/hweeks/always-click-yes/internal/mcp"
+	"github.com/hweeks/always-click-yes/internal/state"
 )
 
 // The architect's fleet, from the UI's side.
@@ -40,6 +41,12 @@ type FleetManager interface {
 	Active() int
 	Capacity() (used, total int)
 	CancelAll(reason string)
+
+	// Ledger and Resume are the resume seam: Ledger is what snapshot() persists
+	// (mirroring Dispatcher's own Ledger), and Resume is what applyResume calls
+	// to hand a restored ledger back so a still-running engineer re-attaches.
+	Ledger() []state.Engineer
+	Resume(ctx context.Context, entries []state.Engineer) error
 }
 
 type fleetMsg struct{ ev fleet.Event }

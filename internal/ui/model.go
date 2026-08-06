@@ -172,6 +172,11 @@ type Model struct {
 	// prompt can hand the decision to the session rather than guessing.
 	interruptedTasks []string
 
+	// resumedEngineers names engineers the restored snapshot still had
+	// non-terminal, so the resume prompt can flag them the same way — the
+	// fleet's counterpart to interruptedTasks. See resumeFleet.
+	resumedEngineers []string
+
 	// lastContext is the most recent turn's context size — a reading, not a
 	// total. It is what shows a context growing without bound.
 	lastContext   int
