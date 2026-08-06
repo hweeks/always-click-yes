@@ -58,6 +58,12 @@ func TestFleetDoctorJSONLocalEndToEnd(t *testing.T) {
 	run := func(args ...string) {
 		cmd := exec.Command("git", args...) //nolint:gosec // fixed argv, test setup only
 		cmd.Dir = dir
+		// CI runners have no global git identity configured (unlike a
+		// developer machine), so the seed commit needs its own.
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=acy-test", "GIT_AUTHOR_EMAIL=acy-test@example.com",
+			"GIT_COMMITTER_NAME=acy-test", "GIT_COMMITTER_EMAIL=acy-test@example.com",
+		)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v: %s", args, err, out)
 		}
