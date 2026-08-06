@@ -57,13 +57,19 @@ func Open(dir string) (*Journal, error) {
 		return nil, err
 	}
 
-	msgs, validSize, err := scanJournal(path)
+	msgs, validSize, rawSize, err := scanJournal(path)
 	if err != nil {
 		_ = f.Close()
 		alog.Printf("engineerwire: journal recover %s: %v", path, err)
 		return nil, err
 	}
-	if info, statErr := f.Stat(); statErr == nil && info.Size() > validSize {
+	// Truncate only on what this one read observed, never on a size fetched
+	// afterward: a second, later stat can see bytes a concurrent writer
+	// appended after the scan finished — a fully-formed, valid line — and
+	// mistake them for the same writer's torn tail. That is a real
+	// production path, not just a test artifact: an architect's Attach opens
+	// a journal on a directory a live engineer is still appending to.
+	if rawSize > validSize {
 		if err := f.Truncate(validSize); err != nil {
 			_ = f.Close()
 			alog.Printf("engineerwire: journal truncate %s: %v", path, err)
@@ -131,7 +137,7 @@ func (j *Journal) Append(msg any) (any, error) {
 
 // ReplayFrom returns every persisted message with seq >= from, in order.
 func (j *Journal) ReplayFrom(from int64) ([]any, error) {
-	msgs, _, err := scanJournal(j.path)
+	msgs, _, _, err := scanJournal(j.path)
 	if err != nil {
 		return nil, err
 	}
@@ -213,16 +219,18 @@ func seqOf(msg any) int64 {
 // scanJournal reads path line by line and decodes every complete,
 // newline-terminated line it finds. validSize is the byte offset just past
 // the last such line — i.e. the length the file would be with any torn final
-// line (a write cut short by a crash) dropped. A missing file reads as
-// empty, not an error: Open calls this before anything has ever been
-// appended.
-func scanJournal(path string) (msgs []any, validSize int64, err error) {
+// line (a write cut short by a crash) dropped. rawSize is the total number of
+// bytes this read actually saw, torn tail included; the caller can compare
+// the two to detect a torn tail without taking a second, later — and
+// therefore racy — measurement of the file. A missing file reads as empty,
+// not an error: Open calls this before anything has ever been appended.
+func scanJournal(path string) (msgs []any, validSize int64, rawSize int64, err error) {
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, 0, nil
+			return nil, 0, 0, nil
 		}
-		return nil, 0, err
+		return nil, 0, 0, err
 	}
 	defer func() { _ = f.Close() }()
 
@@ -231,6 +239,7 @@ func scanJournal(path string) (msgs []any, validSize int64, err error) {
 	lineNum := 0
 	for {
 		line, rerr := br.ReadBytes('\n')
+		rawSize += int64(len(line))
 		trimmed := bytes.TrimSpace(line)
 		if len(trimmed) == 0 {
 			if rerr != nil {
@@ -247,10 +256,10 @@ func scanJournal(path string) (msgs []any, validSize int64, err error) {
 		lineNum++
 		msg, derr := decodeLine(trimmed)
 		if derr != nil {
-			return nil, 0, fmt.Errorf("engineerwire: journal: corrupt line %d of %s: %w", lineNum, path, derr)
+			return nil, 0, 0, fmt.Errorf("engineerwire: journal: corrupt line %d of %s: %w", lineNum, path, derr)
 		}
 		msgs = append(msgs, msg)
 		offset += int64(len(line))
 	}
-	return msgs, offset, nil
+	return msgs, offset, rawSize, nil
 }

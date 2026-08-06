@@ -174,6 +174,66 @@ func TestJournalTornFinalLineIgnored(t *testing.T) {
 	}
 }
 
+// TestScanJournalReportsRawSizeFromOneRead pins scanJournal's rawSize
+// return: Open used to decide whether to truncate a torn tail by comparing
+// validSize (from this scan) against a size fetched *afterward* via
+// f.Stat() — a TOCTOU, since a concurrent writer's fully-valid append in
+// that gap looks exactly like a torn tail and gets truncated away. That is
+// reachable in production, not just in tests: an architect's Attach opens a
+// journal on a directory a live engineer may still be appending to. The fix
+// has Open decide from this one read alone (rawSize > validSize); a clean,
+// fully-terminated file must report the two equal regardless of what a
+// second writer appends immediately after this scan returns.
+func TestScanJournalReportsRawSizeFromOneRead(t *testing.T) {
+	dir := t.TempDir()
+	j, err := Open(dir)
+	if err != nil {
+		t.Fatalf("initial open: %v", err)
+	}
+	if _, err := j.Append(Hello{EngineerID: "e1"}); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	if err := j.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	path := filepath.Join(dir, journalFileName)
+	_, validSize, rawSize, err := scanJournal(path)
+	if err != nil {
+		t.Fatalf("scanJournal: %v", err)
+	}
+	if rawSize != validSize {
+		t.Fatalf("rawSize=%d != validSize=%d for a clean, fully-terminated file", rawSize, validSize)
+	}
+
+	// A second writer appends after this scan already ran. A reopen must see
+	// both messages: nothing about the scan above should have truncated
+	// anything, since it never inspects the file again after returning.
+	j2, err := Open(dir)
+	if err != nil {
+		t.Fatalf("second open: %v", err)
+	}
+	if _, err := j2.Append(Event{Kind: EventLog, Text: "second"}); err != nil {
+		t.Fatalf("second append: %v", err)
+	}
+	if err := j2.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	j3, err := Open(dir)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer func() { _ = j3.Close() }()
+	got, err := j3.ReplayFrom(1)
+	if err != nil {
+		t.Fatalf("replay: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d messages, want 2", len(got))
+	}
+}
+
 func TestJournalAppendRejectsInboundMessage(t *testing.T) {
 	dir := t.TempDir()
 	j, err := Open(dir)
