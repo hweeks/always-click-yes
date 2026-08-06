@@ -105,3 +105,69 @@ func TestRenderEntryKeepsHighlighting(t *testing.T) {
 		t.Error("expected the chroma 256-color codes to survive rendering")
 	}
 }
+
+// No ekind may let a pathological body (long unbroken prose, a single
+// unbroken long token like a URL, or a long line buried mid-body) overflow
+// the requested width — that's what sends the viewport scrolling sideways.
+func TestRenderEntryNeverExceedsWidth(t *testing.T) {
+	const width = 60
+	kinds := []struct {
+		name  string
+		entry entry
+	}{
+		{"eMeta", entry{kind: eMeta}},
+		{"eYou", entry{kind: eYou}},
+		{"eClaude", entry{kind: eClaude}},
+		{"eThinking", entry{kind: eThinking}},
+		{"eTool", entry{kind: eTool, title: "Bash"}},
+		{"eToolOK", entry{kind: eToolOK, title: "Bash"}},
+		{"eToolErr", entry{kind: eToolErr, title: "Bash"}},
+		{"ePlan", entry{kind: ePlan, title: "plan"}},
+		{"eTurn", entry{kind: eTurn}},
+		{"eComplete", entry{kind: eComplete}},
+		{"eGood", entry{kind: eGood}},
+		{"eWarn", entry{kind: eWarn}},
+		{"eQueued", entry{kind: eQueued}},
+	}
+	bodies := map[string]string{
+		"long prose":       strings.Repeat("word ", 80),
+		"unbroken token":   "https://example.com/" + strings.Repeat("a", 280),
+		"long middle line": "first line\n" + strings.Repeat("y", 200) + "\nlast line",
+	}
+	for _, k := range kinds {
+		for bname, body := range bodies {
+			e := k.entry
+			e.body = body
+			out := renderEntry(e, width, 10)
+			for _, line := range strings.Split(out, "\n") {
+				if w := lipgloss.Width(line); w > width {
+					t.Errorf("%s/%s: line is %d cols, exceeds width %d:\n%q", k.name, bname, w, width, line)
+				}
+			}
+		}
+	}
+}
+
+// eGood, eWarn, eMeta and eComplete now render inside a rounded border like
+// the other attributed entries. eTurn stays unboxed — it's a horizontal
+// rule, and a border around a rule would read as nonsense — but must still
+// wrap a long body to width.
+func TestRenderEntryNoticesAreBoxed(t *testing.T) {
+	const width = 60
+	for _, kind := range []ekind{eGood, eWarn, eMeta, eComplete} {
+		out := renderEntry(entry{kind: kind, body: "short notice"}, width, 10)
+		if !strings.Contains(out, "╭") || !strings.Contains(out, "╰") {
+			t.Errorf("kind %d: expected a rounded border, got:\n%s", kind, out)
+		}
+	}
+
+	out := renderEntry(entry{kind: eTurn, body: strings.Repeat("y", 200)}, width, 10)
+	if strings.Contains(out, "╭") {
+		t.Errorf("eTurn should not be boxed, got:\n%s", out)
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if w := lipgloss.Width(line); w > width {
+			t.Errorf("eTurn: line is %d cols, exceeds width %d", w, width)
+		}
+	}
+}

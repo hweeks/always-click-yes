@@ -123,11 +123,14 @@ func renderEntries(entries []entry, width, maxLines int) string {
 
 func renderEntry(e entry, width, maxLines int) string {
 	// entryBox border + padding eat four columns; wrap the content inside them.
+	// Unboxed kinds wrap to the bare width instead, since there is no border or
+	// padding around them to eat columns out of the terminal's actual width.
 	inner := max(width-6, 10)
 	tag := taskTag(e)
 	switch e.kind {
 	case eMeta:
-		return lipgloss.NewStyle().Foreground(colDim).Render(e.body)
+		body := lipgloss.NewStyle().Foreground(colDim).Width(inner).Render(e.body)
+		return entryBox(body, colDim, width)
 
 	case eYou:
 		body := lipgloss.NewStyle().Width(inner).Render(e.body)
@@ -174,19 +177,20 @@ func renderEntry(e entry, width, maxLines int) string {
 		return renderPlan(e, width)
 
 	case eTurn:
-		return lipgloss.NewStyle().Foreground(colDim).Faint(true).Render(e.body)
+		// Unboxed: a border around a horizontal rule would read as nonsense.
+		return lipgloss.NewStyle().Foreground(colDim).Faint(true).Width(width).Render(e.body)
 
 	case eComplete:
-		box := lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).BorderForeground(colGood).
-			Foreground(colGood).Bold(true).Padding(0, 1)
-		return box.Render(e.body)
+		body := lipgloss.NewStyle().Foreground(colGood).Bold(true).Width(inner).Render(e.body)
+		return entryBox(body, colGood, width)
 
 	case eGood:
-		return lipgloss.NewStyle().Foreground(colGood).Render(e.body)
+		body := lipgloss.NewStyle().Foreground(colGood).Width(inner).Render(e.body)
+		return entryBox(body, colGood, width)
 
 	case eWarn:
-		return lipgloss.NewStyle().Foreground(colErr).Render(e.body)
+		body := lipgloss.NewStyle().Foreground(colErr).Width(inner).Render(e.body)
+		return entryBox(body, colErr, width)
 
 	case eQueued:
 		// Deliberately the same shape as eYou, dimmed: it is your message, it just
@@ -195,7 +199,7 @@ func renderEntry(e entry, width, maxLines int) string {
 		body := lipgloss.NewStyle().Foreground(colDim).Width(inner).Render(e.body)
 		return badge("⏳ queued", colDim) + "\n" + entryBox(body, colDim, width)
 	}
-	return e.body
+	return lipgloss.NewStyle().Width(width).Render(e.body)
 }
 
 // taskTag marks an entry as belonging to a delegated task rather than to the
