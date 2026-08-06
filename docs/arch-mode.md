@@ -77,10 +77,41 @@ missing `zsh` or an otherwise broken invocation fails the `ssh` check by name, w
 the shell's own stderr, instead of showing up as a mystery downstream in `claude` or
 `gh`.
 
+## Provisioning a fleet host
+
+`.acy.json` is untracked (see `.acy.json.example` at the repo root for a starting
+point with the exact `fleet` keys), so a fresh clone has no `acy` binary on a new host
+and nothing installs one for you. What actually worked provisioning two real hosts:
+
+- **Don't rely on `gh release download`.** A GitHub Actions outage meant v1.6.0 shipped
+  with no release assets at all — the release existed, the binaries didn't. Build from
+  the host's own clone of the repo instead of assuming a release artifact exists.
+- **Don't use `go install github.com/hweeks/always-click-yes@latest`.** It resolves
+  through `proxy.golang.org`, not this repo directly, and during the same outage that
+  either 404'd or silently installed a stale previous tag with no error indicating it
+  wasn't current. Build from the clone.
+- **Build with the version stamp**, or `acy --version` reports `(devel)` and `acy fleet
+  doctor` warns of a version mismatch even when the binary is actually current:
+
+  ```sh
+  go build -trimpath -ldflags "-s -w -X github.com/hweeks/always-click-yes/internal/version.stamped=$(git describe --tags --always)" -o <acyBin> .
+  ```
+
+- **No Go toolchain on the host? Cross-compile and scp from the architect's machine.**
+  This is how host `spark` was provisioned: `GOOS=linux GOARCH=arm64 go build ...`
+  locally, then `scp` the resulting binary to the path `hosts[].acyBin` points at.
+- **Go is usually not on the PATH a non-interactive ssh gets.** The same starved-PATH
+  problem `hosts[].path` exists for hits `go` itself, not just `claude`/`gh` — find it by
+  absolute path (`which go` in an interactive shell on the host, or a well-known
+  location like `/usr/local/go/bin/go` or `~/go/bin/go`) rather than assuming a bare
+  `go build` will resolve on a fleet host.
+
 ## The fleet config
 
 Arch mode requires a `"fleet"` section in `.acy.json`. Every field is optional except
-`hosts[].name`; nothing below runs at all if `"fleet"` is absent.
+`hosts[].name`; nothing below runs at all if `"fleet"` is absent. `.acy.json` itself is
+untracked (it holds your real ssh targets and paths) — copy `.acy.json.example` from the
+repo root to get every key name right on a fresh clone.
 
 ```json
 {
@@ -167,6 +198,12 @@ Arch mode requires a `"fleet"` section in `.acy.json`. Every field is optional e
     two settings stack rather than conflict. Setting both is normal and harmless: `path` is
     a cheap belt-and-braces default, `rc` is what actually fixes a host where PATH alone
     wasn't enough.
+  - **`shell`** — overrides which shell `rc` is sourced through, e.g. `"bash"` or `"fish"`.
+    Empty (the default) derives it from `rc`'s basename: `.zshrc`/`.zprofile`/`.zshenv` mean
+    `zsh`, `.bashrc`/`.bash_profile`/`.profile` mean `bash`, anything unrecognised falls back
+    to `sh`. Set this when a host's rc file doesn't follow that naming, rather than fighting
+    the derivation — a Linux host whose rc is sourced through `bash` needs no `shell` key at
+    all, since `.bashrc` already derives it.
 
 ## Running `acy arch`
 

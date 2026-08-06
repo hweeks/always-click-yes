@@ -1,0 +1,30 @@
+{
+  "fleet": {
+    "baseBranch": "main",
+    "prCap": 4,
+    "engineerModel": "sonnet",
+    "engineerBudgetUSD": 15,
+    "runBudgetUSD": 200,
+    "deadmanHours": 24,
+    "ticketCommit": "direct",
+    "hosts": [
+      {
+        "name": "example-macos",
+        "ssh": "you@mac.example.com",
+        "repoPath": "/Users/you/proj",
+        "acyBin": "/Users/you/bin/acy",
+        "path": ["/opt/homebrew/bin", "/Users/you/.local/bin"],
+        "rc": "~/.zshrc"
+      },
+      {
+        "name": "example-linux",
+        "ssh": "you@linux.example.com",
+        "repoPath": "/home/you/proj",
+        "acyBin": "/home/you/bin/acy",
+        "path": ["/home/you/.local/bin"],
+        "rc": "~/.bashrc",
+        "shell": "bash"
+      }
+    ]
+  }
+}

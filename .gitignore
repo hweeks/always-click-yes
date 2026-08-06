@@ -10,3 +10,6 @@
 
 # editor / os
 .DS_Store
+
+# per-user fleet config: real ssh targets and absolute paths, never shared
+/.acy.json

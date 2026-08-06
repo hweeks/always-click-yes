@@ -386,6 +386,32 @@ real probing to learn, so a future agent doesn't have to relearn it by breaking 
   `pr-create` calls for 2 tickets** before the brief text (`core.go`) was fixed (`4c11c51`)
   to say outright: commit your work locally, but do not push the branch or open a PR
   yourself — that happens automatically once you call `Finish`.
+- **A fleet host must be authenticated for *non-interactive* ssh, which is not the same
+  as being authenticated for you.** The real check is `ssh -o BatchMode=yes <host> --
+  '<wrapper>; claude -p "reply with exactly: PROBE_OK"'` and `gh api user` over that same
+  connection — not `claude auth status` on a terminal you're sitting at. Observed live:
+  host `studio` is used interactively every day and still returned `Not logged in ·
+  Please run /login` and an HTTP 401 from `gh` over a `BatchMode` ssh session, with
+  neither `CLAUDE_CODE_OAUTH_TOKEN` nor `GH_TOKEN` present in that non-interactive
+  environment. An engineer launched on a host in this state can't run `claude` and can't
+  open its own PR. The durable fix is exporting a `claude setup-token` OAuth token and a
+  `GH_TOKEN` from the host's rc file, which the fleet wrapper already sources for every
+  remote command.
+- **`.acy.json` is snapshotted at construction.** `fleet.NewManager`
+  (`internal/fleet/manager.go`) copies `cfg.Hosts` into `hostsByName` when the supervisor
+  starts, so editing `.acy.json` mid-run changes nothing for the session already running —
+  `acy arch` has to be restarted to pick up a host-list change. The ticket board on disk
+  (`internal/tickets`) is what carries a run across that restart, not the config file.
+- **`rcWrap` no longer assumes zsh.** The shell an `rc` file sources through is now
+  derived from the rc file's own basename (`shellForRc`, `internal/fleet/remotepath.go`),
+  overridable with a host's `shell` key, falling back to `sh` when the basename doesn't
+  match a known shell family. It used to hardcode `zsh -c`, which failed outright on a
+  bash-only host: observed live on Ubuntu host `spark`, where every fleet command died
+  with `zsh: command not found` (exit 127) — and `acy fleet doctor` misreported that as an
+  unreachable host rather than a broken rc wrapper, because a bare-ssh probe and the
+  rc-wrapped probe weren't distinguished. Doctor now probes bare ssh first and only
+  escalates to the full `rc`-wrapped command when that succeeds, so a broken wrapper is
+  diagnosed as exactly that instead of masquerading as an unreachable host.
 - **Live e2e arch tests take 10–25 minutes; a Bash tool call caps around 600 seconds.**
   `TestE2EArchRunsEngineersInParallel` and its siblings are real `claude` sessions on real
   (or simulated) hosts and cannot be rushed. Backgrounding one and walking away has already
