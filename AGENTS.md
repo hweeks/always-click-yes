@@ -147,13 +147,24 @@ and let the interface enforce the rest.
   invocation here is a fixed argv the package itself chooses — nothing in it is model-driven.
   A `Runner` seam (`func(ctx, dir, name string, args ...string) (string, error)`) threads
   through every call so tests fake `git`/`gh` instead of running them.
+- `internal/verify` — runs the fleet-configured `verifyCommands` in an engineer's worktree
+  as evidence collected by acy itself, never the model's own claim of having run them.
+  `Run` parses each command with `strings.Fields`, no shell involved; strips `ACY_LIVE` from
+  the environment before running anything; bounds each command by the configured
+  per-command timeout; caps captured output at 8KiB; and classifies each command as
+  passed/failed/skipped (binary not found)/timeout/error. A `Runner` seam mirrors
+  `gitops.Runner` so tests fake the process instead of running one.
 - `internal/engineer` — the headless runtime that drives one ticket end to end: `core.go`
   builds the brief and steers a supervisor through PLAN/AUTO-RUN, `ask.go` escalates every
   `AskUserQuestion` up the journal as a `Question` and blocks for an answer (15-minute
   timeout fallback), `drive.go` polls for the model's own `Finish` and only then —
   deterministically, in Go, never left to the model — checks `gitops.CommitsAhead`, pushes,
   and opens the PR. It does not own the supervisor process itself (`internal/supervisor`) or
-  process detachment (`internal/engineerd`).
+  process detachment (`internal/engineerd`). Before pushing/opening the PR, `finalize` also
+  runs the fleet-configured verify commands via `internal/verify`, folds the result into
+  `Result.Verification` and a digest appended to the summary and PR body, and — if a check
+  actually failed (not just skipped or timed out) — flips the outcome to `"failed"` while
+  still pushing the branch and opening the PR.
 - `internal/engineerd` — daemon plumbing for one detached engineer: state-dir layout
   (`dir.go`), the `control.sock` Unix socket carrying inbound `Answer`/`Cancel` (`control.go`),
   `Attach` (`attach.go` — replay-then-follow the journal one way, forward control messages
