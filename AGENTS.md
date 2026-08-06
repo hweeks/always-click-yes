@@ -656,6 +656,7 @@ are never paths — a token needs a separator or a leading `~`, or a sentence me
 
 ```sh
 make run                     # build the latest acy and dogfood it on this repo
+make arch                    # same dogfood loop, but arch mode (= go build -o acy . && ./acy arch)
 go build -o acy .            # build (= make build)
 ./acy run                    # the TUI
 ./acy serve                  # the same supervisor, headless over HTTP (prints {"url","token"})

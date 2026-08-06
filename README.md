@@ -364,6 +364,7 @@ make run     # build the latest acy from this checkout and launch it, right here
 That builds a fresh binary from your working tree and starts it supervising the repo
 you're standing in — which for this project is the point: `acy` is developed by running
 `acy` on itself (see `AGENTS.md`). Other targets: `make build` (just the binary),
+`make arch` (same dogfood loop, in arch mode — requires a "fleet" section in `.acy.json`),
 `make test` (unit tests), `make race` (what CI runs), `make live` (the paid live suite,
 `ACY_LIVE=1`), `make lint`, and `make clean`.
 
