@@ -21,10 +21,8 @@ func sizedModel(t *testing.T) Model {
 
 func TestViewRendersToolBlocks(t *testing.T) {
 	m := sizedModel(t)
-	m.entries = append(m.entries,
-		entry{kind: eTool, title: "Bash", body: "go build ./...\necho done"},
-		entry{kind: eToolOK, body: strings.TrimRight(strings.Repeat("output line\n", 30), "\n")},
-	)
+	m.appendEntry(entry{kind: eTool, title: "Bash", body: "go build ./...\necho done"})
+	m.appendEntry(entry{kind: eToolOK, body: strings.TrimRight(strings.Repeat("output line\n", 30), "\n")})
 	m.rebuild()
 
 	out := m.View().Content

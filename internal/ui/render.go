@@ -31,11 +31,14 @@ const (
 // re-rendered at the current width on resize.
 //
 // raw/lang exist for the second front end and are invisible to this file. body
-// is highlighted at ingest — deliberately, because rebuild() re-renders every
-// entry on each 120ms tick and re-lexing at that rate would burn CPU for no
-// visual gain — but ANSI is a terminal's answer, not a webview's. So the
-// unhighlighted source and its language travel alongside, and a non-terminal
-// renderer highlights it its own way. See toolBodyParts.
+// is highlighted at ingest — deliberately, because rebuild() used to re-render
+// every entry on each 120ms tick and re-lexing at that rate would burn CPU for
+// no visual gain. It now memoizes across ticks by entry.seq (see
+// rendercache.go) on top of that, but a resize still re-renders every entry, so
+// the ingest-time highlighting still pays for itself. ANSI is a terminal's
+// answer, not a webview's, though — so the unhighlighted source and its
+// language travel alongside, and a non-terminal renderer highlights it its own
+// way. See toolBodyParts.
 type entry struct {
 	seq    int // monotonic, assigned by appendEntry; never reused, never reset
 	kind   ekind
@@ -104,21 +107,28 @@ func spinGlyph(frame int) string {
 // renderEntries renders the whole transcript to the given width. maxLines caps
 // how many wrapped lines each expandable block (tool output, results, thinking)
 // shows before a "… +N more lines" footer.
-func renderEntries(entries []entry, width, maxLines int) string {
+//
+// cache memoizes each entry's render by entry.seq, across calls: rebuild() now
+// also memoizes across ticks, on top of the per-entry work this cache saves, so
+// an entry already rendered at this width/maxLines is looked up rather than
+// re-rendered.
+func renderEntries(entries []entry, width, maxLines int, cache map[int]string) string {
 	if width < 20 {
 		width = 20
 	}
 	if maxLines < 1 {
 		maxLines = 10
 	}
-	var b strings.Builder
+	parts := make([]string, len(entries))
 	for i, e := range entries {
-		if i > 0 {
-			b.WriteByte('\n')
+		r, ok := cache[e.seq]
+		if !ok {
+			r = renderEntry(e, width, maxLines)
+			cache[e.seq] = r
 		}
-		b.WriteString(renderEntry(e, width, maxLines))
+		parts[i] = r
 	}
-	return b.String()
+	return strings.Join(parts, "\n")
 }
 
 func renderEntry(e entry, width, maxLines int) string {

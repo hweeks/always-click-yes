@@ -72,6 +72,7 @@ func (m *Model) runCommand(name, args string) tea.Cmd {
 		m.showHelp = true
 	case "clear":
 		m.entries = nil
+		m.markDirty()
 		m.appendEntry(entry{kind: eMeta, body: "(transcript cleared) · /help for commands"})
 	case "quit", "exit", "q":
 		// Engineers are durable remote work, not local processes this session
