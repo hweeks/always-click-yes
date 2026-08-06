@@ -98,13 +98,53 @@ and nothing installs one for you. What actually worked provisioning two real hos
   ```
 
 - **No Go toolchain on the host? Cross-compile and scp from the architect's machine.**
-  This is how host `spark` was provisioned: `GOOS=linux GOARCH=arm64 go build ...`
-  locally, then `scp` the resulting binary to the path `hosts[].acyBin` points at.
+  This is how host `spark` (Ubuntu aarch64, no `zsh` and no Go toolchain at all) was
+  provisioned: `GOOS=linux GOARCH=arm64 go build ...` locally, `scp` the resulting
+  binary to the path `hosts[].acyBin` points at, then `chmod +x` it on the host.
 - **Go is usually not on the PATH a non-interactive ssh gets.** The same starved-PATH
   problem `hosts[].path` exists for hits `go` itself, not just `claude`/`gh` — find it by
   absolute path (`which go` in an interactive shell on the host, or a well-known
   location like `/usr/local/go/bin/go` or `~/go/bin/go`) rather than assuming a bare
-  `go build` will resolve on a fleet host.
+  `go build` will resolve on a fleet host. Host `studio` (macOS arm64) is the concrete
+  case: its Go lives at `/opt/homebrew/bin/go`, invisible to a non-interactive ssh
+  session unless you invoke it by that absolute path or list the directory in the
+  host's `path` array in `.acy.json`.
+
+### A trap when probing a host by hand
+
+Diagnosing a host yourself, outside `acy fleet doctor`, has a sharp edge: ssh joins its
+trailing arguments with a bare space before the remote side ever sees them, even when
+you've written what looks like an explicit wrapper. So this:
+
+```sh
+ssh -o BatchMode=yes studio -- zsh -c 'ls -l /opt/homebrew/bin/go'
+```
+
+reaches the remote host as `zsh -c ls -l /opt/homebrew/bin/go` — `zsh -c` takes only its
+first word (`ls`) as the script, and `-l` / the path become `$0` / `$1`, arguments the
+script never reads. `ls` therefore runs with no arguments and lists `$HOME`. It does not
+error — it returns plausible, wrong output. The same shape made `stat` report on stdin
+instead of the path given, and made `command -v`, `type`, and a bare multi-word `echo`
+misbehave identically. What makes it so easy to misdiagnose live: a command placed
+*after* a `;` in the same string is unaffected, because the remote login shell parses
+that part directly — so half a hand-typed probe can be right while the other half
+silently lies, in the same command string.
+
+The fix is to pass the whole remote command as **one** argument, so ssh has nothing left
+to join:
+
+```sh
+ssh -o BatchMode=yes studio 'zsh -lc "ls -l /opt/homebrew/bin/go"'
+```
+
+**Canary**: before trusting any hand-run probe, run
+`ssh -o BatchMode=yes <host> 'zsh -lc "echo A B C"'` and confirm it prints `A B C`, not
+just `A` — if it prints `A`, everything after the first word is landing in `$0`/`$1`
+instead of the script.
+
+acy's own transport never hits this: `quoteArgv` and `sshBatchArgs` (both in
+`internal/fleet`) compose the remote command as one pre-quoted string before ssh ever
+sees it. This trap only bites a probe you type yourself.
 
 ## The fleet config
 
