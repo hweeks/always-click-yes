@@ -11,6 +11,7 @@ import (
 	"github.com/hweeks/always-click-yes/internal/engineerwire"
 	"github.com/hweeks/always-click-yes/internal/gitops"
 	"github.com/hweeks/always-click-yes/internal/state"
+	"github.com/hweeks/always-click-yes/internal/verify"
 )
 
 // driveKind names how the AUTO-RUN polling loop ended.
@@ -140,9 +141,12 @@ func stallSummary(nudges int, snap Snapshot) string {
 
 // finalize turns the session's own verdict (outcome, summary) into the final
 // Result: it checks whether AUTO-RUN actually committed anything and, if so,
-// pushes the branch and opens the PR. A push or PR failure overrides outcome
-// with "failed" — the model may believe it finished, but nothing reached a
-// remote anyone can review.
+// runs the configured verify commands, pushes the branch, and opens the PR. A
+// push or PR failure overrides outcome with "failed" unconditionally — the
+// model may believe it finished, but nothing reached a remote anyone can
+// review. A failing verify check overrides outcome with "failed" too, but
+// does not block the push/PR: the architect should still get a branch and a
+// PR to look at, just one honestly marked as failing its checks.
 func (c *Core) finalize(ctx context.Context, outcome, summary string, cost float64, tokens state.Tokens) engineerwire.Result {
 	spec := c.cfg.Spec
 
@@ -150,6 +154,8 @@ func (c *Core) finalize(ctx context.Context, outcome, summary string, cost float
 	if err != nil {
 		return engineerwire.Result{Outcome: "failed", Summary: "checking commits ahead: " + err.Error(), CostUSD: cost, Tokens: tokens}
 	}
+	// A run that changed nothing has nothing worth spending (potentially) ten
+	// minutes verifying.
 	if ahead == 0 {
 		return engineerwire.Result{
 			Outcome: outcome,
@@ -159,26 +165,119 @@ func (c *Core) finalize(ctx context.Context, outcome, summary string, cost float
 		}
 	}
 
+	checks := verify.Run(ctx, c.cfg.VerifyRunner, c.cfg.WorktreeDir, c.cfg.VerifyCommands, c.cfg.VerifyTimeout)
+	for _, check := range checks {
+		c.appendEvent(engineerwire.Event{Kind: engineerwire.EventLog, Text: "verify: " + formatCheckLine(check)})
+	}
+	if digest := verifyDigest(checks); digest != "" {
+		summary += "\n\n" + digest
+	}
+	failed := false
+	for _, check := range checks {
+		if check.Status == engineerwire.VerifyFailed {
+			failed = true
+			break
+		}
+	}
+
 	if err := gitops.Push(ctx, c.cfg.GitRunner, c.cfg.WorktreeDir, spec.Branch); err != nil {
-		return engineerwire.Result{Outcome: "failed", Summary: "pushing branch: " + err.Error(), Branch: spec.Branch, CostUSD: cost, Tokens: tokens}
+		return engineerwire.Result{Outcome: "failed", Summary: "pushing branch: " + err.Error(), Branch: spec.Branch, CostUSD: cost, Tokens: tokens, Verification: checks}
 	}
 
 	title := fmt.Sprintf("%s: %s", spec.Ticket, spec.Title)
 	body := summary + prFooter(c.cfg.EngineerID, spec.Ticket)
 	prURL, err := gitops.CreatePR(ctx, c.cfg.GitRunner, c.cfg.WorktreeDir, spec.BaseBranch, spec.Branch, title, body)
 	if err != nil {
-		return engineerwire.Result{Outcome: "failed", Summary: "opening PR: " + err.Error(), Branch: spec.Branch, CostUSD: cost, Tokens: tokens}
+		return engineerwire.Result{Outcome: "failed", Summary: "opening PR: " + err.Error(), Branch: spec.Branch, CostUSD: cost, Tokens: tokens, Verification: checks}
 	}
 
-	return engineerwire.Result{
-		Outcome: outcome,
-		Summary: summary,
-		Branch:  spec.Branch,
-		PRURL:   prURL,
-		CostUSD: cost,
-		Tokens:  tokens,
-		Files:   changedFiles(ctx, c.cfg.GitRunner, c.cfg.WorktreeDir, spec.BaseBranch),
+	if failed {
+		outcome = "failed"
 	}
+	return engineerwire.Result{
+		Outcome:      outcome,
+		Summary:      summary,
+		Branch:       spec.Branch,
+		PRURL:        prURL,
+		CostUSD:      cost,
+		Tokens:       tokens,
+		Files:        changedFiles(ctx, c.cfg.GitRunner, c.cfg.WorktreeDir, spec.BaseBranch),
+		Verification: checks,
+	}
+}
+
+// verifyExcerptMaxLines and verifyExcerptMaxChars cap how much of a failing
+// check's output verifyDigest quotes inline: enough to name the failure, not
+// enough to turn a PR body into a pasted test log. The full, already
+// 8KiB-capped output always lives in Result.Verification.
+const (
+	verifyExcerptMaxLines = 3
+	verifyExcerptMaxChars = 200
+)
+
+// formatCheckLine renders one check as a single-line "name — status
+// (detail)" summary, shared by the per-check EventLog text and each line of
+// verifyDigest so the wording of the two never drifts apart.
+func formatCheckLine(c engineerwire.VerifyCheck) string {
+	dur := fmt.Sprintf("%.1fs", float64(c.DurationMS)/1000)
+	switch c.Status {
+	case engineerwire.VerifyPassed:
+		return fmt.Sprintf("%s — passed (%s)", c.Name, dur)
+	case engineerwire.VerifyFailed:
+		return fmt.Sprintf("%s — FAILED (exit %d, %s)", c.Name, c.ExitCode, dur)
+	case engineerwire.VerifySkipped:
+		return fmt.Sprintf("%s — skipped (not installed on this host)", c.Name)
+	case engineerwire.VerifyTimeout:
+		return fmt.Sprintf("%s — timeout (%s)", c.Name, dur)
+	case engineerwire.VerifyError:
+		return fmt.Sprintf("%s — error (%s)", c.Name, dur)
+	default:
+		return fmt.Sprintf("%s — %s", c.Name, c.Status)
+	}
+}
+
+// verifyDigest renders checks as the human-readable block appended to the
+// Result summary and PR body, so an architect reading either sees the same
+// machine-collected verdict the session's own report didn't include. Returns
+// "" for a nil/empty checks, so callers can append it unconditionally without
+// an extra blank line when no verify commands were configured.
+func verifyDigest(checks []engineerwire.VerifyCheck) string {
+	if len(checks) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("Verification (run by acy in the worktree, not reported by the session):")
+	for _, check := range checks {
+		b.WriteString("\n- ")
+		b.WriteString(formatCheckLine(check))
+		if check.Output == "" {
+			continue
+		}
+		if check.Status != engineerwire.VerifyFailed && check.Status != engineerwire.VerifyError {
+			continue
+		}
+		b.WriteString("\n  excerpt: ")
+		b.WriteString(verifyExcerpt(check.Output))
+		b.WriteString("  [see Result.Verification for full output]")
+	}
+	return b.String()
+}
+
+// verifyExcerpt collapses output to a single line capped at
+// verifyExcerptMaxLines lines and verifyExcerptMaxChars characters, whichever
+// is shorter. Newlines within the kept lines are rendered as literal `\n` so
+// the excerpt stays one line in the digest.
+func verifyExcerpt(output string) string {
+	lines := strings.Split(output, "\n")
+	if len(lines) > verifyExcerptMaxLines {
+		lines = lines[:verifyExcerptMaxLines]
+	}
+	excerpt := strings.Join(lines, "\\n")
+	runes := []rune(excerpt)
+	if len(runes) > verifyExcerptMaxChars {
+		excerpt = string(runes[:verifyExcerptMaxChars])
+	}
+	return excerpt
 }
 
 func prFooter(engineerID, ticket string) string {
