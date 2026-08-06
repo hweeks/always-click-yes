@@ -521,8 +521,9 @@ const readTicketsSchema = `{
 }`
 
 const updateTicketDescription = "Record a ticket's new state the moment it changes — in-progress when " +
-	"its engineer launches, in-review when its PR opens, merged when the human merges, blocked with a " +
-	"note when stuck. Writes and commits the ticket file deterministically; you never edit tickets by hand."
+	"its engineer launches (record the branch), in-review when its PR opens (record the PR url), merged " +
+	"when the human merges, blocked with a note when stuck. Writes and commits the ticket file " +
+	"deterministically; you never edit tickets by hand."
 
 const updateTicketSchema = `{
   "type": "object",
@@ -542,6 +543,16 @@ const updateTicketSchema = `{
       "type": "string",
       "maxLength": 1000,
       "description": "Optional. Appended to the ticket's log, timestamped — say why, especially for blocked."
+    },
+    "branch": {
+      "type": "string",
+      "maxLength": 100,
+      "description": "Optional. The branch the engineer is working on — record it when the engineer launches. Omit to leave it unchanged."
+    },
+    "pr": {
+      "type": "string",
+      "maxLength": 300,
+      "description": "Optional. The PR URL — record it when the PR opens. Omit to leave it unchanged."
     }
   }
 }`

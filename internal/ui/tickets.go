@@ -25,7 +25,7 @@ import (
 type TicketStore interface {
 	List() ([]tickets.Ticket, error)
 	Put(t tickets.Ticket) error
-	UpdateStatus(id, status, note string) error
+	UpdateFields(id, status, note, branch, pr string) error
 	Commit(ctx context.Context, msg string) error
 }
 
@@ -60,6 +60,8 @@ type updateTicketArgs struct {
 	ID     string `json:"id"`
 	Status string `json:"status"`
 	Note   string `json:"note"`
+	Branch string `json:"branch"`
+	PR     string `json:"pr"`
 }
 
 // parseUpdateTicket decodes an UpdateTicket call, strictly: a missing required
@@ -75,6 +77,8 @@ func parseUpdateTicket(raw json.RawMessage) (updateTicketArgs, error) {
 	a.ID = strings.TrimSpace(a.ID)
 	a.Status = strings.TrimSpace(a.Status)
 	a.Note = strings.TrimSpace(a.Note)
+	a.Branch = strings.TrimSpace(a.Branch)
+	a.PR = strings.TrimSpace(a.PR)
 
 	var missing []string
 	if a.ID == "" {
@@ -108,7 +112,7 @@ func (m *Model) startUpdateTicket(p *mcp.Pending) {
 			". Nothing was changed. Fix the arguments and call it again."})
 		return
 	}
-	if err := m.tickets.UpdateStatus(args.ID, args.Status, args.Note); err != nil {
+	if err := m.tickets.UpdateFields(args.ID, args.Status, args.Note, args.Branch, args.PR); err != nil {
 		p.Resolve(mcp.Answer{Text: "UpdateTicket failed: " + err.Error()})
 		return
 	}

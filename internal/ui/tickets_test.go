@@ -32,7 +32,7 @@ type fakeTicketStore struct {
 	commitMsgs []string
 }
 
-type ticketUpdateCall struct{ id, status, note string }
+type ticketUpdateCall struct{ id, status, note, branch, pr string }
 
 func (f *fakeTicketStore) List() ([]tickets.Ticket, error) {
 	f.mu.Lock()
@@ -47,10 +47,10 @@ func (f *fakeTicketStore) Put(t tickets.Ticket) error {
 	return f.putErr
 }
 
-func (f *fakeTicketStore) UpdateStatus(id, status, note string) error {
+func (f *fakeTicketStore) UpdateFields(id, status, note, branch, pr string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.updates = append(f.updates, ticketUpdateCall{id, status, note})
+	f.updates = append(f.updates, ticketUpdateCall{id, status, note, branch, pr})
 	return f.updateErr
 }
 
@@ -166,7 +166,7 @@ func TestUpdateTicketUpdatesAndCommits(t *testing.T) {
 	p, reply := ticketPending(mcp.ToolUpdateTicket, `{"id":"t1","status":"in-review","note":"PR opened"}`)
 	m.startUpdateTicket(p)
 
-	if len(fake.updates) != 1 || fake.updates[0] != (ticketUpdateCall{"t1", "in-review", "PR opened"}) {
+	if len(fake.updates) != 1 || fake.updates[0] != (ticketUpdateCall{"t1", "in-review", "PR opened", "", ""}) {
 		t.Fatalf("update not applied: %+v", fake.updates)
 	}
 	if len(fake.commitMsgs) != 1 || !strings.Contains(fake.commitMsgs[0], "t1") || !strings.Contains(fake.commitMsgs[0], "in-review") {
@@ -180,6 +180,34 @@ func TestUpdateTicketUpdatesAndCommits(t *testing.T) {
 	}
 	if len(m.entries) != 1 {
 		t.Fatalf("want 1 transcript entry, got %d", len(m.entries))
+	}
+}
+
+// UpdateTicket accepts optional branch and pr and threads them through to
+// the store untouched — whether they get left alone or overwritten on an
+// omit is UpdateFields' call, not the UI's.
+func TestUpdateTicketPassesBranchAndPRWhenSet(t *testing.T) {
+	fake := &fakeTicketStore{}
+	m := &Model{tickets: fake, ctx: context.Background()}
+	p, reply := ticketPending(mcp.ToolUpdateTicket,
+		`{"id":"t1","status":"in-progress","branch":"agent/t1","pr":"https://example.com/pr/1"}`)
+	m.startUpdateTicket(p)
+	answer(t, reply)
+
+	if len(fake.updates) != 1 || fake.updates[0] != (ticketUpdateCall{"t1", "in-progress", "", "agent/t1", "https://example.com/pr/1"}) {
+		t.Fatalf("update not applied with branch/pr: %+v", fake.updates)
+	}
+}
+
+func TestUpdateTicketOmittedBranchAndPRPassThroughEmpty(t *testing.T) {
+	fake := &fakeTicketStore{}
+	m := &Model{tickets: fake, ctx: context.Background()}
+	p, reply := ticketPending(mcp.ToolUpdateTicket, `{"id":"t1","status":"merged"}`)
+	m.startUpdateTicket(p)
+	answer(t, reply)
+
+	if len(fake.updates) != 1 || fake.updates[0].branch != "" || fake.updates[0].pr != "" {
+		t.Fatalf("update with no branch/pr should pass them through empty: %+v", fake.updates)
 	}
 }
 

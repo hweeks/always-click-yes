@@ -138,11 +138,27 @@ func (s *Store) Put(t Ticket) error {
 // UpdateStatus transitions a ticket to status and, if note is non-empty,
 // appends it to the ticket's "## Log" section with an RFC3339 timestamp.
 func (s *Store) UpdateStatus(id, status, note string) error {
+	return s.UpdateFields(id, status, note, "", "")
+}
+
+// UpdateFields transitions a ticket to status and, if note is non-empty,
+// appends it to the ticket's "## Log" section with an RFC3339 timestamp — the
+// same as UpdateStatus — and additionally records branch and/or pr when
+// given. An empty branch or pr leaves the ticket's existing value alone, so a
+// caller that only knows the status (or only the branch, or only the PR) never
+// clobbers what an earlier call already recorded.
+func (s *Store) UpdateFields(id, status, note, branch, pr string) error {
 	t, err := s.Get(id)
 	if err != nil {
 		return err
 	}
 	t.Status = status
+	if branch != "" {
+		t.Branch = branch
+	}
+	if pr != "" {
+		t.PR = pr
+	}
 	if note != "" {
 		t.Body = appendLog(t.Body, note, s.clock().UTC().Format(time.RFC3339))
 	}

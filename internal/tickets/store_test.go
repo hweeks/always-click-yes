@@ -295,6 +295,64 @@ func TestUpdateStatusAppendsToLogSection(t *testing.T) {
 	}
 }
 
+func TestUpdateFieldsSetsBranchAndPR(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.Put(Ticket{ID: "t1", Title: "T1", Status: StatusTodo}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if err := s.UpdateFields("t1", StatusInProgress, "", "agent/t1", ""); err != nil {
+		t.Fatalf("UpdateFields: %v", err)
+	}
+
+	got, err := s.Get("t1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status != StatusInProgress || got.Branch != "agent/t1" || got.PR != "" {
+		t.Fatalf("Get = %+v, want status in-progress, branch agent/t1, no pr", got)
+	}
+}
+
+// A later call that omits branch/pr must not clobber what an earlier call
+// already recorded — the model only sends what changed at each transition.
+func TestUpdateFieldsPreservesBranchAndPROnLaterUpdate(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.Put(Ticket{ID: "t1", Title: "T1", Status: StatusTodo}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if err := s.UpdateFields("t1", StatusInProgress, "", "agent/t1", ""); err != nil {
+		t.Fatalf("UpdateFields(branch): %v", err)
+	}
+	if err := s.UpdateFields("t1", StatusInReview, "", "", "https://example.com/pr/1"); err != nil {
+		t.Fatalf("UpdateFields(pr): %v", err)
+	}
+
+	got, err := s.Get("t1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status != StatusInReview {
+		t.Fatalf("Status = %q, want %q", got.Status, StatusInReview)
+	}
+	if got.Branch != "agent/t1" {
+		t.Fatalf("Branch = %q, want it preserved from the earlier update", got.Branch)
+	}
+	if got.PR != "https://example.com/pr/1" {
+		t.Fatalf("PR = %q, want it set by this update", got.PR)
+	}
+
+	if err := s.UpdateFields("t1", StatusMerged, "", "", ""); err != nil {
+		t.Fatalf("UpdateFields(merged): %v", err)
+	}
+	got, err = s.Get("t1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Branch != "agent/t1" || got.PR != "https://example.com/pr/1" {
+		t.Fatalf("Get = %+v, want branch and pr both preserved through a status-only update", got)
+	}
+}
+
 func TestUpdateStatusWithoutNoteLeavesBodyUnchanged(t *testing.T) {
 	s := newTestStore(t)
 	if err := s.Put(Ticket{ID: "t1", Title: "T1", Status: StatusTodo, Body: "The brief.\n"}); err != nil {
