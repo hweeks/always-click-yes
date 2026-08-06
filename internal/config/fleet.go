@@ -34,6 +34,13 @@ type FleetHost struct {
 	// the argument of a `source` call (internal/fleet/remotepath.go's
 	// rcWrap), so it is the remote shell that expands the tilde, not us.
 	Rc string `json:"rc,omitempty"`
+	// Shell overrides which shell Rc is sourced through, e.g. "bash" or
+	// "fish". Empty means derive it from Rc's basename
+	// (internal/fleet/remotepath.go's shellForRc): .zshrc/.zprofile/.zshenv
+	// mean zsh, .bashrc/.bash_profile/.profile mean bash, anything
+	// unrecognised falls back to sh. Set this when a host's rc file doesn't
+	// follow that naming, rather than fighting the derivation.
+	Shell string `json:"shell,omitempty"`
 }
 
 // FleetConfig is the optional "fleet" object in .acy.json: shared defaults

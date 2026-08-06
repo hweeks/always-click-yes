@@ -121,7 +121,7 @@ func TestSSHArgs(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := sshArgs(tc.target, tc.acyBin, tc.engineerArgs, tc.dirs, "")
+			got := sshArgs(tc.target, tc.acyBin, tc.engineerArgs, tc.dirs, "", "")
 			if !reflect.DeepEqual(got, tc.want) {
 				t.Errorf("sshArgs = %v, want %v", got, tc.want)
 			}
@@ -139,6 +139,7 @@ func TestSSHArgsWithRc(t *testing.T) {
 		engineerArgs []string
 		dirs         []string
 		rc           string
+		shell        string
 	}{
 		{
 			name:         "rc only, no path",
@@ -159,12 +160,19 @@ func TestSSHArgsWithRc(t *testing.T) {
 			engineerArgs: []string{"engineer", "start", "--clone", "/srv/repo"},
 			rc:           "/etc/profile",
 		},
+		{
+			name:         "explicit shell override threads through unchanged",
+			acyBin:       "acy",
+			engineerArgs: []string{"engineer", "start", "--clone", "/srv/repo"},
+			rc:           "~/.bashrc",
+			shell:        "fish",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := sshArgs("user@box1", tc.acyBin, tc.engineerArgs, tc.dirs, tc.rc)
+			got := sshArgs("user@box1", tc.acyBin, tc.engineerArgs, tc.dirs, tc.rc, tc.shell)
 			want := append(sshBatchArgs("user@box1"),
-				rcWrap(tc.rc, pathPreamble(tc.dirs)+quoteArgv(append([]string{tc.acyBin}, tc.engineerArgs...))))
+				rcWrap(tc.rc, tc.shell, pathPreamble(tc.dirs)+quoteArgv(append([]string{tc.acyBin}, tc.engineerArgs...))))
 			if !reflect.DeepEqual(got, want) {
 				t.Errorf("sshArgs = %v, want %v", got, want)
 			}
@@ -174,12 +182,13 @@ func TestSSHArgsWithRc(t *testing.T) {
 
 func TestSSHDoctorArgs(t *testing.T) {
 	cases := []struct {
-		name string
-		dirs []string
-		rc   string
-		cmd  string
-		args []string
-		want []string
+		name  string
+		dirs  []string
+		rc    string
+		shell string
+		cmd   string
+		args  []string
+		want  []string
 	}{
 		{
 			name: "no path — still quoted (doctor always quotes)",
@@ -233,7 +242,7 @@ func TestSSHDoctorArgs(t *testing.T) {
 				"-o", "ServerAliveCountMax=4",
 				"box1",
 				"--",
-				rcWrap("~/.zshrc", quoteArgv([]string{"claude", "auth", "status", "--json"})),
+				rcWrap("~/.zshrc", "", quoteArgv([]string{"claude", "auth", "status", "--json"})),
 			},
 		},
 		{
@@ -248,13 +257,28 @@ func TestSSHDoctorArgs(t *testing.T) {
 				"-o", "ServerAliveCountMax=4",
 				"box1",
 				"--",
-				rcWrap("~/.zshrc", pathPreamble([]string{"/opt/homebrew/bin"})+quoteArgv([]string{"gh", "auth", "status"})),
+				rcWrap("~/.zshrc", "", pathPreamble([]string{"/opt/homebrew/bin"})+quoteArgv([]string{"gh", "auth", "status"})),
+			},
+		},
+		{
+			name:  "rc set to a bash file, explicit shell override picks fish instead",
+			rc:    "~/.bashrc",
+			shell: "fish",
+			cmd:   "claude",
+			args:  []string{"auth", "status", "--json"},
+			want: []string{
+				"-o", "BatchMode=yes",
+				"-o", "ServerAliveInterval=15",
+				"-o", "ServerAliveCountMax=4",
+				"box1",
+				"--",
+				rcWrap("~/.bashrc", "fish", quoteArgv([]string{"claude", "auth", "status", "--json"})),
 			},
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := sshDoctorArgs("box1", tc.dirs, tc.rc, tc.cmd, tc.args)
+			got := sshDoctorArgs("box1", tc.dirs, tc.rc, tc.shell, tc.cmd, tc.args)
 			if !reflect.DeepEqual(got, tc.want) {
 				t.Errorf("sshDoctorArgs = %v, want %v", got, tc.want)
 			}

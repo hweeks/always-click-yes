@@ -17,6 +17,7 @@ type sshTransport struct {
 	clonePath string   // the remote clone path
 	path      []string // extra PATH directories on the remote host (FleetHost.Path)
 	rc        string   // rc file to source before every remote command (FleetHost.Rc)
+	shell     string   // explicit shell override for rc (FleetHost.Shell); empty derives from rc
 }
 
 // NewSSHTransport returns a Transport that runs engineers on target over
@@ -24,12 +25,14 @@ type sshTransport struct {
 // FleetHost's own default. path is FleetHost.Path — extra directories
 // prepended to the remote PATH before the engineer argv runs; nil means the
 // host declared none. rc is FleetHost.Rc — a shell rc file sourced before
-// the engineer argv runs; empty means the host declared none.
-func NewSSHTransport(target, acyBin, clonePath string, path []string, rc string) Transport {
+// the engineer argv runs; empty means the host declared none. shell is
+// FleetHost.Shell — an explicit override for which shell sources rc; empty
+// means derive it from rc's basename (remotepath.go's shellForRc).
+func NewSSHTransport(target, acyBin, clonePath string, path []string, rc, shell string) Transport {
 	if acyBin == "" {
 		acyBin = "acy"
 	}
-	return &sshTransport{target: target, acyBin: acyBin, clonePath: clonePath, path: path, rc: rc}
+	return &sshTransport{target: target, acyBin: acyBin, clonePath: clonePath, path: path, rc: rc, shell: shell}
 }
 
 // sshBatchArgs is the non-interactive ssh preamble shared by every command
@@ -64,8 +67,9 @@ func sshBatchArgs(target string) []string {
 // the extended PATH is set before acyBin — and everything it goes on to
 // exec — ever runs. When rc is set, that same composition (PATH preamble
 // included, if any) becomes the `<inner>` rcWrap sources rc in front of, so
-// the host's rc file runs before acyBin does either way.
-func sshArgs(target, acyBin string, engineerArgs []string, dirs []string, rc string) []string {
+// the host's rc file runs before acyBin does either way. shell is
+// FleetHost.Shell, threaded through to rcWrap unchanged.
+func sshArgs(target, acyBin string, engineerArgs []string, dirs []string, rc, shell string) []string {
 	if rc == "" {
 		if len(dirs) == 0 {
 			args := append(sshBatchArgs(target), acyBin)
@@ -76,11 +80,11 @@ func sshArgs(target, acyBin string, engineerArgs []string, dirs []string, rc str
 	}
 	argv := append([]string{acyBin}, engineerArgs...)
 	inner := pathPreamble(dirs) + quoteArgv(argv)
-	return append(sshBatchArgs(target), rcWrap(rc, inner))
+	return append(sshBatchArgs(target), rcWrap(rc, shell, inner))
 }
 
 func (t *sshTransport) command(ctx context.Context, engineerArgs []string) *exec.Cmd {
-	return exec.CommandContext(ctx, "ssh", sshArgs(t.target, t.acyBin, engineerArgs, t.path, t.rc)...) //nolint:gosec // target/acyBin are operator-configured, not user input
+	return exec.CommandContext(ctx, "ssh", sshArgs(t.target, t.acyBin, engineerArgs, t.path, t.rc, t.shell)...) //nolint:gosec // target/acyBin are operator-configured, not user input
 }
 
 func (t *sshTransport) Start(ctx context.Context, spec engineerwire.Spec) (StartAck, error) {

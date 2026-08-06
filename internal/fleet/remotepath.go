@@ -1,6 +1,9 @@
 package fleet
 
-import "strings"
+import (
+	"path/filepath"
+	"strings"
+)
 
 // pathPreamble returns the `export PATH=...; exec ` prefix that puts dirs
 // ahead of whatever PATH the command that follows would otherwise see, or ""
@@ -42,26 +45,56 @@ func quoteArgv(argv []string) string {
 	return strings.Join(parts, " ")
 }
 
+// shellForRc derives the login shell that owns rc from its basename: the
+// zsh-family dotfiles mean zsh, the bash-family (including plain .profile)
+// mean bash, and anything unrecognised falls back to sh — the one shell
+// POSIX guarantees exists, rather than assuming the zsh a developer's own
+// machine happens to have. This is what fixes rcWrap hardcoding zsh: a host
+// configured with an rc file that belongs to some other shell (or a host
+// with no zsh installed at all, e.g. plain Ubuntu) used to fail outright
+// with "zsh: command not found" no matter which shell rc actually named.
+func shellForRc(rc string) string {
+	switch filepath.Base(rc) {
+	case ".zshrc", ".zprofile", ".zshenv":
+		return "zsh"
+	case ".bashrc", ".bash_profile", ".profile":
+		return "bash"
+	default:
+		return "sh"
+	}
+}
+
+// shellFor picks the shell rcWrap sources rc through: override
+// (FleetHost.Shell) when the operator set one, else shellForRc's derivation.
+func shellFor(rc, override string) string {
+	if override != "" {
+		return override
+	}
+	return shellForRc(rc)
+}
+
 // rcWrap wraps inner — the composition pathPreamble/quoteArgv already build
-// — in `zsh -c 'source <rc> >/dev/null 2>&1; <inner>'`, so a host's rc file
-// (FleetHost.Rc) runs before inner does, or returns inner unchanged when rc
-// is empty. This is what makes real hosts work where a fleet `path` entry
-// alone is not enough: claude and gh can depend on auth/env wiring only the
-// login shell's rc sets up.
+// — in `<shell> -c 'source <rc> >/dev/null 2>&1; <inner>'`, so a host's rc
+// file (FleetHost.Rc) runs before inner does, or returns inner unchanged
+// when rc is empty. shell is shellFor's pick — FleetHost.Shell when set,
+// else derived from rc's basename — never a hardcoded assumption. This is
+// what makes real hosts work where a fleet `path` entry alone is not
+// enough: claude and gh can depend on auth/env wiring only the login
+// shell's rc sets up.
 //
 // rc itself is spliced in unquoted, on purpose: it is validated to start
 // with "~/" or "/" (config.FleetHost.Rc), and unlike a fleet `path` entry —
 // which is spliced straight into the remote command with no shell of its
 // own standing between it and ssh — this string is only ever the argument
-// of a `source` call the remote zsh itself interprets, so a leading "~" is
-// exactly the case that needs the remote shell to expand it, quoting it
+// of a `source` call the remote shell itself interprets, so a leading "~"
+// is exactly the case that needs the remote shell to expand it, quoting it
 // away would defeat the entire point. inner, by contrast, may already
 // contain single quotes from quoteArgv, which is why the whole `source ...;
 // inner` line is shellQuote'd as one string rather than being spliced in
 // raw.
-func rcWrap(rc, inner string) string {
+func rcWrap(rc, shell, inner string) string {
 	if rc == "" {
 		return inner
 	}
-	return "zsh -c " + shellQuote("source "+rc+" >/dev/null 2>&1; "+inner)
+	return shellFor(rc, shell) + " -c " + shellQuote("source "+rc+" >/dev/null 2>&1; "+inner)
 }
