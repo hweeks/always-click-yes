@@ -249,6 +249,65 @@ func TestAttachExitsOnCtxEnd(t *testing.T) {
 	}
 }
 
+// This is the regression case for the real-hardware race: when `in` is
+// already at EOF (e.g. `acy engineer attach <id> --from 1 < /dev/null`
+// against a finished engineer), Attach's stdin-EOF exit condition must never
+// win against draining the journal to `out`. Pre-fix, this flaked heavily —
+// see the fix commit message for the observed rate — because the select
+// could see `inDone` closed before the Follow goroutine had pushed the
+// backlog onto its channel, and returned without ever writing the replay.
+func TestAttachDrainsFullJournalWhenStdinIsAlreadyAtEOF(t *testing.T) {
+	dir := t.TempDir()
+	j, err := engineerwire.Open(dir)
+	if err != nil {
+		t.Fatalf("Open journal: %v", err)
+	}
+	if _, err := j.Append(engineerwire.Hello{EngineerID: "e1"}); err != nil {
+		t.Fatalf("append hello: %v", err)
+	}
+	if _, err := j.Append(engineerwire.Event{Kind: engineerwire.EventPhase, Text: "AUTO-RUN"}); err != nil {
+		t.Fatalf("append event: %v", err)
+	}
+	if _, err := j.Append(engineerwire.Result{Outcome: "completed", Summary: "done"}); err != nil {
+		t.Fatalf("append result: %v", err)
+	}
+	if err := j.Close(); err != nil {
+		t.Fatalf("close journal: %v", err)
+	}
+
+	// `in` is already at EOF before Attach ever reads it — exactly what
+	// `< /dev/null` looks like from Attach's side.
+	in := bytes.NewReader(nil)
+	var out bytes.Buffer
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := Attach(ctx, dir, 1, in, &out); err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+
+	sc := bufio.NewScanner(bytes.NewReader(out.Bytes()))
+	var types []engineerwire.Type
+	for sc.Scan() {
+		var env struct {
+			Type engineerwire.Type `json:"type"`
+		}
+		if err := json.Unmarshal(sc.Bytes(), &env); err != nil {
+			t.Fatalf("decode: %v (line: %s)", err, sc.Text())
+		}
+		types = append(types, env.Type)
+	}
+	want := []engineerwire.Type{engineerwire.TypeHello, engineerwire.TypeEvent, engineerwire.TypeResult}
+	if len(types) != len(want) {
+		t.Fatalf("out contained %d messages %v, want the full journal %v", len(types), types, want)
+	}
+	for i := range want {
+		if types[i] != want[i] {
+			t.Errorf("message %d type = %q, want %q", i, types[i], want[i])
+		}
+	}
+}
+
 // When `in` hits EOF and the journal already holds a Result, Attach must
 // return promptly on its own — no ctx expiry needed — since nothing more
 // will ever be written or read. fromSeq is set past the Result's own seq so

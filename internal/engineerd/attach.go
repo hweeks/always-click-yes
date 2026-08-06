@@ -18,8 +18,11 @@ import (
 // engineer, in both directions at once.
 //
 // It returns once any of three things happens: a Result message is streamed
-// out, in reaches EOF and the journal already holds a Result (nothing more
-// will ever be written, so there is nothing left to wait for), or ctx ends.
+// out (only once the drain that produced it has actually flushed to out),
+// in reaches EOF and no Result can ever reach out from fromSeq (nothing more
+// will ever be written that this attach hasn't already skipped past, so
+// there is nothing left to wait for), or ctx ends. Stdin EOF never races the
+// journal drain to decide which one wins: it only disarms forwarding.
 func Attach(ctx context.Context, dir string, fromSeq int64, in io.Reader, out io.Writer) error {
 	j, err := engineerwire.Open(dir)
 	if err != nil {
@@ -39,6 +42,10 @@ func Attach(ctx context.Context, dir string, fromSeq int64, in io.Reader, out io
 	bw := bufio.NewWriter(out)
 	defer func() { _ = bw.Flush() }()
 
+	// The journal stream is the primary loop: everything up to and including
+	// a streamed Result must reach out before Attach can return on that
+	// account. Stdin EOF never short-circuits that drain — it only stops
+	// forwarding, and arms an exit *once nothing more can ever reach ch*.
 	ch := j.Follow(ctx, fromSeq)
 	for {
 		select {
@@ -62,14 +69,20 @@ func Attach(ctx context.Context, dir string, fromSeq int64, in io.Reader, out io
 			}
 		case <-inDone:
 			// The input side is done — `in` hit EOF or a read past recovery.
-			// If the journal already holds a Result the engineer is done too
-			// and nothing more is coming; otherwise it may still be running
-			// with nobody left to answer it, so keep following.
-			done, err := journalHasResult(j)
+			// That only ever stops forwarding. If a Result is unreachable
+			// from fromSeq — journaled, but strictly before fromSeq, so
+			// Follow will never re-deliver it — there is nothing left this
+			// attach could ever produce, so exit now. Otherwise a Result is
+			// either still to be drained off ch or hasn't been written yet
+			// (the engineer may still be running with nobody left to
+			// answer it): either way, disarm this case and keep following;
+			// the case above is what returns once a streamed Result actually
+			// reaches out.
+			unreachable, err := resultUnreachable(j, fromSeq)
 			if err != nil {
 				alog.Printf("engineerd: attach: checking for a result: %v", err)
 			}
-			if done {
+			if unreachable {
 				return nil
 			}
 			inDone = nil // already closed: never select it again
@@ -79,14 +92,27 @@ func Attach(ctx context.Context, dir string, fromSeq int64, in io.Reader, out io
 	}
 }
 
-// journalHasResult reports whether dir's journal already contains a Result
-// message, i.e. whether the engineer that wrote it has finished.
-func journalHasResult(j *engineerwire.Journal) (bool, error) {
-	msgs, err := j.ReplayFrom(1)
+// resultUnreachable reports whether dir's journal will never deliver a
+// Result to this Follow session: one was journaled, but at a seq strictly
+// before fromSeq, so Follow — which only ever emits seq >= fromSeq — has
+// already skipped it and will not produce it now or later. It returns false
+// both when a Result is still due (its seq is >= fromSeq) and when none has
+// been journaled yet (the engineer may still be running).
+func resultUnreachable(j *engineerwire.Journal, fromSeq int64) (bool, error) {
+	fromHere, err := j.ReplayFrom(fromSeq)
 	if err != nil {
 		return false, err
 	}
-	for _, m := range msgs {
+	for _, m := range fromHere {
+		if _, ok := m.(engineerwire.Result); ok {
+			return false, nil
+		}
+	}
+	all, err := j.ReplayFrom(1)
+	if err != nil {
+		return false, err
+	}
+	for _, m := range all {
 		if _, ok := m.(engineerwire.Result); ok {
 			return true, nil
 		}
