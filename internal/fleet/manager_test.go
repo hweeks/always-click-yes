@@ -65,8 +65,9 @@ type mockTransport struct {
 	n         int
 	engines   map[string]*mockEngine
 	byTicket  map[string]*mockEngine
-	startErrs map[int]error      // 1-based call index -> error to return instead of starting
-	fromSeqs  map[string][]int64 // engineerID -> fromSeq per Attach call, in order
+	startErrs map[int]error                // 1-based call index -> error to return instead of starting
+	fromSeqs  map[string][]int64           // engineerID -> fromSeq per Attach call, in order
+	specs     map[string]engineerwire.Spec // ticket -> the Spec Start was actually called with
 }
 
 func newMockTransport() *mockTransport {
@@ -74,7 +75,15 @@ func newMockTransport() *mockTransport {
 		engines:  map[string]*mockEngine{},
 		byTicket: map[string]*mockEngine{},
 		fromSeqs: map[string][]int64{},
+		specs:    map[string]engineerwire.Spec{},
 	}
+}
+
+// specFor returns the Spec the manager actually handed Start for ticket.
+func (mt *mockTransport) specFor(ticket string) engineerwire.Spec {
+	mt.mu.Lock()
+	defer mt.mu.Unlock()
+	return mt.specs[ticket]
 }
 
 // registerEngine seats an engine directly, bypassing Start — for tests that
@@ -122,6 +131,7 @@ func (mt *mockTransport) Start(_ context.Context, spec engineerwire.Spec) (Start
 	eng := &mockEngine{id: id, msgs: make(chan any, 16)}
 	mt.engines[id] = eng
 	mt.byTicket[spec.Ticket] = eng
+	mt.specs[spec.Ticket] = spec
 	mt.mu.Unlock()
 	return StartAck{EngineerID: id, PID: 1000 + n}, nil
 }
@@ -403,7 +413,7 @@ func TestManagerEventRoutingAndResultFreesSlot(t *testing.T) {
 	}
 
 	eng := mt.byTicket["T1"]
-	eng.send(engineerwire.Hello{EngineerID: eng.id})
+	eng.send(engineerwire.Hello{EngineerID: eng.id, ProtocolVersion: engineerwire.ProtocolVersion})
 	eng.send(engineerwire.Event{Kind: engineerwire.EventPhase, Text: "working"})
 
 	progress := drainEvent(t, m, time.Second)

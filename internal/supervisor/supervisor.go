@@ -16,6 +16,7 @@ import (
 	"github.com/hweeks/always-click-yes/internal/alog"
 	"github.com/hweeks/always-click-yes/internal/config"
 	"github.com/hweeks/always-click-yes/internal/driver"
+	"github.com/hweeks/always-click-yes/internal/fleet"
 	"github.com/hweeks/always-click-yes/internal/gate"
 	"github.com/hweeks/always-click-yes/internal/gateway"
 	"github.com/hweeks/always-click-yes/internal/mcp"
@@ -521,11 +522,22 @@ func NewSupervisor(ctx context.Context, f Flags) (*Supervisor, error) {
 			// Engineer spend counts against the same run-budget ceiling as
 			// local child dispatches — both are money this run has already
 			// spent, and a resumed run must not forget either half of it.
-			spent := snap.ChildCost
+			var engineerSpent float64
 			for _, e := range snap.Engineers {
-				spent += e.CostUSD
+				engineerSpent += e.CostUSD
 			}
-			orch.SeedSpent(spent)
+			orch.SeedSpent(snap.ChildCost + engineerSpent)
+
+			// The fleet's own run-budget ceiling only tracks engineer spend,
+			// so it is seeded with that half alone. fleet.Manager.Resume —
+			// called later, once the ui.Model's own resume flow reaches the
+			// snapshot's engineers — repopulates the ledger with these same
+			// costs; spentLocked takes the higher of the seed and the
+			// ledger sum rather than adding them, so seeding here first
+			// never double-counts once that happens.
+			if fm, ok := f.Fleet.(*fleet.Manager); ok {
+				fm.SeedSpent(engineerSpent)
+			}
 		}
 	}
 

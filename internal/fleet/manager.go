@@ -14,6 +14,7 @@ import (
 	"github.com/hweeks/always-click-yes/internal/engineerwire"
 	"github.com/hweeks/always-click-yes/internal/gitops"
 	"github.com/hweeks/always-click-yes/internal/state"
+	"github.com/hweeks/always-click-yes/internal/version"
 )
 
 // defaultEventsBuffer is generous on purpose: Events only drops progress
@@ -70,6 +71,13 @@ type EngineerStatus struct {
 	LastSeq int64
 	Started time.Time
 	Ended   time.Time
+	// ProtocolVersion/ACYVersion are stamped from the engineer's Hello once
+	// its handshake has passed — zero/empty until then, and left as-is for
+	// an engineer resumed from mid-journal, whose Hello this process never
+	// sees (see handleMsg's Hello case). What FleetStatus reads to show
+	// version skew across a fleet.
+	ProtocolVersion int
+	ACYVersion      string
 }
 
 // EventKind distinguishes what an Event is carrying, so a consumer never has
@@ -133,23 +141,35 @@ type engineer struct {
 	answers chan any
 	cancel  context.CancelFunc
 	counted bool // true while this engineer still holds a host slot
+
+	protocolVersion int
+	acyVersion      string
+	// resumedMidJournal is true when this engineer was restored by Resume
+	// from a LastSeq >= 1: its Follow re-attaches from LastSeq+1 > 1, and a
+	// real journal never replays seq 1 (Hello) to a follower starting past
+	// it. Its handshake already passed at the original Launch, in a process
+	// this one may have no other record of, so handleMsg's Hello case must
+	// not re-run the check against whatever a reattach happens to deliver.
+	resumedMidJournal bool
 }
 
 func (e *engineer) toStatus() EngineerStatus {
 	return EngineerStatus{
-		EngineerID: e.id,
-		Ticket:     e.ticket,
-		Title:      e.title,
-		Host:       e.hostName,
-		Branch:     e.branch,
-		State:      e.state,
-		Outcome:    e.outcome,
-		PRURL:      e.prURL,
-		CostUSD:    e.cost,
-		Tokens:     e.tokens,
-		LastSeq:    e.lastSeq,
-		Started:    e.started,
-		Ended:      e.ended,
+		EngineerID:      e.id,
+		Ticket:          e.ticket,
+		Title:           e.title,
+		Host:            e.hostName,
+		Branch:          e.branch,
+		State:           e.state,
+		Outcome:         e.outcome,
+		PRURL:           e.prURL,
+		CostUSD:         e.cost,
+		Tokens:          e.tokens,
+		LastSeq:         e.lastSeq,
+		Started:         e.started,
+		Ended:           e.ended,
+		ProtocolVersion: e.protocolVersion,
+		ACYVersion:      e.acyVersion,
 	}
 }
 
@@ -178,6 +198,11 @@ type Manager struct {
 	ledger   []*engineer // oldest first
 	hostLoad map[string]int
 	closed   bool
+	// spentBefore is a resumed run's already-recorded engineer spend, seeded
+	// via SeedSpent before this process's own ledger has caught up. See
+	// spentLocked for why it is combined with the ledger sum by taking the
+	// higher of the two rather than adding them.
+	spentBefore float64
 	// launched is set by the first Launch or Resume call. Resume must run
 	// before any engineer is launched — a launch already assigns its "e1",
 	// "e2" ids from seq, and admitting one before Resume has replayed a
@@ -334,12 +359,10 @@ func (m *Manager) pickHostLocked(pin string) (config.FleetHost, error) {
 
 // buildSpec turns a LaunchReq into the wire Spec an engineer is started
 // with, applying fleet defaults wherever req leaves a field at its zero
-// value.
-func buildSpec(cfg config.FleetConfig, req LaunchReq, ticket, branch string) engineerwire.Spec {
-	budget := req.BudgetUSD
-	if budget <= 0 && cfg.EngineerBudgetUSD != nil {
-		budget = *cfg.EngineerBudgetUSD
-	}
+// value. budget is the already-resolved figure from effectiveBudgetLocked —
+// buildSpec itself applies no ceiling logic, so a launch cannot bypass the
+// run ceiling by asking for a larger budget than Launch already clamped.
+func buildSpec(cfg config.FleetConfig, req LaunchReq, ticket, branch string, budget float64) engineerwire.Spec {
 	var deadman float64
 	if cfg.DeadmanHours != nil {
 		deadman = *cfg.DeadmanHours
@@ -383,12 +406,22 @@ func (m *Manager) Launch(ctx context.Context, req LaunchReq) (EngineerStatus, er
 		m.mu.Unlock()
 		return EngineerStatus{}, errClosed
 	}
+	if ceiling := m.runBudgetLocked(); ceiling > 0 {
+		if spent := m.spentLocked(); spent >= ceiling {
+			m.mu.Unlock()
+			return EngineerStatus{}, fmt.Errorf(
+				"fleet: the run budget of $%.2f is exhausted (spent $%.4f) — "+
+					"ask the human to raise fleet.runBudgetUSD or Finish; do not retry automatically",
+				ceiling, spent)
+		}
+	}
 	m.launched = true
 	host, err := m.pickHostLocked(req.Host)
 	if err != nil {
 		m.mu.Unlock()
 		return EngineerStatus{}, err
 	}
+	budget := m.effectiveBudgetLocked(req.BudgetUSD)
 	m.seq++
 	eng := &engineer{
 		id:       engineerID(m.seq),
@@ -408,7 +441,7 @@ func (m *Manager) Launch(ctx context.Context, req LaunchReq) (EngineerStatus, er
 	m.ledger = append(m.ledger, eng)
 	m.mu.Unlock()
 
-	spec := buildSpec(m.cfg, req, ticket, eng.branch)
+	spec := buildSpec(m.cfg, req, ticket, eng.branch, budget)
 	transport := m.transports(host)
 	ack, startErr := transport.Start(ctx, spec)
 
@@ -470,6 +503,74 @@ func (m *Manager) checkPRCap(ctx context.Context) error {
 func prCapError(prCap, open int, urls []string) error {
 	return fmt.Errorf("fleet: %d/%d acy PRs are open (%s) — Await merges before launching more",
 		open, prCap, strings.Join(urls, ", "))
+}
+
+// runBudgetLocked is the fleet-wide ceiling on engineer spend, 0 meaning
+// unlimited — config.FleetConfig.RunBudgetUSD left nil. Callers hold m.mu,
+// though m.cfg itself never changes after construction.
+func (m *Manager) runBudgetLocked() float64 {
+	if m.cfg.RunBudgetUSD == nil {
+		return 0
+	}
+	return *m.cfg.RunBudgetUSD
+}
+
+// spentLocked is the fleet's total engineer spend so far. Callers hold m.mu.
+//
+// It is the higher of the ledger's own cost sum and spentBefore rather than
+// their sum: SeedSpent exists for a resumed run whose ledger has not yet
+// been restored (cli/arch.go seeds it from the same snapshot that
+// orchestrator.SeedSpent reads from), and Resume — which runs moments later
+// — repopulates that very ledger with each engineer's own recorded cost.
+// Adding the two would count that history twice; taking the max is correct
+// whichever of the two has run so far, and still grows correctly once new
+// engineers launch and add cost the seed never knew about.
+func (m *Manager) spentLocked() float64 {
+	var ledgerSum float64
+	for _, eng := range m.ledger {
+		ledgerSum += eng.cost
+	}
+	if m.spentBefore > ledgerSum {
+		return m.spentBefore
+	}
+	return ledgerSum
+}
+
+// SeedSpent carries a resumed run's already-recorded engineer spend into a
+// freshly constructed Manager, the fleet's counterpart to
+// orchestrator.SeedSpent. cost is a cumulative total, not a delta — calling
+// it more than once (or racing it against Resume restoring the same history
+// into the ledger) never double-counts; see spentLocked.
+func (m *Manager) SeedSpent(cost float64) {
+	if cost <= 0 {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if cost > m.spentBefore {
+		m.spentBefore = cost
+	}
+}
+
+// effectiveBudgetLocked combines req's requested per-engineer budget, the
+// fleet's configured default, and the money actually left under the run
+// ceiling — mirroring orchestrator.effectiveBudgetLocked exactly, so a
+// launch cannot bypass the fleet's own ceiling by asking for a bigger
+// engineer budget than the run has left. Callers hold m.mu.
+func (m *Manager) effectiveBudgetLocked(requested float64) float64 {
+	budget := requested
+	if budget <= 0 && m.cfg.EngineerBudgetUSD != nil {
+		budget = *m.cfg.EngineerBudgetUSD
+	}
+	ceiling := m.runBudgetLocked()
+	if ceiling <= 0 {
+		return budget
+	}
+	remaining := ceiling - m.spentLocked()
+	if budget <= 0 || budget > remaining {
+		return remaining
+	}
+	return budget
 }
 
 // runEngineer keeps Follow attached to eng for the rest of its life. Follow
@@ -555,10 +656,34 @@ func (m *Manager) runResumedEngineer(engCtx context.Context, cancel context.Canc
 func (m *Manager) handleMsg(eng *engineer, msg any) {
 	switch v := msg.(type) {
 	case engineerwire.Hello:
-		// Nothing to record: eng.state is already "running" from Launch.
+		// A resume that reattaches from a mid-journal seq (fromSeq > 1, set
+		// on eng by resumeOne) never sees this in a real journal — Follow
+		// only replays seq >= fromSeq, and Hello is always seq 1 — so its
+		// handshake already passed at the original Launch and is not
+		// re-checked here.
+		if eng.resumedMidJournal {
+			return
+		}
+		if v.ProtocolVersion != engineerwire.ProtocolVersion {
+			reason := fmt.Sprintf(
+				"protocol version mismatch: engineer speaks protocol v%d (acy %s), architect speaks protocol v%d (acy %s)",
+				v.ProtocolVersion, v.ACYVersion, engineerwire.ProtocolVersion, version.String())
+			alog.Printf("fleet: %s hello rejected: %s", eng.id, reason)
+			_ = m.Cancel(eng.id, reason)
+			return
+		}
+		m.mu.Lock()
+		eng.protocolVersion = v.ProtocolVersion
+		eng.acyVersion = v.ACYVersion
+		m.mu.Unlock()
 
 	case engineerwire.Event:
 		m.mu.Lock()
+		if v.Kind == engineerwire.EventCost {
+			// A cost checkpoint is cumulative-in-process, the same
+			// assign-not-add rule orchestrator.note applies to TotalCostUSD.
+			eng.cost = v.CostUSD
+		}
 		st := eng.toStatus()
 		m.mu.Unlock()
 		ev := v
@@ -791,6 +916,9 @@ func (m *Manager) resumeOne(e state.Engineer) {
 		started:  e.StartedAt,
 		ended:    e.EndedAt,
 		answers:  make(chan any, answerBuffer),
+		// e.LastSeq >= 1 means the re-follow starts past seq 1 (Hello) —
+		// see handleMsg's Hello case for why that skips the handshake check.
+		resumedMidJournal: e.LastSeq >= 1,
 	}
 
 	m.mu.Lock()
