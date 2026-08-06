@@ -165,6 +165,12 @@ func (m *Model) startLaunchEngineer(p *mcp.Pending) {
 		"launched %s on host %s, branch %s (fleet capacity %d/%d in use)",
 		st.EngineerID, st.Host, st.Branch, used, total)})
 	m.appendEntry(entry{kind: eTool, title: "launch " + st.EngineerID, body: launchBody(st)})
+	// Without this, a crash between here and the next turn-end/arm persist
+	// (dispatch.go's startDispatch does the local-child equivalent) would
+	// resume with an empty engineer ledger — nothing for Manager.Resume to
+	// re-attach, and the engineer's own progress and eventual Result would be
+	// silently orphaned.
+	m.persist()
 }
 
 func launchBody(st fleet.EngineerStatus) string {
@@ -275,6 +281,15 @@ func (m *Model) startFleetStatus(p *mcp.Pending) {
 func (m *Model) ingestFleet(ev fleet.Event) {
 	m.syncFleet()
 	m.appendEntry(fleetEntry(ev))
+
+	// Terminal events, mirroring ingestChild's KindFinished/KindFailed: an
+	// engineer's Result (or a Cancel/failure) is exactly the state a crash
+	// must not lose, since Manager.Ledger()'s State/Outcome/PRURL is what a
+	// resumed run reads to know the engineer is already done rather than
+	// re-attaching it for nothing.
+	if ev.Kind == fleet.KindResult || ev.Kind == fleet.KindFailed {
+		m.persist()
+	}
 
 	if m.fleetAwait != nil {
 		p := m.fleetAwait
