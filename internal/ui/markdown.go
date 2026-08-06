@@ -10,8 +10,11 @@ import (
 	"github.com/charmbracelet/glamour/styles"
 )
 
-// Building a glamour renderer is comparatively expensive, and rebuild() re-renders
-// every entry on each resize/tick. Cache one renderer per wrap width.
+// Building a glamour renderer is comparatively expensive, and rebuild() used to
+// re-render every entry on each resize/tick; it now memoizes across ticks (see
+// rendercache.go) and only re-renders an entry on a genuine change or a resize.
+// Cache one renderer per wrap width regardless, since a resize still invalidates
+// rebuild()'s own cache and hits this one per entry.
 var (
 	mdMu        sync.Mutex
 	mdRenderers = map[int]*glamour.TermRenderer{}

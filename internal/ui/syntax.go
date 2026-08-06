@@ -46,9 +46,10 @@ func langForFile(path string) string {
 }
 
 // highlightWith runs chroma's 256-color terminal formatter over code. Highlighting
-// happens once, at ingest time — rebuild() re-renders every entry on each tick
-// while a countdown is up, and re-lexing the transcript at that rate would burn
-// CPU for no visual gain.
+// happens once, at ingest time — rebuild() used to re-render every entry on each
+// tick while a countdown is up; it now memoizes across ticks (see
+// rendercache.go), but still re-lexes every entry on a resize, and re-lexing the
+// transcript at that rate would burn CPU for no visual gain.
 func highlightWith(lexer chroma.Lexer, code string) string {
 	if lexer == nil || strings.TrimSpace(code) == "" {
 		return code

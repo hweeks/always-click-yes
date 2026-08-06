@@ -14,10 +14,12 @@ import (
 
 // maxReplayEntries caps how much of a restored transcript is put on screen.
 //
-// This is not cosmetic. rebuild() re-renders every entry — markdown, syntax
-// highlighting, wrapping — on every message and every keystroke, so an uncapped
-// replay of a long session would make typing crawl. Claude still has the whole
-// conversation; only the view is trimmed, and the elided head says so.
+// This is not cosmetic. rebuild() now memoizes across ticks (see
+// rendercache.go), but the first render of a freshly restored transcript, and
+// any render after a resize, still walks every entry — markdown, syntax
+// highlighting, wrapping — so an uncapped replay of a long session would still
+// make that first render (and every resize after) crawl. Claude still has the
+// whole conversation; only the view is trimmed, and the elided head says so.
 const maxReplayEntries = 200
 
 // resumeMsg carries a restored session back into the event loop.
@@ -95,6 +97,7 @@ func (m *Model) applyResume(msg resumeMsg) tea.Cmd {
 
 	m.sessionID = msg.id
 	m.entries = nil
+	m.markDirty()
 	m.turnText = ""
 	m.planBody = ""
 	m.finishOutcome = ""
@@ -331,6 +334,7 @@ func (m *Model) capReplay() {
 		"… %d earlier entries elided from the view · Claude still has the full context", dropped)})},
 		m.entries[dropped:]...)
 	m.entries = kept
+	m.markDirty()
 }
 
 // parsePhase turns a persisted phase name back into a Phase. An unknown or empty

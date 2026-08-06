@@ -130,6 +130,8 @@ type Model struct {
 	// It counts appends, not entries: /clear empties the slice and deliberately
 	// leaves this alone, so an id is never handed out twice in one run.
 	seq int
+	// rc memoizes rebuild() across the 120ms tick — see rendercache.go.
+	rc renderCache
 
 	sessionID     string
 	model         string
@@ -399,7 +401,10 @@ func (m Model) Init() tea.Cmd {
 // raw defaults to the body with its ANSI removed. Most entries are plain text
 // already, so that is simply the body back; the ones that aren't (tool calls)
 // set raw and lang themselves at construction, where the language is still known.
-func (m *Model) appendEntry(e entry) { m.entries = append(m.entries, m.stamp(e)) }
+func (m *Model) appendEntry(e entry) {
+	m.entries = append(m.entries, m.stamp(e))
+	m.markDirty()
+}
 
 // stamp gives an entry its id, fills in raw if the caller did not, and renders
 // its HTML when a client asked for it. It is separate from appendEntry only
@@ -412,11 +417,14 @@ func (m *Model) appendEntry(e entry) { m.entries = append(m.entries, m.stamp(e))
 // recognise an entry across frames, never to order them.
 //
 // The HTML is rendered here, once, for the same reason the syntax highlighting
-// in body is: rebuild() re-renders the transcript on every 120ms tick, and a
-// projection built at read time would re-run goldmark and chroma over the whole
-// history at that rate. Entries never change after they are stamped, so once is
-// the right number of times. It is also why this is behind renderHTML — `acy
-// run` would pay that cost for markup no terminal can display.
+// in body is: rebuild() used to re-render the transcript on every 120ms tick,
+// and a projection built at read time would re-run goldmark and chroma over the
+// whole history at that rate. rebuild() now memoizes across ticks (see
+// rendercache.go), keyed on this very seq, but a resize still re-renders every
+// entry — so this stays a one-time cost either way. Entries never change after
+// they are stamped, so once is the right number of times. It is also why this
+// is behind renderHTML — `acy run` would pay that cost for markup no terminal
+// can display.
 func (m *Model) stamp(e entry) entry {
 	m.seq++
 	e.seq = m.seq
@@ -449,15 +457,6 @@ func (m *Model) transcript() string {
 var ansiRE = regexp.MustCompile("\x1b\\[[0-9;]*m")
 
 func stripAnsi(s string) string { return ansiRE.ReplaceAllString(s, "") }
-
-// rebuild re-renders the transcript at the current width and scrolls to bottom.
-func (m *Model) rebuild() {
-	if !m.ready {
-		return
-	}
-	m.vp.SetContent(renderEntries(m.entries, m.vp.Width(), m.maxLines))
-	m.vp.GotoBottom()
-}
 
 // ingest turns a decoded event into transcript entries and updates header state.
 func (m *Model) ingest(ev driver.Event) {
