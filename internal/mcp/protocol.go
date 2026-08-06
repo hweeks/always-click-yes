@@ -231,7 +231,7 @@ const DispatchNotArmed = "Dispatch is not available yet: this run has not been a
 const DispatchUnavailable = "(delegation is not available in this session, so this task was not run — " +
 	"say so plainly rather than reporting it as done)"
 
-const dispatchDescription = "Hand one task to a fresh engineer and block until they report back. " +
+const dispatchDescription = "Hand one task to a fresh worker session and block until they report back. " +
 	"They have the full toolset — editing, shell, tests — and they begin with no memory of this " +
 	"conversation: they cannot see the plan, the user's messages, or any earlier report, so the task " +
 	"has to stand on its own. They work, verify, return a structured report, and their session ends. " +

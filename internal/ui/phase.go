@@ -64,7 +64,7 @@ var ParentSystemPrompt = strings.Join([]string{
 	"codebase, and you cannot change it.",
 	"",
 	"Work happens by delegation. " + mcp.Qualified(mcp.ToolDispatch) + " hands one task to a fresh",
-	"engineer with the full toolset and blocks until they report back. They begin with no memory of",
+	"worker session with the full toolset and blocks until they report back. They begin with no memory of",
 	"this conversation, so a task has to stand alone: what to change, where, and how they will know",
 	"it worked. One task per call, scoped so that a report can honestly say \"completed\". Read each",
 	"report before you dispatch the next one.",
