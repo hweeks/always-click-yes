@@ -172,6 +172,8 @@ repo root to get every key name right on a fresh clone.
     "runBudgetUSD": 200,
     "deadmanHours": 24,
     "ticketCommit": "direct",
+    "verifyCommands": ["go build ./...", "go test -race ./...", "gofmt -l .", "golangci-lint run ./..."],
+    "verifyTimeoutSeconds": 900,
     "hosts": [
       { "name": "local" },
       {
@@ -210,6 +212,16 @@ repo root to get every key name right on a fresh clone.
 - **`ticketCommit`** (default `"direct"`, or `"none"`) — whether the ticket board
   (`.acy/tickets/*.md` in the repo) is committed and pushed as it changes, or left as
   local, uncommitted state.
+- **`verifyCommands`** (default `["go build ./...", "go test -race ./...", "gofmt -l .",
+  "golangci-lint run ./..."]`) — commands run in an engineer's worktree after it
+  finishes, as evidence collected by acy itself rather than the model's own claim of
+  having run tests. An explicit `[]` disables verification entirely. Each entry is
+  whitespace-split into argv directly — no shell is involved, so pipes, redirects,
+  globs, and quoted arguments don't work the way they would on a command line. A
+  command whose binary isn't found is recorded as `skipped` rather than failing the
+  run.
+- **`verifyTimeoutSeconds`** (default `900`, i.e. 15 minutes) — the wall-clock ceiling
+  for each command in `verifyCommands`. Must be greater than zero.
 - **`hosts`** — the machines engineers may run on. A host with no `ssh` runs engineers
   locally, as direct child processes of the architect's own host; anything with `ssh`
   reaches the target over the hard-wired `BatchMode` ssh described above.
