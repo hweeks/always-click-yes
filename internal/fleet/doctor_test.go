@@ -45,56 +45,89 @@ func (s *scriptedRunner) run(_ context.Context, name string, args ...string) (st
 func TestCheckSSH(t *testing.T) {
 	t.Run("local host is an automatic pass", func(t *testing.T) {
 		sr := newScriptedRunner(nil)
-		c := checkSSH(context.Background(), config.FleetHost{}, sr.run)
-		if !c.OK || c.Name != "ssh" {
-			t.Errorf("checkSSH = %+v", c)
+		p := checkSSH(context.Background(), config.FleetHost{}, sr.run, sr.run, sr.run)
+		if !p.check.OK || p.check.Name != "ssh" || !p.reachable {
+			t.Errorf("checkSSH = %+v", p)
 		}
 		if len(sr.calls) != 0 {
 			t.Errorf("local host should not run any command, got %v", sr.calls)
 		}
 	})
 
-	t.Run("remote host success", func(t *testing.T) {
+	t.Run("remote host success, no rc", func(t *testing.T) {
 		sr := newScriptedRunner(map[string]response{
 			"true": {},
 		})
-		c := checkSSH(context.Background(), config.FleetHost{SSH: "user@box1"}, sr.run)
-		if !c.OK {
-			t.Errorf("checkSSH = %+v, want OK", c)
+		p := checkSSH(context.Background(), config.FleetHost{SSH: "user@box1"}, sr.run, sr.run, sr.run)
+		if !p.check.OK || !p.reachable {
+			t.Errorf("checkSSH = %+v, want OK and reachable", p)
 		}
 	})
 
-	t.Run("remote host failure surfaces stderr", func(t *testing.T) {
+	t.Run("remote host unreachable surfaces stderr and is not reachable", func(t *testing.T) {
 		sr := newScriptedRunner(map[string]response{
 			"true": {stderr: "Permission denied (publickey).", err: errors.New("exit status 255")},
 		})
-		c := checkSSH(context.Background(), config.FleetHost{SSH: "user@box1"}, sr.run)
-		if c.OK {
-			t.Fatal("checkSSH should fail")
+		p := checkSSH(context.Background(), config.FleetHost{SSH: "user@box1"}, sr.run, sr.run, sr.run)
+		if p.check.OK || p.reachable {
+			t.Fatal("checkSSH should fail and be unreachable")
 		}
-		if !strings.Contains(c.Detail, "Permission denied") {
-			t.Errorf("Detail = %q, want it to surface stderr", c.Detail)
+		if !strings.Contains(p.check.Detail, "Permission denied") {
+			t.Errorf("Detail = %q, want it to surface stderr", p.check.Detail)
 		}
 	})
 
-	t.Run("remote host failure with no stderr falls back to the error", func(t *testing.T) {
+	t.Run("remote host unreachable with no stderr falls back to the error", func(t *testing.T) {
 		sr := newScriptedRunner(map[string]response{
 			"true": {err: errors.New("dial tcp: connection refused")},
 		})
-		c := checkSSH(context.Background(), config.FleetHost{SSH: "box1"}, sr.run)
-		if c.OK || !strings.Contains(c.Detail, "connection refused") {
-			t.Errorf("checkSSH = %+v", c)
+		p := checkSSH(context.Background(), config.FleetHost{SSH: "box1"}, sr.run, sr.run, sr.run)
+		if p.check.OK || p.reachable || !strings.Contains(p.check.Detail, "connection refused") {
+			t.Errorf("checkSSH = %+v", p)
+		}
+	})
+
+	t.Run("ssh reachable but the rc wrapper is broken is a distinct diagnosis, not unreachable", func(t *testing.T) {
+		bare := newScriptedRunner(map[string]response{"true": {}})
+		full := newScriptedRunner(map[string]response{
+			"true": {stderr: "bash: command not found", err: errors.New("exit status 127")},
+		})
+		pathOnly := newScriptedRunner(map[string]response{"marker": {stdout: "path-only"}})
+
+		h := config.FleetHost{SSH: "spark", Rc: "~/.bashrc"}
+		p := checkSSH(context.Background(), h, bare.run, pathOnly.run, full.run)
+		if p.check.OK {
+			t.Fatal("a broken rc wrapper should fail the ssh check")
+		}
+		if !p.reachable {
+			t.Fatal("ssh itself succeeded, so the host should still be reported reachable")
+		}
+		if !strings.Contains(p.check.Detail, "bash") || !strings.Contains(p.check.Detail, "~/.bashrc") {
+			t.Errorf("Detail = %q, want it to name the shell and the rc file", p.check.Detail)
+		}
+		stdout, _, err := p.rest(context.Background(), "marker")
+		if err != nil || stdout != "path-only" {
+			t.Errorf("rest runner should be pathOnly (PATH kept, rc dropped), got stdout=%q err=%v", stdout, err)
+		}
+	})
+
+	t.Run("ssh reachable, no rc configured, rest runner is full", func(t *testing.T) {
+		bare := newScriptedRunner(map[string]response{"true": {}})
+		full := newScriptedRunner(map[string]response{"marker": {stdout: "full"}})
+		p := checkSSH(context.Background(), config.FleetHost{SSH: "box1"}, bare.run, bare.run, full.run)
+		if !p.check.OK || !p.reachable {
+			t.Fatalf("checkSSH = %+v", p)
+		}
+		stdout, _, err := p.rest(context.Background(), "marker")
+		if err != nil || stdout != "full" {
+			t.Errorf("rest runner should be full when there's no rc to break, got stdout=%q err=%v", stdout, err)
 		}
 	})
 }
 
-// TestSSHRunnerSourcesRc proves sshRunner wraps every command — including
-// the ssh check's own bare "true" probe — in a `zsh -c 'source <rc>; ...'`
-// invocation when the host declares Rc, using a stub "ssh" that just records
-// the argv it was called with. This is what makes checkSSH double as a
-// verification that the rc file actually sources: a missing zsh or a
-// completely broken invocation fails this same "ssh" check with the shell's
-// own stderr, instead of surfacing later as a mystery in claude/gh.
+// TestSSHRunnerSourcesRc proves sshRunner wraps every command in a
+// `<shell> -c 'source <rc>; ...'` invocation when the host declares Rc,
+// using a stub "ssh" that just records the argv it was called with.
 func TestSSHRunnerSourcesRc(t *testing.T) {
 	dir := t.TempDir()
 	argvFile := filepath.Join(dir, "argv")
@@ -102,40 +135,75 @@ func TestSSHRunnerSourcesRc(t *testing.T) {
 	writeStub(t, dir, "ssh", script)
 	withStubSSH(t, dir)
 
-	run := sshRunner("box1", nil, "~/.zshrc")
+	run := sshRunner("box1", nil, "~/.zshrc", "")
 	if _, _, err := run(context.Background(), "true"); err != nil {
 		t.Fatalf("run: %v", err)
 	}
 
 	wantArgv := "-o BatchMode=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=4 box1 -- " +
-		rcWrap("~/.zshrc", quoteArgv([]string{"true"}))
+		rcWrap("~/.zshrc", "", quoteArgv([]string{"true"}))
 	if got := strings.TrimSpace(readFile(t, argvFile)); got != wantArgv {
 		t.Errorf("argv = %q, want %q", got, wantArgv)
 	}
 }
 
-// TestDoctorSSHCheckFailsWhenZshMissing proves the full Doctor() pipeline —
-// runnerForHost picking sshRunner, which threads Rc through sshDoctorArgs —
-// fails the "ssh" check, by name, with the remote shell's own stderr when
-// zsh itself can't run. That is what keeps a broken rc-sourcing wrap a named
-// failure at "ssh" rather than a mystery further down in claude/gh.
-func TestDoctorSSHCheckFailsWhenZshMissing(t *testing.T) {
+// TestDoctorFixesTheSparkScenario reproduces the exact live bug: host
+// "spark" is Ubuntu with bash only and no zsh, configured with rc:
+// "~/.bashrc". Before the fix, rcWrap hardcoded zsh regardless of the rc
+// file's own shell, so this host's "ssh" check — and every check after it —
+// died with "zsh: command not found". Deriving the shell from the rc file's
+// basename means this host now sources ~/.bashrc through bash, which the
+// stub "ssh" below treats as present, and the whole pipeline passes.
+func TestDoctorFixesTheSparkScenario(t *testing.T) {
 	dir := t.TempDir()
-	script := "#!/bin/sh\necho 'zsh: command not found' >&2\nexit 127\n"
+	script := "#!/bin/sh\n" +
+		"case \"$*\" in\n" +
+		"  *'zsh'*) echo 'zsh: command not found' >&2; exit 127 ;;\n" +
+		"  *) exit 0 ;;\n" +
+		"esac\n"
 	writeStub(t, dir, "ssh", script)
 	withStubSSH(t, dir)
 
-	h := config.FleetHost{SSH: "box1", RepoPath: "/srv/repo", Rc: "~/.zshrc"}
+	h := config.FleetHost{SSH: "spark", RepoPath: "/srv/repo", Rc: "~/.bashrc"}
 	checks := Doctor(context.Background(), h, "main")
-	if checks[0].Name != "ssh" || checks[0].OK {
-		t.Fatalf("ssh check = %+v, want a failure", checks[0])
+	if checks[0].Name != "ssh" || !checks[0].OK {
+		t.Fatalf("ssh check = %+v, want OK now that the rc wrapper uses bash, not zsh", checks[0])
 	}
-	if !strings.Contains(checks[0].Detail, "command not found") {
-		t.Errorf("Detail = %q, want it to surface the shell's own stderr", checks[0].Detail)
+}
+
+// TestDoctorDiagnosesBrokenRcWrapperInsteadOfUnreachableHost proves the full
+// Doctor() pipeline — runnerForHost's bare/pathOnly/full split, threaded
+// through checkSSH — reports a broken rc wrapper as its own diagnosis,
+// naming the shell and the rc file, instead of folding it into "ssh
+// unreachable" and skipping every other check. This is BUG 2 from a live
+// debugging session: a broken rc wrapper on an otherwise-healthy host used
+// to read as six red "unreachable" lines, costing a whole round trip to
+// diagnose.
+func TestDoctorDiagnosesBrokenRcWrapperInsteadOfUnreachableHost(t *testing.T) {
+	dir := t.TempDir()
+	script := "#!/bin/sh\n" +
+		"case \"$*\" in\n" +
+		"  *'fish -c'*) echo 'fish: command not found' >&2; exit 127 ;;\n" +
+		"  *) exit 0 ;;\n" +
+		"esac\n"
+	writeStub(t, dir, "ssh", script)
+	withStubSSH(t, dir)
+
+	h := config.FleetHost{SSH: "spark", RepoPath: "/srv/repo", Rc: "~/.bashrc", Shell: "fish"}
+	checks := Doctor(context.Background(), h, "main")
+
+	if checks[0].Name != "ssh" || checks[0].OK {
+		t.Fatalf("ssh check = %+v, want a broken-rc-wrapper failure", checks[0])
+	}
+	if !strings.Contains(checks[0].Detail, "fish") || !strings.Contains(checks[0].Detail, "~/.bashrc") {
+		t.Errorf("Detail = %q, want it to name the shell and the rc file", checks[0].Detail)
 	}
 	for _, c := range checks[1:] {
-		if c.OK {
-			t.Errorf("%s should be skipped after the ssh check fails, got %+v", c.Name, c)
+		if !c.OK {
+			t.Errorf("%s should still run (unwrapped by the broken rc) and pass, got %+v", c.Name, c)
+		}
+		if strings.Contains(c.Detail, "skipped") {
+			t.Errorf("%s should not be skipped when only the rc wrapper is broken, got %+v", c.Name, c)
 		}
 	}
 }
@@ -419,7 +487,7 @@ func TestDoctorWithShortCircuitsOnSSHFailure(t *testing.T) {
 	sr := newScriptedRunner(map[string]response{
 		"true": {stderr: "Could not resolve hostname", err: errors.New("exit status 255")},
 	})
-	checks := doctorWith(context.Background(), config.FleetHost{SSH: "nowhere"}, "main", sr.run)
+	checks := doctorWith(context.Background(), config.FleetHost{SSH: "nowhere"}, "main", sr.run, sr.run, sr.run)
 	if len(checks) != len(checkNames) {
 		t.Fatalf("got %d checks, want %d", len(checks), len(checkNames))
 	}
@@ -452,7 +520,7 @@ func TestDoctorWithRunsEveryCheckInOrder(t *testing.T) {
 		"sh -c " + stateProbeScript:                          {},
 	})
 	h := config.FleetHost{SSH: "box1", ACYBin: "acy", RepoPath: "/srv/repo"}
-	checks := doctorWith(context.Background(), h, "main", sr.run)
+	checks := doctorWith(context.Background(), h, "main", sr.run, sr.run, sr.run)
 	if len(checks) != len(checkNames) {
 		t.Fatalf("got %d checks, want %d", len(checks), len(checkNames))
 	}
@@ -466,6 +534,44 @@ func TestDoctorWithRunsEveryCheckInOrder(t *testing.T) {
 	}
 }
 
+// TestDoctorWithRunsRemainingChecksThroughPathOnlyWhenRcBroken proves
+// doctorWith routes acy/claude/gh/repo/state through the pathOnly runner —
+// not the broken full one, and not the bare one that would also drop a
+// working PATH extension — once checkSSH has diagnosed the rc wrapper
+// itself as the problem. full is scripted to answer nothing but the ssh
+// check's own "true" probe, so if doctorWith mistakenly kept using it for
+// the rest, every remaining check would fail on "unscripted command".
+func TestDoctorWithRunsRemainingChecksThroughPathOnlyWhenRcBroken(t *testing.T) {
+	local := version.String()
+	bare := newScriptedRunner(map[string]response{"true": {}})
+	full := newScriptedRunner(map[string]response{
+		"true": {stderr: "bash: command not found", err: errors.New("exit status 127")},
+	})
+	pathOnly := newScriptedRunner(map[string]response{
+		"acy --version":             {stdout: "always-click-yes " + local},
+		"acy engineer --help":       {},
+		"claude auth status --json": {stdout: `{"loggedIn":true}`},
+		"gh auth status":            {},
+		"git -C /srv/repo rev-parse --is-inside-work-tree":   {},
+		"git -C /srv/repo ls-remote --exit-code origin main": {},
+		"sh -c " + stateProbeScript:                          {},
+	})
+	h := config.FleetHost{SSH: "spark", ACYBin: "acy", RepoPath: "/srv/repo", Rc: "~/.bashrc"}
+	checks := doctorWith(context.Background(), h, "main", bare.run, pathOnly.run, full.run)
+
+	if len(checks) != len(checkNames) {
+		t.Fatalf("got %d checks, want %d", len(checks), len(checkNames))
+	}
+	if checks[0].OK {
+		t.Fatalf("ssh check = %+v, want the broken-rc failure", checks[0])
+	}
+	for _, c := range checks[1:] {
+		if !c.OK {
+			t.Errorf("%s should have run through the path-only runner and passed, got %+v", c.Name, c)
+		}
+	}
+}
+
 // TestDoctorSSHLive exercises the real ssh check against a live host, but
 // only when ACY_SSH_DOCTOR_HOST names one — it never runs, and never fails
 // CI, otherwise.
@@ -475,8 +581,9 @@ func TestDoctorSSHLive(t *testing.T) {
 		t.Skip("ACY_SSH_DOCTOR_HOST not set; set it to a real ssh target (matching a .acy.json host's ssh field) to run this live")
 	}
 	h := config.FleetHost{SSH: target}
-	c := checkSSH(context.Background(), h, runnerForHost(h))
-	if !c.OK {
-		t.Fatalf("live ssh check against %s failed: %s", target, c.Detail)
+	bare, pathOnly, full := runnerForHost(h)
+	p := checkSSH(context.Background(), h, bare, pathOnly, full)
+	if !p.check.OK {
+		t.Fatalf("live ssh check against %s failed: %s", target, p.check.Detail)
 	}
 }

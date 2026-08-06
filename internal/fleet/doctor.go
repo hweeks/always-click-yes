@@ -30,14 +30,23 @@ var checkNames = []string{"ssh", "acy", "claude", "gh", "repo", "state"}
 // lose that distinction.
 type Runner func(ctx context.Context, name string, args ...string) (stdout, stderr string, err error)
 
-// runnerForHost returns the Runner Doctor uses for h: direct exec for a
-// local host, or every command wrapped in the same BatchMode ssh preamble
-// the engineer transport uses.
-func runnerForHost(h config.FleetHost) Runner {
+// runnerForHost returns three Runners for h, direct exec for a local host or
+// every command wrapped in the same BatchMode ssh preamble the engineer
+// transport uses, at increasing levels of wrapping: bare applies neither
+// FleetHost.Path nor FleetHost.Rc — pure reachability — pathOnly applies
+// Path but never Rc, and full applies both. checkSSH probes bare first and
+// only escalates to full when bare succeeds, so a broken rc wrapper is
+// diagnosed as exactly that instead of masquerading as an unreachable host;
+// pathOnly is what the rest of the checks fall back to in that case, so a
+// working PATH extension still applies even though the broken rc doesn't.
+func runnerForHost(h config.FleetHost) (bare, pathOnly, full Runner) {
 	if h.SSH == "" {
-		return runLocal
+		return runLocal, runLocal, runLocal
 	}
-	return sshRunner(h.SSH, h.Path, h.Rc)
+	bare = sshRunner(h.SSH, nil, "", "")
+	pathOnly = sshRunner(h.SSH, h.Path, "", "")
+	full = sshRunner(h.SSH, h.Path, h.Rc, h.Shell)
+	return bare, pathOnly, full
 }
 
 func runLocal(ctx context.Context, name string, args ...string) (string, string, error) {
@@ -46,28 +55,32 @@ func runLocal(ctx context.Context, name string, args ...string) (string, string,
 
 // sshDoctorArgs composes the full ssh argv for running name+args on target,
 // extending PATH first when dirs (FleetHost.Path) is set and sourcing rc
-// first when rc (FleetHost.Rc) is set. ssh itself joins its trailing
+// first when rc (FleetHost.Rc) is set, through shell (FleetHost.Shell, or
+// rcWrap's own derivation when empty). ssh itself joins its trailing
 // arguments with a bare space before handing them to the remote shell, so a
 // multi-word argument like "command -v claude" would come apart into extra
 // positional parameters unless the whole thing is quoted and passed as one —
 // which is also what lets pathPreamble's `export PATH=...; exec ` and
-// rcWrap's `zsh -c 'source ...; ...'` sit in front of it as a single
+// rcWrap's `<shell> -c 'source ...; ...'` sit in front of it as a single
 // command. When rc is empty this is byte-identical to the composition
 // without an rc file configured.
-func sshDoctorArgs(target string, dirs []string, rc string, name string, args []string) []string {
+func sshDoctorArgs(target string, dirs []string, rc, shell string, name string, args []string) []string {
 	inner := pathPreamble(dirs) + quoteArgv(append([]string{name}, args...))
-	return append(sshBatchArgs(target), rcWrap(rc, inner))
+	return append(sshBatchArgs(target), rcWrap(rc, shell, inner))
 }
 
 // sshRunner wraps every command in target's BatchMode ssh preamble. When rc
-// is set, that wrap includes sourcing it first — which is what makes the
-// doctor "ssh" check's own bare `true` probe double as a check that rc
-// actually sources: if zsh is missing or the whole invocation is otherwise
-// broken, that check fails with the shell's own stderr instead of showing up
-// as a mystery downstream in the claude/gh checks.
-func sshRunner(target string, dirs []string, rc string) Runner {
+// is set, that wrap sources it first, through the shell shellFor picks from
+// rc and shell (FleetHost.Rc/FleetHost.Shell) — which is what makes the
+// doctor "ssh" check's own bare `true` probe, run again through this same
+// wrap once the unwrapped probe has already proven ssh itself reachable,
+// double as a check that rc actually sources: if that shell is missing or
+// the whole invocation is otherwise broken, checkSSH reports it as a broken
+// rc wrapper — naming the shell and the rc file — instead of showing up as a
+// mystery downstream in the claude/gh checks.
+func sshRunner(target string, dirs []string, rc, shell string) Runner {
 	return func(ctx context.Context, name string, args ...string) (string, string, error) {
-		argv := sshDoctorArgs(target, dirs, rc, name, args)
+		argv := sshDoctorArgs(target, dirs, rc, shell, name, args)
 		return runCaptured(exec.CommandContext(ctx, "ssh", argv...)) //nolint:gosec // target/argv are operator-configured, not user input
 	}
 }
@@ -99,25 +112,29 @@ func detailFrom(stderr string, err error) string {
 	return ""
 }
 
-// Doctor runs every check against h, in checkNames order. A failed "ssh"
-// check short-circuits the rest — there is nothing on an unreachable host
-// left to probe — and they come back OK=false with a Detail explaining they
-// were skipped, rather than silently missing from the result.
+// Doctor runs every check against h, in checkNames order. A genuinely
+// unreachable host short-circuits the rest — there is nothing left to probe
+// — and they come back OK=false with a Detail explaining they were skipped,
+// rather than silently missing from the result. A host that answers ssh but
+// whose rc wrapper is broken is a different diagnosis (see checkSSH): the
+// rest of the checks still run, just without the broken wrap.
 func Doctor(ctx context.Context, h config.FleetHost, base string) []Check {
-	return doctorWith(ctx, h, base, runnerForHost(h))
+	bare, pathOnly, full := runnerForHost(h)
+	return doctorWith(ctx, h, base, bare, pathOnly, full)
 }
 
-func doctorWith(ctx context.Context, h config.FleetHost, base string, run Runner) []Check {
-	ssh := checkSSH(ctx, h, run)
-	if !ssh.OK {
-		checks := []Check{ssh}
+func doctorWith(ctx context.Context, h config.FleetHost, base string, bare, pathOnly, full Runner) []Check {
+	probe := checkSSH(ctx, h, bare, pathOnly, full)
+	if !probe.reachable {
+		checks := []Check{probe.check}
 		for _, name := range checkNames[1:] {
 			checks = append(checks, Check{Name: name, OK: false, Detail: "skipped: ssh check failed"})
 		}
 		return checks
 	}
+	run := probe.rest
 	return []Check{
-		ssh,
+		probe.check,
 		checkACY(ctx, h, run),
 		checkClaude(ctx, h, run),
 		checkGH(ctx, h, run),
@@ -126,17 +143,48 @@ func doctorWith(ctx context.Context, h config.FleetHost, base string, run Runner
 	}
 }
 
+// sshProbe is checkSSH's outcome: the Check to report, whether ssh itself is
+// reachable — which is what decides whether doctorWith short-circuits the
+// rest of the checks — and which Runner the rest of the checks should use.
+type sshProbe struct {
+	check     Check
+	reachable bool
+	rest      Runner
+}
+
 // checkSSH is the only check that means anything different for a local
-// host: there is no connection to make, so it is an automatic pass.
-func checkSSH(ctx context.Context, h config.FleetHost, run Runner) Check {
+// host: there is no connection to make, so it is an automatic pass. For a
+// remote host it probes in two stages: bare first — pure ssh reachability,
+// no Path, no Rc — and, only if that succeeds and h.Rc is set, again
+// through the full Path+Rc wrap this host declares. A bare success with a
+// wrapped failure means ssh itself is fine and the rc wrapper is what's
+// broken (wrong shell, or a shell the host doesn't have) — that used to
+// fold into "ssh unreachable" and short-circuit every other check with a
+// misleading "skipped: ssh check failed", when in fact ssh, claude, gh and
+// everything else downstream could still be probed just fine. So this
+// reports it as its own failure, naming the shell and the rc file, and
+// leaves reachable true — the rest of the checks then run through pathOnly
+// instead of full, keeping the PATH extension while dropping only the
+// broken rc source.
+func checkSSH(ctx context.Context, h config.FleetHost, bare, pathOnly, full Runner) sshProbe {
 	if h.SSH == "" {
-		return Check{Name: "ssh", OK: true, Detail: "local host"}
+		return sshProbe{check: Check{Name: "ssh", OK: true, Detail: "local host"}, reachable: true, rest: full}
 	}
-	_, stderr, err := run(ctx, "true")
-	if err != nil {
-		return Check{Name: "ssh", OK: false, Detail: detailFrom(stderr, err)}
+	if _, stderr, err := bare(ctx, "true"); err != nil {
+		return sshProbe{check: Check{Name: "ssh", OK: false, Detail: detailFrom(stderr, err)}, rest: full}
 	}
-	return Check{Name: "ssh", OK: true}
+	if h.Rc == "" {
+		return sshProbe{check: Check{Name: "ssh", OK: true}, reachable: true, rest: full}
+	}
+	if _, stderr, err := full(ctx, "true"); err != nil {
+		shell := shellFor(h.Rc, h.Shell)
+		detail := fmt.Sprintf(
+			"ssh reachable, but the rc wrapper failed: sourcing %s via %s errored (%s) — the host may not have %s installed",
+			h.Rc, shell, detailFrom(stderr, err), shell,
+		)
+		return sshProbe{check: Check{Name: "ssh", OK: false, Detail: detail}, reachable: true, rest: pathOnly}
+	}
+	return sshProbe{check: Check{Name: "ssh", OK: true}, reachable: true, rest: full}
 }
 
 // parseACYVersion extracts the version from `acy --version`'s output, per

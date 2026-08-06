@@ -70,6 +70,9 @@ func TestLoadFileFleetDefaults(t *testing.T) {
 	if h.ACYBin != "acy" {
 		t.Errorf("ACYBin = %q, want acy", h.ACYBin)
 	}
+	if h.Shell != "" {
+		t.Errorf("Shell = %q, want empty — a host with no shell configured leaves derivation to rcWrap", h.Shell)
+	}
 }
 
 // Every field, explicitly set, round-trips with no defaulting applied.
@@ -88,7 +91,7 @@ func TestLoadFileFleetExplicitValues(t *testing.T) {
 			"ticketCommit": "none",
 			"hosts": [
 				{"name": "local", "maxEngineers": 3},
-				{"name": "box1", "ssh": "user@box1", "repoPath": "/srv/repo", "maxEngineers": 2, "acyBin": "/opt/acy", "path": ["/opt/homebrew/bin", "/home/box1/.local/bin"], "rc": "~/.zshrc"}
+				{"name": "box1", "ssh": "user@box1", "repoPath": "/srv/repo", "maxEngineers": 2, "acyBin": "/opt/acy", "path": ["/opt/homebrew/bin", "/home/box1/.local/bin"], "rc": "~/.bashrc", "shell": "bash"}
 			]
 		}
 	}`)
@@ -132,11 +135,17 @@ func TestLoadFileFleetExplicitValues(t *testing.T) {
 	if box1.SSH != "user@box1" || box1.RepoPath != "/srv/repo" || *box1.MaxEngineers != 2 || box1.ACYBin != "/opt/acy" {
 		t.Errorf("box1 host: %+v", box1)
 	}
-	if box1.Rc != "~/.zshrc" {
-		t.Errorf("box1.Rc = %q, want ~/.zshrc", box1.Rc)
+	if box1.Rc != "~/.bashrc" {
+		t.Errorf("box1.Rc = %q, want ~/.bashrc", box1.Rc)
+	}
+	if box1.Shell != "bash" {
+		t.Errorf("box1.Shell = %q, want bash", box1.Shell)
 	}
 	if local.Rc != "" {
 		t.Errorf("local.Rc = %q, want empty (not set)", local.Rc)
+	}
+	if local.Shell != "" {
+		t.Errorf("local.Shell = %q, want empty (not set)", local.Shell)
 	}
 	wantPath := []string{"/opt/homebrew/bin", "/home/box1/.local/bin"}
 	if !reflect.DeepEqual(box1.Path, wantPath) {
