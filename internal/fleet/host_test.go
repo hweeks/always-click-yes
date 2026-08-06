@@ -116,3 +116,18 @@ func TestForHostSSHCarriesPath(t *testing.T) {
 		t.Errorf("path = %v, want [/opt/homebrew/bin]", st.path)
 	}
 }
+
+// FleetHost.Rc must reach the sshTransport unchanged, same as Path above —
+// that's what makes it available to sshArgs when Start/Attach build the
+// remote command.
+func TestForHostSSHCarriesRc(t *testing.T) {
+	h := config.FleetHost{Name: "box1", SSH: "user@box1", RepoPath: "/srv/repo", Rc: "~/.zshrc"}
+	tr := ForHost(h)
+	st, ok := tr.(*sshTransport)
+	if !ok {
+		t.Fatalf("ForHost(%+v) = %T, want *sshTransport", h, tr)
+	}
+	if st.rc != "~/.zshrc" {
+		t.Errorf("rc = %q, want ~/.zshrc", st.rc)
+	}
+}

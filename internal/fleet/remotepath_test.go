@@ -54,3 +54,41 @@ func TestQuoteArgv(t *testing.T) {
 		})
 	}
 }
+
+func TestRcWrap(t *testing.T) {
+	cases := []struct {
+		name  string
+		rc    string
+		inner string
+		want  string
+	}{
+		{"empty rc leaves inner unchanged", "", "true", "true"},
+		{
+			"empty rc leaves an already-quoted composition unchanged (regression: byte-identical to no rc configured)",
+			"", "export PATH='/opt/homebrew/bin':$PATH; exec 'acy' 'engineer' 'start'",
+			"export PATH='/opt/homebrew/bin':$PATH; exec 'acy' 'engineer' 'start'",
+		},
+		{
+			"rc set, tilde path — unquoted so the remote shell expands it",
+			"~/.zshrc", "true",
+			"zsh -c 'source ~/.zshrc >/dev/null 2>&1; true'",
+		},
+		{
+			"rc set, absolute path",
+			"/etc/profile", "true",
+			"zsh -c 'source /etc/profile >/dev/null 2>&1; true'",
+		},
+		{
+			"rc set, inner already single-quoted — the quotes get escaped for the outer wrap",
+			"~/.zshrc", "'acy'",
+			`zsh -c 'source ~/.zshrc >/dev/null 2>&1; '\''acy'\'''`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := rcWrap(tc.rc, tc.inner); got != tc.want {
+				t.Errorf("rcWrap(%q, %q) = %q, want %q", tc.rc, tc.inner, got, tc.want)
+			}
+		})
+	}
+}

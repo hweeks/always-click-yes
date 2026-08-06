@@ -37,7 +37,7 @@ func runnerForHost(h config.FleetHost) Runner {
 	if h.SSH == "" {
 		return runLocal
 	}
-	return sshRunner(h.SSH, h.Path)
+	return sshRunner(h.SSH, h.Path, h.Rc)
 }
 
 func runLocal(ctx context.Context, name string, args ...string) (string, string, error) {
@@ -45,21 +45,29 @@ func runLocal(ctx context.Context, name string, args ...string) (string, string,
 }
 
 // sshDoctorArgs composes the full ssh argv for running name+args on target,
-// extending PATH first when dirs (FleetHost.Path) is set. ssh itself joins
-// its trailing arguments with a bare space before handing them to the
-// remote shell, so a multi-word argument like "command -v claude" would
-// come apart into extra positional parameters unless the whole thing is
-// quoted and passed as one — which is also what lets pathPreamble's
-// `export PATH=...; exec ` sit in front of it as a single command.
-func sshDoctorArgs(target string, dirs []string, name string, args []string) []string {
-	cmd := pathPreamble(dirs) + quoteArgv(append([]string{name}, args...))
-	return append(sshBatchArgs(target), cmd)
+// extending PATH first when dirs (FleetHost.Path) is set and sourcing rc
+// first when rc (FleetHost.Rc) is set. ssh itself joins its trailing
+// arguments with a bare space before handing them to the remote shell, so a
+// multi-word argument like "command -v claude" would come apart into extra
+// positional parameters unless the whole thing is quoted and passed as one —
+// which is also what lets pathPreamble's `export PATH=...; exec ` and
+// rcWrap's `zsh -c 'source ...; ...'` sit in front of it as a single
+// command. When rc is empty this is byte-identical to the composition
+// without an rc file configured.
+func sshDoctorArgs(target string, dirs []string, rc string, name string, args []string) []string {
+	inner := pathPreamble(dirs) + quoteArgv(append([]string{name}, args...))
+	return append(sshBatchArgs(target), rcWrap(rc, inner))
 }
 
-// sshRunner wraps every command in target's BatchMode ssh preamble.
-func sshRunner(target string, dirs []string) Runner {
+// sshRunner wraps every command in target's BatchMode ssh preamble. When rc
+// is set, that wrap includes sourcing it first — which is what makes the
+// doctor "ssh" check's own bare `true` probe double as a check that rc
+// actually sources: if zsh is missing or the whole invocation is otherwise
+// broken, that check fails with the shell's own stderr instead of showing up
+// as a mystery downstream in the claude/gh checks.
+func sshRunner(target string, dirs []string, rc string) Runner {
 	return func(ctx context.Context, name string, args ...string) (string, string, error) {
-		argv := sshDoctorArgs(target, dirs, name, args)
+		argv := sshDoctorArgs(target, dirs, rc, name, args)
 		return runCaptured(exec.CommandContext(ctx, "ssh", argv...)) //nolint:gosec // target/argv are operator-configured, not user input
 	}
 }

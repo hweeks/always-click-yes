@@ -41,3 +41,27 @@ func quoteArgv(argv []string) string {
 	}
 	return strings.Join(parts, " ")
 }
+
+// rcWrap wraps inner — the composition pathPreamble/quoteArgv already build
+// — in `zsh -c 'source <rc> >/dev/null 2>&1; <inner>'`, so a host's rc file
+// (FleetHost.Rc) runs before inner does, or returns inner unchanged when rc
+// is empty. This is what makes real hosts work where a fleet `path` entry
+// alone is not enough: claude and gh can depend on auth/env wiring only the
+// login shell's rc sets up.
+//
+// rc itself is spliced in unquoted, on purpose: it is validated to start
+// with "~/" or "/" (config.FleetHost.Rc), and unlike a fleet `path` entry —
+// which is spliced straight into the remote command with no shell of its
+// own standing between it and ssh — this string is only ever the argument
+// of a `source` call the remote zsh itself interprets, so a leading "~" is
+// exactly the case that needs the remote shell to expand it, quoting it
+// away would defeat the entire point. inner, by contrast, may already
+// contain single quotes from quoteArgv, which is why the whole `source ...;
+// inner` line is shellQuote'd as one string rather than being spliced in
+// raw.
+func rcWrap(rc, inner string) string {
+	if rc == "" {
+		return inner
+	}
+	return "zsh -c " + shellQuote("source "+rc+" >/dev/null 2>&1; "+inner)
+}

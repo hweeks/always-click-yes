@@ -88,7 +88,7 @@ func TestLoadFileFleetExplicitValues(t *testing.T) {
 			"ticketCommit": "none",
 			"hosts": [
 				{"name": "local", "maxEngineers": 3},
-				{"name": "box1", "ssh": "user@box1", "repoPath": "/srv/repo", "maxEngineers": 2, "acyBin": "/opt/acy", "path": ["/opt/homebrew/bin", "/home/box1/.local/bin"]}
+				{"name": "box1", "ssh": "user@box1", "repoPath": "/srv/repo", "maxEngineers": 2, "acyBin": "/opt/acy", "path": ["/opt/homebrew/bin", "/home/box1/.local/bin"], "rc": "~/.zshrc"}
 			]
 		}
 	}`)
@@ -132,6 +132,12 @@ func TestLoadFileFleetExplicitValues(t *testing.T) {
 	if box1.SSH != "user@box1" || box1.RepoPath != "/srv/repo" || *box1.MaxEngineers != 2 || box1.ACYBin != "/opt/acy" {
 		t.Errorf("box1 host: %+v", box1)
 	}
+	if box1.Rc != "~/.zshrc" {
+		t.Errorf("box1.Rc = %q, want ~/.zshrc", box1.Rc)
+	}
+	if local.Rc != "" {
+		t.Errorf("local.Rc = %q, want empty (not set)", local.Rc)
+	}
 	wantPath := []string{"/opt/homebrew/bin", "/home/box1/.local/bin"}
 	if !reflect.DeepEqual(box1.Path, wantPath) {
 		t.Errorf("box1.Path = %v, want %v", box1.Path, wantPath)
@@ -143,20 +149,22 @@ func TestLoadFileFleetExplicitValues(t *testing.T) {
 
 func TestLoadFileFleetRejectsBadInput(t *testing.T) {
 	cases := map[string]string{
-		"duplicate host names":     `{"fleet": {"hosts": [{"name": "a"}, {"name": "a"}]}}`,
-		"maxEngineers zero":        `{"fleet": {"hosts": [{"name": "a", "maxEngineers": 0}]}}`,
-		"maxEngineers negative":    `{"fleet": {"hosts": [{"name": "a", "maxEngineers": -1}]}}`,
-		"ssh without repoPath":     `{"fleet": {"hosts": [{"name": "a", "ssh": "user@host"}]}}`,
-		"host missing a name":      `{"fleet": {"hosts": [{"ssh": "user@host", "repoPath": "/x"}]}}`,
-		"bad ticketCommit":         `{"fleet": {"ticketCommit": "sideways"}}`,
-		"negative prCap":           `{"fleet": {"prCap": -1}}`,
-		"negative deadman":         `{"fleet": {"deadmanHours": -1}}`,
-		"negative engineer budget": `{"fleet": {"engineerBudgetUSD": -1}}`,
-		"negative run budget":      `{"fleet": {"runBudgetUSD": -1}}`,
-		"unknown key in fleet":     `{"fleet": {"bogusKey": "main"}}`,
-		"unknown key in host":      `{"fleet": {"hosts": [{"name": "a", "bogusKey": 2}]}}`,
-		"relative path entry":      `{"fleet": {"hosts": [{"name": "a", "path": ["bin"]}]}}`,
-		"tilde path entry":         `{"fleet": {"hosts": [{"name": "a", "path": ["~/bin"]}]}}`,
+		"duplicate host names":         `{"fleet": {"hosts": [{"name": "a"}, {"name": "a"}]}}`,
+		"maxEngineers zero":            `{"fleet": {"hosts": [{"name": "a", "maxEngineers": 0}]}}`,
+		"maxEngineers negative":        `{"fleet": {"hosts": [{"name": "a", "maxEngineers": -1}]}}`,
+		"ssh without repoPath":         `{"fleet": {"hosts": [{"name": "a", "ssh": "user@host"}]}}`,
+		"host missing a name":          `{"fleet": {"hosts": [{"ssh": "user@host", "repoPath": "/x"}]}}`,
+		"bad ticketCommit":             `{"fleet": {"ticketCommit": "sideways"}}`,
+		"negative prCap":               `{"fleet": {"prCap": -1}}`,
+		"negative deadman":             `{"fleet": {"deadmanHours": -1}}`,
+		"negative engineer budget":     `{"fleet": {"engineerBudgetUSD": -1}}`,
+		"negative run budget":          `{"fleet": {"runBudgetUSD": -1}}`,
+		"unknown key in fleet":         `{"fleet": {"bogusKey": "main"}}`,
+		"unknown key in host":          `{"fleet": {"hosts": [{"name": "a", "bogusKey": 2}]}}`,
+		"relative path entry":          `{"fleet": {"hosts": [{"name": "a", "path": ["bin"]}]}}`,
+		"tilde path entry":             `{"fleet": {"hosts": [{"name": "a", "path": ["~/bin"]}]}}`,
+		"rc missing a leading ~/ or /": `{"fleet": {"hosts": [{"name": "a", "rc": ".zshrc"}]}}`,
+		"rc as a bare word":            `{"fleet": {"hosts": [{"name": "a", "rc": "zshrc"}]}}`,
 	}
 	for name, content := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -227,5 +235,28 @@ func TestLoadFileFleetPathAcceptsAbsoluteEntries(t *testing.T) {
 	want := []string{"/opt/homebrew/bin", "/home/you/.local/bin"}
 	if !reflect.DeepEqual(f.Fleet.Hosts[0].Path, want) {
 		t.Errorf("Path = %v, want %v", f.Fleet.Hosts[0].Path, want)
+	}
+}
+
+// Unlike a fleet `path` entry, a "~"-prefixed rc is accepted: it is only
+// ever handed to the remote shell as the argument of a `source` call, which
+// is the one place a leading "~" is exactly what's wanted.
+func TestLoadFileFleetRcAcceptsTildeAndAbsolutePaths(t *testing.T) {
+	cases := map[string]string{
+		"tilde":    "~/.zshrc",
+		"absolute": "/etc/profile",
+	}
+	for name, rc := range cases {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeFile(t, dir, `{"fleet": {"hosts": [{"name": "box1", "rc": "`+rc+`"}]}}`)
+			f, _, err := LoadFile(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if f.Fleet.Hosts[0].Rc != rc {
+				t.Errorf("Rc = %q, want %q", f.Fleet.Hosts[0].Rc, rc)
+			}
+		})
 	}
 }

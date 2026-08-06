@@ -121,9 +121,52 @@ func TestSSHArgs(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := sshArgs(tc.target, tc.acyBin, tc.engineerArgs, tc.dirs)
+			got := sshArgs(tc.target, tc.acyBin, tc.engineerArgs, tc.dirs, "")
 			if !reflect.DeepEqual(got, tc.want) {
 				t.Errorf("sshArgs = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestSSHArgsWithRc proves rc wraps the same composition sshArgs builds
+// today (PATH preamble included, if any) in a `zsh -c 'source ...; ...'`
+// invocation, rather than replacing it.
+func TestSSHArgsWithRc(t *testing.T) {
+	cases := []struct {
+		name         string
+		acyBin       string
+		engineerArgs []string
+		dirs         []string
+		rc           string
+	}{
+		{
+			name:         "rc only, no path",
+			acyBin:       "/opt/acy",
+			engineerArgs: []string{"engineer", "start", "--clone", "/srv/repo"},
+			rc:           "~/.zshrc",
+		},
+		{
+			name:         "rc and path both set",
+			acyBin:       "acy",
+			engineerArgs: attachArgs("e1", 7),
+			dirs:         []string{"/opt/homebrew/bin", "/home/box2/.local/bin"},
+			rc:           "~/.zshrc",
+		},
+		{
+			name:         "rc as an absolute path",
+			acyBin:       "acy",
+			engineerArgs: []string{"engineer", "start", "--clone", "/srv/repo"},
+			rc:           "/etc/profile",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := sshArgs("user@box1", tc.acyBin, tc.engineerArgs, tc.dirs, tc.rc)
+			want := append(sshBatchArgs("user@box1"),
+				rcWrap(tc.rc, pathPreamble(tc.dirs)+quoteArgv(append([]string{tc.acyBin}, tc.engineerArgs...))))
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("sshArgs = %v, want %v", got, want)
 			}
 		})
 	}
@@ -133,6 +176,7 @@ func TestSSHDoctorArgs(t *testing.T) {
 	cases := []struct {
 		name string
 		dirs []string
+		rc   string
 		cmd  string
 		args []string
 		want []string
@@ -178,10 +222,39 @@ func TestSSHDoctorArgs(t *testing.T) {
 				"export PATH='/opt/homebrew/bin':'/home/box1/.local/bin':$PATH; exec 'gh' 'auth' 'status'",
 			},
 		},
+		{
+			name: "rc set, no path — sourced ahead of the quoted command",
+			rc:   "~/.zshrc",
+			cmd:  "claude",
+			args: []string{"auth", "status", "--json"},
+			want: []string{
+				"-o", "BatchMode=yes",
+				"-o", "ServerAliveInterval=15",
+				"-o", "ServerAliveCountMax=4",
+				"box1",
+				"--",
+				rcWrap("~/.zshrc", quoteArgv([]string{"claude", "auth", "status", "--json"})),
+			},
+		},
+		{
+			name: "rc and path both set — path preamble sits inside the rc wrap",
+			dirs: []string{"/opt/homebrew/bin"},
+			rc:   "~/.zshrc",
+			cmd:  "gh",
+			args: []string{"auth", "status"},
+			want: []string{
+				"-o", "BatchMode=yes",
+				"-o", "ServerAliveInterval=15",
+				"-o", "ServerAliveCountMax=4",
+				"box1",
+				"--",
+				rcWrap("~/.zshrc", pathPreamble([]string{"/opt/homebrew/bin"})+quoteArgv([]string{"gh", "auth", "status"})),
+			},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := sshDoctorArgs("box1", tc.dirs, tc.cmd, tc.args)
+			got := sshDoctorArgs("box1", tc.dirs, tc.rc, tc.cmd, tc.args)
 			if !reflect.DeepEqual(got, tc.want) {
 				t.Errorf("sshDoctorArgs = %v, want %v", got, tc.want)
 			}

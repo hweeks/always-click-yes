@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -85,6 +86,58 @@ func TestCheckSSH(t *testing.T) {
 			t.Errorf("checkSSH = %+v", c)
 		}
 	})
+}
+
+// TestSSHRunnerSourcesRc proves sshRunner wraps every command — including
+// the ssh check's own bare "true" probe — in a `zsh -c 'source <rc>; ...'`
+// invocation when the host declares Rc, using a stub "ssh" that just records
+// the argv it was called with. This is what makes checkSSH double as a
+// verification that the rc file actually sources: a missing zsh or a
+// completely broken invocation fails this same "ssh" check with the shell's
+// own stderr, instead of surfacing later as a mystery in claude/gh.
+func TestSSHRunnerSourcesRc(t *testing.T) {
+	dir := t.TempDir()
+	argvFile := filepath.Join(dir, "argv")
+	script := "#!/bin/sh\nprintf '%s' \"$*\" > " + shq(argvFile) + "\n"
+	writeStub(t, dir, "ssh", script)
+	withStubSSH(t, dir)
+
+	run := sshRunner("box1", nil, "~/.zshrc")
+	if _, _, err := run(context.Background(), "true"); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	wantArgv := "-o BatchMode=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=4 box1 -- " +
+		rcWrap("~/.zshrc", quoteArgv([]string{"true"}))
+	if got := strings.TrimSpace(readFile(t, argvFile)); got != wantArgv {
+		t.Errorf("argv = %q, want %q", got, wantArgv)
+	}
+}
+
+// TestDoctorSSHCheckFailsWhenZshMissing proves the full Doctor() pipeline —
+// runnerForHost picking sshRunner, which threads Rc through sshDoctorArgs —
+// fails the "ssh" check, by name, with the remote shell's own stderr when
+// zsh itself can't run. That is what keeps a broken rc-sourcing wrap a named
+// failure at "ssh" rather than a mystery further down in claude/gh.
+func TestDoctorSSHCheckFailsWhenZshMissing(t *testing.T) {
+	dir := t.TempDir()
+	script := "#!/bin/sh\necho 'zsh: command not found' >&2\nexit 127\n"
+	writeStub(t, dir, "ssh", script)
+	withStubSSH(t, dir)
+
+	h := config.FleetHost{SSH: "box1", RepoPath: "/srv/repo", Rc: "~/.zshrc"}
+	checks := Doctor(context.Background(), h, "main")
+	if checks[0].Name != "ssh" || checks[0].OK {
+		t.Fatalf("ssh check = %+v, want a failure", checks[0])
+	}
+	if !strings.Contains(checks[0].Detail, "command not found") {
+		t.Errorf("Detail = %q, want it to surface the shell's own stderr", checks[0].Detail)
+	}
+	for _, c := range checks[1:] {
+		if c.OK {
+			t.Errorf("%s should be skipped after the ssh check fails, got %+v", c.Name, c)
+		}
+	}
 }
 
 func TestCheckACY(t *testing.T) {

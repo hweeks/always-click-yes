@@ -33,7 +33,7 @@ func TestSSHTransportStartRoundTrip(t *testing.T) {
 	writeStub(t, dir, "ssh", script)
 	withStubSSH(t, dir)
 
-	tr := NewSSHTransport("user@box1", "/opt/acy", "/srv/repo", nil)
+	tr := NewSSHTransport("user@box1", "/opt/acy", "/srv/repo", nil, "")
 	spec := engineerwire.Spec{Ticket: "T-2", Title: "remote task"}
 	ack, err := tr.Start(context.Background(), spec)
 	if err != nil {
@@ -66,7 +66,7 @@ func TestSSHTransportStartExtendsPATH(t *testing.T) {
 	writeStub(t, dir, "ssh", script)
 	withStubSSH(t, dir)
 
-	tr := NewSSHTransport("user@box1", "/opt/acy", "/srv/repo", []string{"/opt/homebrew/bin", "/home/box1/.local/bin"})
+	tr := NewSSHTransport("user@box1", "/opt/acy", "/srv/repo", []string{"/opt/homebrew/bin", "/home/box1/.local/bin"}, "")
 	spec := engineerwire.Spec{Ticket: "T-3", Title: "remote task"}
 	if _, err := tr.Start(context.Background(), spec); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -74,6 +74,33 @@ func TestSSHTransportStartExtendsPATH(t *testing.T) {
 
 	wantArgv := "-o BatchMode=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=4 user@box1 -- " +
 		"export PATH='/opt/homebrew/bin':'/home/box1/.local/bin':$PATH; exec '/opt/acy' 'engineer' 'start' '--clone' '/srv/repo'"
+	if got := strings.TrimSpace(readFile(t, argvFile)); got != wantArgv {
+		t.Errorf("argv = %q, want %q", got, wantArgv)
+	}
+}
+
+// TestSSHTransportStartWithRc proves a host with Rc set runs the remote
+// engineer argv sourced from that rc file, inside a `zsh -c` wrapper, and
+// that this composes with a Path preamble rather than replacing it.
+func TestSSHTransportStartWithRc(t *testing.T) {
+	dir := t.TempDir()
+	argvFile := filepath.Join(dir, "argv")
+
+	script := "#!/bin/sh\n" +
+		"printf '%s' \"$*\" > " + shq(argvFile) + "\n" +
+		"cat > /dev/null\n" +
+		"echo '{\"engineer_id\":\"e4\",\"dir\":\"/home/box/e4\",\"pid\":888}'\n"
+	writeStub(t, dir, "ssh", script)
+	withStubSSH(t, dir)
+
+	tr := NewSSHTransport("user@box1", "/opt/acy", "/srv/repo", []string{"/opt/homebrew/bin"}, "~/.zshrc")
+	spec := engineerwire.Spec{Ticket: "T-4", Title: "remote task"}
+	if _, err := tr.Start(context.Background(), spec); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	wantArgv := "-o BatchMode=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=4 user@box1 -- " +
+		rcWrap("~/.zshrc", pathPreamble([]string{"/opt/homebrew/bin"})+quoteArgv([]string{"/opt/acy", "engineer", "start", "--clone", "/srv/repo"}))
 	if got := strings.TrimSpace(readFile(t, argvFile)); got != wantArgv {
 		t.Errorf("argv = %q, want %q", got, wantArgv)
 	}
@@ -100,7 +127,7 @@ func TestSSHTransportAttachRoundTrip(t *testing.T) {
 	writeStub(t, dir, "ssh", script)
 	withStubSSH(t, dir)
 
-	tr := NewSSHTransport("box2", "", "/srv/repo", nil)
+	tr := NewSSHTransport("box2", "", "/srv/repo", nil, "")
 	var got []any
 	err = tr.Attach(context.Background(), "e9", 5, strings.NewReader(""), func(msg any) {
 		got = append(got, msg)

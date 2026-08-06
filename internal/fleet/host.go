@@ -19,7 +19,7 @@ func ForHost(h config.FleetHost) Transport {
 		if acyBin == "" {
 			acyBin = "acy"
 		}
-		return &sshTransport{target: h.SSH, acyBin: acyBin, clonePath: h.RepoPath, path: h.Path}
+		return &sshTransport{target: h.SSH, acyBin: acyBin, clonePath: h.RepoPath, path: h.Path, rc: h.Rc}
 	}
 
 	if acyBin == "" {

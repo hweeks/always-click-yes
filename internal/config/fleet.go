@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"path/filepath"
+	"strings"
 )
 
 // FleetHost describes one machine an engineer can be launched on: the local
@@ -23,6 +24,16 @@ type FleetHost struct {
 	// command, so a "~" entry would never expand there, and a relative one
 	// would resolve against whatever directory ssh happens to land in.
 	Path []string `json:"path,omitempty"`
+	// Rc is a shell rc file to source before every remote command on this
+	// host, e.g. "~/.zshrc". On real hosts a fleet `path` extension is often
+	// not enough on its own: claude and gh can depend on auth/env wiring only
+	// the login shell's rc sets up, not just PATH. Non-empty must start with
+	// "~/" or "/" — and unlike Path and RepoPath above, a leading "~" is
+	// exactly the point here rather than a mistake: this string is never
+	// spliced directly into a command, only ever handed to the remote zsh as
+	// the argument of a `source` call (internal/fleet/remotepath.go's
+	// rcWrap), so it is the remote shell that expands the tilde, not us.
+	Rc string `json:"rc,omitempty"`
 }
 
 // FleetConfig is the optional "fleet" object in .acy.json: shared defaults
@@ -122,6 +133,10 @@ func (f *FleetConfig) resolve(dir, path string) error {
 			if !filepath.IsAbs(p) {
 				return fmt.Errorf("%s: fleet.hosts[%q].path[%d] must be an absolute path, got %q (a \"~\" entry won't expand where this runs)", path, h.Name, j, p)
 			}
+		}
+
+		if h.Rc != "" && !strings.HasPrefix(h.Rc, "~/") && !strings.HasPrefix(h.Rc, "/") {
+			return fmt.Errorf("%s: fleet.hosts[%q].rc must start with \"~/\" or \"/\", got %q", path, h.Name, h.Rc)
 		}
 	}
 	return nil

@@ -71,6 +71,12 @@ exist), `gh auth status`, the git worktree and `origin` reachability, and whethe
 that host. Fix everything doctor flags before running `acy arch` for real — a host
 that fails silently mid-run is a stuck engineer nobody is watching.
 
+When a host sets `rc`, every one of these checks — the `ssh` check included — runs
+behind the same `zsh -c 'source <rc>; ...'` wrap the engineer transport uses, so a
+missing `zsh` or an otherwise broken invocation fails the `ssh` check by name, with
+the shell's own stderr, instead of showing up as a mystery downstream in `claude` or
+`gh`.
+
 ## The fleet config
 
 Arch mode requires a `"fleet"` section in `.acy.json`. Every field is optional except
@@ -96,7 +102,8 @@ Arch mode requires a `"fleet"` section in `.acy.json`. Every field is optional e
         "repoPath": "/home/you/proj",
         "maxEngineers": 2,
         "acyBin": "acy",
-        "path": ["/opt/homebrew/bin", "/home/you/.local/bin"]
+        "path": ["/opt/homebrew/bin", "/home/you/.local/bin"],
+        "rc": "~/.zshrc"
       }
     ]
   }
@@ -146,6 +153,20 @@ Arch mode requires a `"fleet"` section in `.acy.json`. Every field is optional e
     and the detached engineer daemon itself see — and the daemon's own children (`claude`,
     `gh`, `git`) inherit that same environment, so a missing entry here breaks a real run,
     not just a diagnostic.
+  - **`rc`** — a shell rc file to source before every remote command on this host, e.g.
+    `"~/.zshrc"`. Must start with `"~/"` or `"/"` — and unlike `path` above, a leading `"~"`
+    is exactly the point rather than a mistake to reject: `rc` is never spliced into a
+    command directly, it is only ever handed to the remote `zsh` as the argument of a
+    `source` call, so it's the remote shell that expands the tilde, not `acy`.
+    **Prefer `rc` over `path` on real hosts.** `path` only ever fixes `PATH`; plenty of
+    real machines have `claude` or `gh` working only because the login shell's rc also
+    wires up auth env vars, nvm/asdf shims, or other state a bare PATH extension can't
+    replicate. When `rc` is set, every remote invocation — the engineer transport's
+    `start`/`attach` argv and every `acy fleet doctor` check command — runs as `zsh -c
+    'source <rc> >/dev/null 2>&1; <command>'`, composed after any `path` preamble, so the
+    two settings stack rather than conflict. Setting both is normal and harmless: `path` is
+    a cheap belt-and-braces default, `rc` is what actually fixes a host where PATH alone
+    wasn't enough.
 
 ## Running `acy arch`
 
