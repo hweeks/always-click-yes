@@ -154,6 +154,28 @@ func TestApplyResumeRestoresRunState(t *testing.T) {
 	}
 }
 
+// A finished run's outcome and summary must survive a restart, exactly as
+// PlanBody does — a resumed run comes back knowing how it ended, not just that
+// it did.
+func TestApplyResumeRestoresFinishOutcome(t *testing.T) {
+	snap := state.Snapshot{
+		SessionID:     "sess-1",
+		Phase:         "COMPLETE",
+		FinishOutcome: "abandoned",
+		FinishSummary: "the dependency broke upstream",
+	}
+	m, _ := resumeModel(t, snap, true, nil)
+
+	m.applyResume(resumeMsg{id: "sess-1", snap: snap, hasSnap: true})
+
+	if m.FinishOutcome() != "abandoned" {
+		t.Errorf("FinishOutcome() = %q, want %q", m.FinishOutcome(), "abandoned")
+	}
+	if m.FinishSummary() != "the dependency broke upstream" {
+		t.Errorf("FinishSummary() = %q", m.FinishSummary())
+	}
+}
+
 // A session acy never supervised still resumes — you just get the conversation
 // back, in a plan session, with no state to restore.
 func TestApplyResumeWithoutSnapshotDegradesToPlan(t *testing.T) {
@@ -238,6 +260,8 @@ func TestPersistWritesWhatResumeNeeds(t *testing.T) {
 	m.sessionID = "sess-9"
 	m.phase = PhaseAutoRun
 	m.planBody = "plan text"
+	m.finishOutcome = "completed"
+	m.finishSummary = "done"
 	m.dispatches = 2
 	m.costSettled = 1.0
 	m.costCurrent = 0.5
@@ -254,10 +278,106 @@ func TestPersistWritesWhatResumeNeeds(t *testing.T) {
 	if got.Dispatches != 2 || got.PlanBody != "plan text" || got.Cwd != "/proj" {
 		t.Errorf("snapshot = %+v", got)
 	}
+	if got.FinishOutcome != "completed" || got.FinishSummary != "done" {
+		t.Errorf("finish outcome/summary = %q/%q, want completed/done", got.FinishOutcome, got.FinishSummary)
+	}
 	// The running session's spend must be banked: on resume its process starts over
 	// at zero, so anything not settled here is lost.
 	if got.CostSettled != 1.5 {
 		t.Errorf("cost_settled = %.2f, want 1.5 (settled + current)", got.CostSettled)
+	}
+}
+
+// --- the fleet's own ledger round-trips through the seam ----------------------
+
+// persist() must carry the fleet's ledger out through Ledger(), the way it
+// already carries the task ledger out of m.tasks.
+func TestPersistIncludesTheFleetLedger(t *testing.T) {
+	m, saved := resumeModel(t, state.Snapshot{}, false, nil)
+	fake := newFakeFleetManager()
+	fake.ledger = []state.Engineer{
+		{EngineerID: "e1", Ticket: "T1", Host: "a", State: "running", LastSeq: 5},
+	}
+	m.fleet = fake
+	m.sessionID = "sess-9"
+
+	m.persist()
+
+	if len(*saved) != 1 {
+		t.Fatalf("persist wrote %d snapshots, want 1", len(*saved))
+	}
+	got := (*saved)[0].Engineers
+	if len(got) != 1 || got[0].EngineerID != "e1" || got[0].LastSeq != 5 {
+		t.Fatalf("snapshot.Engineers = %+v, want the fleet's ledger", got)
+	}
+}
+
+// A plain run with no fleet wired must not gain an Engineers field — the
+// additive-snapshot guarantee non-arch runs depend on.
+func TestPersistOmitsEngineersWithNoFleet(t *testing.T) {
+	m, saved := resumeModel(t, state.Snapshot{}, false, nil)
+	m.sessionID = "sess-9"
+
+	m.persist()
+
+	if len(*saved) != 1 {
+		t.Fatalf("persist wrote %d snapshots, want 1", len(*saved))
+	}
+	if got := (*saved)[0].Engineers; len(got) != 0 {
+		t.Errorf("Engineers = %+v, want none with no fleet configured", got)
+	}
+}
+
+// applyResume must hand the restored snapshot's engineers back to the fleet
+// manager via Resume, and the resume prompt must name the one that was still
+// running when this session died.
+func TestApplyResumeHandsEngineersBackToTheFleetAndNamesTheDeadOne(t *testing.T) {
+	snap := state.Snapshot{
+		SessionID: "sess-1", Phase: "AUTO-RUN",
+		Engineers: []state.Engineer{
+			{EngineerID: "e1", Ticket: "T1", Title: "fix the ledger", Host: "a", State: "running", LastSeq: 4},
+			{EngineerID: "e2", Ticket: "T2", Title: "ship the feature", Host: "a", State: "done", Outcome: "completed"},
+		},
+	}
+	m, _ := resumeModel(t, snap, true, nil)
+	fake := newFakeFleetManager()
+	m.fleet = fake
+
+	m.applyResume(resumeMsg{id: "sess-1", snap: snap, hasSnap: true})
+
+	if fake.resumeCalls != 1 {
+		t.Fatalf("fleet.Resume called %d times, want 1", fake.resumeCalls)
+	}
+	if len(fake.resumed) != 2 {
+		t.Fatalf("fleet.Resume received %+v, want both engineers", fake.resumed)
+	}
+
+	if got := m.resumePrompt(); !strings.Contains(got, "e1") || !strings.Contains(got, "fix the ledger") {
+		t.Errorf("the resume prompt must name the still-running engineer, got:\n%s", got)
+	}
+	if got := m.resumePrompt(); strings.Contains(got, "e2") {
+		t.Errorf("a finished engineer must not be reported as unfinished, got:\n%s", got)
+	}
+	if got := m.resumePrompt(); !strings.Contains(got, "ReadTickets") {
+		t.Errorf("the resume prompt must remind the architect to ReadTickets, got:\n%s", got)
+	}
+	if !strings.Contains(m.Transcript(), "e1") {
+		t.Error("the transcript should note the re-attached engineer")
+	}
+}
+
+// With no fleet wired (a plain `acy run`), a resume with no engineers in the
+// snapshot must not touch the fleet seam at all.
+func TestApplyResumeWithNoEngineersDoesNotCallFleet(t *testing.T) {
+	snap := state.Snapshot{SessionID: "sess-1", Phase: "AUTO-RUN"}
+	m, _ := resumeModel(t, snap, true, nil)
+	fake := newFakeFleetManager()
+	m.fleet = fake
+
+	m.applyResume(resumeMsg{id: "sess-1", snap: snap, hasSnap: true})
+
+	if fake.resumeCalls != 0 {
+		t.Errorf("fleet.Resume called %d times, want 0 (no engineers to resume)", fake.resumeCalls)
 	}
 }
 

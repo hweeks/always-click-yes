@@ -41,6 +41,10 @@ type File struct {
 	TaskBudget  *float64 `json:"taskBudget,omitempty"`
 	RunBudget   *float64 `json:"runBudget,omitempty"`
 
+	// Fleet is arch mode's optional config: engineer defaults and the hosts
+	// they can run on. Nil means the project has no "fleet" key at all.
+	Fleet *FleetConfig `json:"fleet,omitempty"`
+
 	// Path is where the file was read from, for the "loaded config" line.
 	Path string `json:"-"`
 }
@@ -98,6 +102,11 @@ func LoadFile(dir string) (File, bool, error) {
 	}
 	if f.RunBudget != nil && *f.RunBudget < 0 {
 		return File{}, false, fmt.Errorf("%s: runBudget must be zero or greater", path)
+	}
+	if f.Fleet != nil {
+		if err := f.Fleet.resolve(dir, path); err != nil {
+			return File{}, false, err
+		}
 	}
 	f.Path = path
 	return f, true, nil

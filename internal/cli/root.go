@@ -28,6 +28,9 @@ func Root() *cobra.Command {
 	root.AddCommand(newServeCmd())
 	root.AddCommand(newHookCmd())
 	root.AddCommand(newMCPCmd())
+	root.AddCommand(newEngineerCmd())
+	root.AddCommand(newFleetCmd())
+	root.AddCommand(newArchCmd())
 
 	// Default to `run` when invoked with no subcommand.
 	root.RunE = runCmd.RunE

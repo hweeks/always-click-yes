@@ -527,6 +527,33 @@ func TestFramePicker(t *testing.T) {
 	}
 }
 
+// Before Finish is called, the frame carries no outcome or summary at all —
+// omitempty, not empty strings a client has to know to ignore.
+func TestFrameOmitsFinishOutcomeBeforeFinish(t *testing.T) {
+	m := New(nil, Config{})
+
+	blob := mustMarshal(t, m.Frame())
+	for _, banned := range []string{`"finishOutcome"`, `"finishSummary"`} {
+		if strings.Contains(blob, banned) {
+			t.Errorf("frame carries %s before Finish was called: %s", banned, blob)
+		}
+	}
+}
+
+// Once the session calls Finish, the frame carries what it decided.
+func TestFrameCarriesFinishOutcomeAfterFinish(t *testing.T) {
+	m := autoRunModel()
+	m.finish("completed", "shipped the ledger")
+
+	f := m.Frame()
+	if f.FinishOutcome != "completed" {
+		t.Errorf("FinishOutcome = %q, want %q", f.FinishOutcome, "completed")
+	}
+	if f.FinishSummary != "shipped the ledger" {
+		t.Errorf("FinishSummary = %q", f.FinishSummary)
+	}
+}
+
 // The frame is the wire format, so it has to survive a round trip through
 // encoding/json — no channels, no funcs, no pointers into the model.
 func TestFrameMarshalsCleanly(t *testing.T) {

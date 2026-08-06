@@ -92,6 +92,46 @@ func TrimTasks(tasks []Task) []Task {
 	return tasks[len(tasks)-maxLedgerTasks:]
 }
 
+// Engineer is one arch-mode engineer, as the fleet ledger remembers it — the
+// resume-time counterpart to Task. A resumed run needs enough to re-attach a
+// still-running engineer's Follow loop (Host, WireID, LastSeq) and to
+// re-render a finished one's history (Outcome, PRURL, CostUSD) without
+// consulting the engineer itself.
+type Engineer struct {
+	EngineerID string `json:"engineer_id"`
+	// WireID is the engineer daemon's own id — what Transport.Attach takes —
+	// distinct from EngineerID, which is only the fleet ledger's short,
+	// say-it-out-loud label ("e1"). Re-attaching with the wrong one talks to
+	// nothing on the far end.
+	WireID    string    `json:"wire_id,omitempty"`
+	Ticket    string    `json:"ticket"`
+	Title     string    `json:"title,omitempty"`
+	Host      string    `json:"host,omitempty"`
+	Branch    string    `json:"branch,omitempty"`
+	State     string    `json:"state"`
+	Outcome   string    `json:"outcome,omitempty"`
+	PRURL     string    `json:"pr_url,omitempty"`
+	CostUSD   float64   `json:"cost_usd,omitempty"`
+	Tokens    Tokens    `json:"tokens,omitzero"`
+	LastSeq   int64     `json:"last_seq,omitempty"`
+	StartedAt time.Time `json:"started_at,omitzero"`
+	EndedAt   time.Time `json:"ended_at,omitzero"`
+}
+
+// Unfinished reports an engineer that had not reached a terminal state when
+// the snapshot was taken — done, failed, or cancelled, mirroring fleet's own
+// state constants (fleet.StateDone et al). Those constants live in
+// internal/fleet, which already imports this package, so they are repeated
+// here as literals rather than imported back.
+func (e Engineer) Unfinished() bool {
+	switch e.State {
+	case "done", "failed", "cancelled":
+		return false
+	default:
+		return true
+	}
+}
+
 // Snapshot is acy's state for one claude session.
 type Snapshot struct {
 	Version   int    `json:"version"`
@@ -103,6 +143,12 @@ type Snapshot struct {
 	// PlanBody is the approved plan — the record of what the user armed, shown when
 	// the run is resumed.
 	PlanBody string `json:"plan_body,omitempty"`
+
+	// FinishOutcome and FinishSummary are set once the session calls Finish —
+	// "completed" or "abandoned", and the summary it gave — so a resumed run
+	// still knows how it ended.
+	FinishOutcome string `json:"finish_outcome,omitempty"`
+	FinishSummary string `json:"finish_summary,omitempty"`
 
 	// Rounds counted auto-nudges of the completion loop, which no longer exists
 	// — a run now ends when the session calls Finish. Kept so that snapshots
@@ -131,6 +177,11 @@ type Snapshot struct {
 	// picker's child filter, and how a restart discovers what was in flight
 	// when it died.
 	Tasks []Task `json:"tasks,omitempty"`
+
+	// Engineers is arch mode's ledger, the fleet's counterpart to Tasks — nil
+	// for every run without a fleet, so a plain `acy run` snapshot is
+	// unchanged. See fleet.Manager.Ledger/Resume.
+	Engineers []Engineer `json:"engineers,omitempty"`
 
 	// Lineage and SupersededBy track a session id changing under us. claude 2.1.207
 	// keeps the id across --resume (verified against real transcripts), so these

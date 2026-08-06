@@ -74,10 +74,19 @@ func (m *Model) runCommand(name, args string) tea.Cmd {
 		m.entries = nil
 		m.appendEntry(entry{kind: eMeta, body: "(transcript cleared) · /help for commands"})
 	case "quit", "exit", "q":
+		// Engineers are durable remote work, not local processes this session
+		// owns outright, so they are deliberately left running through every
+		// other exit path (Esc, an ended stream, a crash) — only an explicit
+		// quit tears them down, alongside fleet.Manager.Close on process exit.
+		m.cancelFleet("the run was quit")
 		if m.drv != nil {
 			m.drv.Stop()
 		}
 		return tea.Quit
+	case "fleet":
+		m.appendEntry(entry{kind: eMeta, body: m.fleetReport()})
+	case "tickets":
+		m.appendEntry(entry{kind: eMeta, body: m.ticketsReport()})
 	case "model":
 		if args == "" {
 			cur := m.nextModel

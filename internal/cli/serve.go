@@ -17,6 +17,7 @@ import (
 	"github.com/hweeks/always-click-yes/internal/hub"
 	"github.com/hweeks/always-click-yes/internal/server"
 	"github.com/hweeks/always-click-yes/internal/state"
+	"github.com/hweeks/always-click-yes/internal/supervisor"
 )
 
 // `acy serve` is `acy run` without a terminal.
@@ -42,7 +43,7 @@ type serveEndpoint struct {
 }
 
 func newServeCmd() *cobra.Command {
-	var f Flags
+	var f supervisor.Flags
 	var port int
 	var token string
 
@@ -71,7 +72,7 @@ func newServeCmd() *cobra.Command {
 }
 
 // serveSupervisor is runSupervisor's headless sibling.
-func serveSupervisor(ctx context.Context, f Flags, port int, token string, changed func(string) bool) error {
+func serveSupervisor(ctx context.Context, f supervisor.Flags, port int, token string, changed func(string) bool) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -82,7 +83,7 @@ func serveSupervisor(ctx context.Context, f Flags, port int, token string, chang
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := overlayFileConfig(&f, changed); err != nil {
+	if err := supervisor.OverlayFileConfig(&f, changed); err != nil {
 		return err
 	}
 
@@ -101,14 +102,14 @@ func serveSupervisor(ctx context.Context, f Flags, port int, token string, chang
 	// ours.
 	f.AltScreen = false
 
-	sup, err := NewSupervisor(ctx, f)
+	sup, err := supervisor.NewSupervisor(ctx, f)
 	if err != nil {
 		return err
 	}
 	defer sup.Close()
 	// Old snapshots are worth keeping (you may want to resume last week's run) but
 	// not forever. Best-effort, exactly as `run` does it.
-	defer func() { _ = state.Prune(maxSnapshots) }()
+	defer func() { _ = state.Prune(supervisor.MaxSnapshots) }()
 
 	h := hub.New(sup.Model)
 	defer h.Close()

@@ -93,7 +93,9 @@ and let the interface enforce the rest.
   `sendInput`/`flushQueue`), `paste.go` (a dragged-in path becomes an absolute path
   reference), `commands.go` (slash commands + resume picker), `ask.go` (AskUserQuestion
   panel), `gate.go` (countdown), `dispatch.go` (the `Dispatcher` seam onto the
-  orchestrator). It also holds the two front-end seams — `frame.go` (the read seam),
+  orchestrator), `fleet.go` (the architect's fleet-tool handlers and the `/fleet`
+  report), `tickets.go` (the ticket-tool handlers and the `/tickets` report). It also
+  holds the two front-end seams — `frame.go` (the read seam),
   `action.go` (the write seam) and `present.go` (the presentation decisions both front
   ends share). See [The seam](#the-seam-one-model-two-front-ends).
 - `internal/htmlrender` — transcript entries as HTML, for the webview. A leaf package
@@ -131,6 +133,57 @@ and let the interface enforce the rest.
 - `internal/session` — reads claude's `~/.claude/projects/<slug>/*.jsonl` transcripts:
   `List` for the `/resume` picker, `Replay` to turn one back into `[]driver.Event` for the
   transcript view. Injected as `Config.Sessions` / `Config.Replay`, so tests supply fakes.
+- `internal/engineerwire` — the NDJSON wire contract between an architect and its detached
+  engineers, and the seq-numbered journal both sides read: `types.go` (the message structs —
+  `Spec`/`Answer`/`Cancel` inbound, `Hello`/`Event`/`Question`/`Result` outbound), `codec.go`
+  (marshal/decode by envelope `type`), `journal.go` (`Open`/`Append`/`ReplayFrom`/`Follow`).
+  The message shapes and the seq/replay contract are already fully specced in
+  `docs/engineer-protocol.md` — read that before this package's comments, not instead of it.
+  Deliberately no CLI, no process spawning, no git: "the ground the rest of arch mode gets
+  built on."
+- `internal/gitops` — the deterministic git/gh layer behind an engineer: `EnsureWorktree` /
+  `RemoveWorktree` (an isolated worktree on a fresh branch off the base), `CommitsAhead`
+  (did the run actually commit anything), `Push`, `BranchName`, `CreatePR`. Every git/gh
+  invocation here is a fixed argv the package itself chooses — nothing in it is model-driven.
+  A `Runner` seam (`func(ctx, dir, name string, args ...string) (string, error)`) threads
+  through every call so tests fake `git`/`gh` instead of running them.
+- `internal/engineer` — the headless runtime that drives one ticket end to end: `core.go`
+  builds the brief and steers a supervisor through PLAN/AUTO-RUN, `ask.go` escalates every
+  `AskUserQuestion` up the journal as a `Question` and blocks for an answer (15-minute
+  timeout fallback), `drive.go` polls for the model's own `Finish` and only then —
+  deterministically, in Go, never left to the model — checks `gitops.CommitsAhead`, pushes,
+  and opens the PR. It does not own the supervisor process itself (`internal/supervisor`) or
+  process detachment (`internal/engineerd`).
+- `internal/engineerd` — daemon plumbing for one detached engineer: state-dir layout
+  (`dir.go`), the `control.sock` Unix socket carrying inbound `Answer`/`Cancel` (`control.go`),
+  `Attach` (`attach.go` — replay-then-follow the journal one way, forward control messages
+  the other), and `RunDetachedTarget` (`run.go` — the re-exec entrypoint the `setsid`'d child
+  actually runs). Detachment itself (`Setsid: true`) is `internal/cli`'s job, not this
+  package's — this package assumes it has already happened.
+- `internal/fleet` — everything about running engineers on named hosts: `transport.go` /
+  `local.go` / `ssh.go` (exec `acy engineer start`/`attach` directly, or over a hard-wired
+  `BatchMode=yes` ssh), `follow.go` (reattach forever with backoff across a dropped
+  connection), `prwatch.go` (poll `gh pr list` for `acy/`-headed PRs), `doctor.go` (the
+  six-check host health probe behind `acy fleet doctor`), `manager.go` (the orchestration
+  core: per-host capacity, the fleet-wide run-budget ceiling, PR-cap backpressure). It owns
+  no ticket state (`internal/tickets`) and decides nothing about *what* work to dispatch —
+  that judgment call is the architect's alone.
+- `internal/tickets` — a deterministic markdown ticket board at `.acy/tickets/<id>-<slug>.md`
+  **inside the repo being worked on**, not acy's state dir, so the ledger travels with the
+  clone and the PR diff. Hand-rolled frontmatter (no YAML dependency), a flat five-status set
+  (`todo`/`in-progress`/`in-review`/`merged`/`blocked`) with no enforced transitions,
+  `UpdateFields` for partial updates that never clobber a branch/PR another call already
+  recorded. It runs no git beyond add/commit/push of its own directory and never talks to
+  GitHub itself: detecting a merge is `internal/fleet`'s `PRWatcher`, and turning that
+  detection into a ticket update is the architect's own `UpdateTicket` call — prompt-driven,
+  not code-driven.
+- `internal/supervisor` — the constructor (`NewSupervisor`) extracted out of `internal/cli`
+  that wires the gate server, hook/MCP config files, the MCP bridge, the launcher/spawner
+  closures and the orchestrator into one running supervisor: the shared foundation `acy run`,
+  `acy serve` and `acy arch` all build on, none of which may import each other.
+  `Flags.Fleet` / `Flags.Tickets` / `Flags.ArchMode` are arch mode's only forks into it —
+  they pick `mcp.RoleArchitect` / `ui.ArchSystemPrompt` over the parent role and are nil/false
+  for a plain run.
 - `internal/state` — acy's own snapshot per session (phase, plan, rounds, cost): the part
   of a run claude's transcript does not record. Atomic JSON under
   `$ACY_STATE_DIR` (else `<user config dir>/acy/sessions/<id>.json`). Injected as
@@ -142,7 +195,14 @@ and let the interface enforce the rest.
   headless, over HTTP), and the hidden `hook`. `run` and `serve` share one flag
   registration (`addRunFlags`) so their run settings cannot drift, and each keeps
   its own pflag instances so `applyFileConfig`'s `.acy.json` overlay — which keys
-  on cobra's `Changed` — still tells a defaulted flag from an explicit one.
+  on cobra's `Changed` — still tells a defaulted flag from an explicit one. `arch`
+  (`arch.go`) shares that same flag registration and adds none of its own; it just
+  requires a `"fleet"` section in `.acy.json` and wires `fleet.Manager` /
+  `tickets.Store` through `supervisor.Flags`. `fleet doctor` (`fleet.go`) runs
+  `fleet.Doctor` per configured host. `engineer` (`engineer.go` — `start`, the
+  hidden `__run`, `attach`, `tail`) is the hidden subcommand a fleet host actually
+  runs; the `setsid` detach call itself (`engineer_detach_unix.go`) lives here, not
+  in `internal/engineerd`.
 - `internal/alog` — process-wide debug logger (off until `Open`); the `--log` flag drives it.
 - `vscode/` — the VS Code extension, which now has **two** front ends over the same
   supervisor.
@@ -258,6 +318,88 @@ The rules a future agent will otherwise break:
 - **A refused action is a domain answer, not an error.** `{"accepted":false,"reason":…}`
   with a **200**; the run moves on by itself, so "that gate is already gone" is news, not a
   malformed request. Only a kind this build has no vocabulary for is a 4xx.
+
+## Arch mode
+
+`acy arch` runs a whole fleet instead of one checkout. The architect still only reads
+(`Read`/`Grep`/`Glob`, same restriction as the parent), but once armed it delegates whole
+tickets to **engineers** — full, unattended `acy` instances on hosts named in `.acy.json`'s
+`fleet` section — instead of local `Dispatch` children. Operator-facing detail is in
+[`docs/arch-mode.md`](docs/arch-mode.md); the wire format is in
+[`docs/engineer-protocol.md`](docs/engineer-protocol.md). What follows is what actually took
+real probing to learn, so a future agent doesn't have to relearn it by breaking it first.
+
+- **An engineer's lifetime is not the ssh/attach connection.** `acy engineer start`
+  re-execs itself with `SysProcAttr{Setsid: true}` (`internal/cli/engineer_detach_unix.go`)
+  *before* the fleet transport — local exec or ssh — ever attaches to it. `setsid(2)` makes
+  the child its own session leader with no controlling terminal, so there is nothing for a
+  SIGHUP to travel through when the ssh connection (or the architect itself) dies. The
+  engineer keeps working; the only thing that changes is who's watching it.
+  `TestE2EArchResumeRecoversEngineer` is the live proof: kill the architect mid-flight and
+  the detached engineer still finishes its ticket and opens the PR with nobody attached at
+  all.
+- **The journal is the source of truth, not the connection.** Every engineer writes
+  `Hello`/`Event`/`Question`/`Result` to a seq-numbered, append-only journal
+  (`internal/engineerwire/journal.go`) before anything reads it live. `ReplayFrom(n)`
+  reconstructs history byte-for-byte and `Follow` polls for what comes after. **`Hello` is
+  always seq 1** — not a special case, but a structural guarantee: `Append` assigns
+  `lastSeq+1`, and `Hello` is simply the first thing an engineer ever appends. An architect
+  reattaching after a crash, or an operator running `acy engineer tail <id>`, never needs
+  the live process — it needs the journal.
+- **`Journal.Open`'s torn-tail truncation has to be judged from one read, not two.**
+  `scanJournal` returns `validSize` (bytes through the last complete, decodable line) and
+  `rawSize` (total bytes actually read) from the *same* pass over the file, and `Open`
+  truncates only when `rawSize > validSize` from that single snapshot. The first version
+  compared `scanJournal`'s read against a second, later `os.Stat` — and a live engineer's
+  perfectly valid append landing in the gap between those two reads looked exactly like the
+  first writer's own torn tail, and got silently truncated away. That's a real production
+  path, not a test artifact: an architect's `Attach` opens a journal a live engineer may
+  still be writing to. Fixed in `2b53279`; if you ever see two reads feeding one truncation
+  decision, that's this bug again.
+- **macOS's ~104-byte `sockaddr_un` limit has already bitten this feature twice.** An
+  engineer's control socket lives at `$ACY_STATE_DIR/engineers/<id>/control.sock`, and
+  macOS's per-user `$TMPDIR` alone runs about 49 bytes before the engineer-id path even
+  joins it — comfortably over budget with any descriptive directory name in the mix. It
+  first sank `internal/engineerd`'s own unit tests (fixed with a short, test-name-independent
+  `os.MkdirTemp("", "engd")` leaf instead of `t.TempDir()`), then sank `internal/e2e`'s live
+  engineer test the same way: `ListenControl` failed before `core.Run` (and its `sendHello`)
+  ever ran, so the attach side saw nothing and just timed out. Fixed by anchoring test state
+  dirs at **`/tmp`** directly, not `t.TempDir()` and not `$TMPDIR`. Any new test that hands
+  an engineer a state dir needs the same anchor.
+- **THE RECURRING BUG: a new architect MCP tool has to be added in three places, or it
+  fails live with "unknown tool".** `internal/mcp/protocol.go` defines it — the constant,
+  the schema, the description. `internal/cli/mcp.go`'s stdio-forwarding switch has to route
+  it to the supervisor, or the call comes back `unknown tool: %s` at runtime — this has
+  already been forgotten twice: once for the entire fleet-tool batch (`LaunchEngineer`,
+  `Await`, `AnswerEngineer`, `FleetStatus` all shipped unroutable, fixed in `3fa376a`), and
+  again when the ticket tools landed (`ReadTickets`/`UpdateTicket` needed the same wiring in
+  `b39297d`). And `internal/ui` needs two separate touches of its own — the fleet-tool name
+  map and banner switch in `model.go`, and the actual dispatch switch in `update.go` — so
+  "three places" is really four edits under three names. Adding a tool and stopping after
+  `protocol.go` is indistinguishable from success until the model calls it live and gets
+  refused.
+- **Engineer briefs must never tell the child to push a branch or open a PR.** `drive.go`'s
+  `finalize` does both, deterministically, in Go, after the model calls `Finish`: it checks
+  `gitops.CommitsAhead` and only then pushes and calls `gitops.CreatePR`. Left unsaid, a
+  capable child reaches for `gh pr create` on its own initiative — normal etiquette for a
+  coding agent — and `drive`'s own PR ends up a duplicate. A real run produced **4
+  `pr-create` calls for 2 tickets** before the brief text (`core.go`) was fixed (`4c11c51`)
+  to say outright: commit your work locally, but do not push the branch or open a PR
+  yourself — that happens automatically once you call `Finish`.
+- **Live e2e arch tests take 10–25 minutes; a Bash tool call caps around 600 seconds.**
+  `TestE2EArchRunsEngineersInParallel` and its siblings are real `claude` sessions on real
+  (or simulated) hosts and cannot be rushed. Backgrounding one and walking away has already
+  lost three sessions their runs — the shell or the harness reclaims the process before the
+  test ever reports. Tee the run to a log file and poll it with short, separate commands
+  instead of trusting a single long-running call to come back:
+  ```sh
+  ACY_LIVE=1 go test ./internal/e2e/ -run TestE2EArchResumeRecoversEngineer -v -timeout 20m \
+    > /tmp/arch-e2e.log 2>&1 &
+  # then, repeatedly, in fresh short calls:
+  tail -n 40 /tmp/arch-e2e.log
+  ```
+  Never background a live e2e run and consider it handled — poll it, don't fire-and-forget
+  it; it's a paid Claude session part-way to a real PR, not a fire-and-forget shell job.
 
 ## Hard-won facts about `claude` stream-json (verified live, v2.1.207–2.1.220)
 
@@ -514,13 +656,20 @@ are never paths — a token needs a separator or a leading `~`, or a sentence me
 
 ```sh
 make run                     # build the latest acy and dogfood it on this repo
+make arch                    # same dogfood loop, but arch mode (= go build -o acy . && ./acy arch)
 go build -o acy .            # build (= make build)
 ./acy run                    # the TUI
 ./acy serve                  # the same supervisor, headless over HTTP (prints {"url","token"})
 ./acy serve --port 7777      # ...on a fixed port; the host is always 127.0.0.1
+./acy arch                   # plan -> arm -> a fleet of engineers, one PR per ticket
+                              #   (requires a "fleet" section in .acy.json)
+./acy fleet doctor           # ssh/acy/claude/gh/git/state-dir health, per configured host
+./acy engineer tail <id>     # replay + follow one engineer's journal, human-readable
 go test ./...                # unit tests (no network; = make test)
 go test -race ./...          # what CI runs (= make race)
 ACY_LIVE=1 go test ./...     # + live tests: real `claude`, spends a few cents (= make live)
+ACY_LIVE=1 go test ./internal/e2e/ -run TestE2EArch -v -timeout 25m   # arch/fleet e2e only;
+                              #   10-25m each — see "Arch mode" above before backgrounding this
 golangci-lint run ./...      # lint (config in .golangci.yml, standard set; = make lint)
 gofmt -l .                   # must be empty (= make fmt)
 ```

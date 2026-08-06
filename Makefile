@@ -4,7 +4,7 @@
 
 BIN := acy
 
-.PHONY: build run test race live lint fmt clean
+.PHONY: build run arch test race live lint fmt clean
 
 build:
 	go build -o $(BIN) .
@@ -15,7 +15,13 @@ build:
 # approve. Three seconds is still long enough to hit `s` when you see something
 # wrong, which is the only thing the countdown is for.
 run: build
-	./$(BIN) run --countdown 3s
+	./$(BIN) run --countdown 3s --run-budget 100
+
+# Same dogfood loop as `run`, but arch mode: the architect plans and delegates
+# tickets to a fleet of engineers instead of running children locally. Reads
+# the "fleet" section of the repo-root .acy.json, so no flags here.
+arch: build
+	./$(BIN) arch
 
 test:
 	go test ./...

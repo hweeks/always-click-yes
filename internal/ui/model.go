@@ -19,6 +19,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/hweeks/always-click-yes/internal/driver"
+	"github.com/hweeks/always-click-yes/internal/fleet"
 	"github.com/hweeks/always-click-yes/internal/gate"
 	"github.com/hweeks/always-click-yes/internal/htmlrender"
 	"github.com/hweeks/always-click-yes/internal/mcp"
@@ -57,6 +58,16 @@ type Config struct {
 	// Dispatcher runs delegated tasks in child processes (nil = disabled, and a
 	// Dispatch call is then refused rather than half-served).
 	Dispatcher Dispatcher
+
+	// Fleet runs the architect's remote engineers (nil = disabled, and the four
+	// fleet tools are then refused with mcp.FleetUnavailable rather than
+	// half-served). Only ever wired for a RoleArchitect session.
+	Fleet FleetManager
+
+	// Tickets is the architect's ticket board (nil = disabled, and ReadTickets/
+	// UpdateTicket are then refused with mcp.TicketsUnavailable). Only ever
+	// wired for a RoleArchitect session, alongside Fleet.
+	Tickets TicketStore
 
 	// Resume is a session id to restore at startup: --resume/--continue set it, and
 	// Init then rebuilds the run instead of cold-starting a plan session.
@@ -161,6 +172,11 @@ type Model struct {
 	// prompt can hand the decision to the session rather than guessing.
 	interruptedTasks []string
 
+	// resumedEngineers names engineers the restored snapshot still had
+	// non-terminal, so the resume prompt can flag them the same way — the
+	// fleet's counterpart to interruptedTasks. See resumeFleet.
+	resumedEngineers []string
+
 	// lastContext is the most recent turn's context size — a reading, not a
 	// total. It is what shows a context growing without bound.
 	lastContext   int
@@ -185,6 +201,23 @@ type Model struct {
 
 	// delegation. nil disables it: the tool is refused rather than half-served.
 	dispatcher Dispatcher
+
+	// the architect's fleet. nil disables it, the same way. fleetAwait is the
+	// one Pending held for the next fleet event (like a gate holds); fleetBuf is
+	// what arrived while nothing was holding one; engineers/fleetCapUsed/
+	// fleetCapTotal are the mirror Frame and /fleet read — see syncFleet.
+	fleet         FleetManager
+	fleetAwait    *mcp.Pending
+	fleetBuf      []fleet.Event
+	engineers     []fleet.EngineerStatus
+	fleetActive   int
+	fleetCapUsed  int
+	fleetCapTotal int
+
+	// tickets is the architect's ticket board. nil disables it, the same way
+	// fleet does: ReadTickets/UpdateTicket are then refused rather than
+	// half-served.
+	tickets TicketStore
 
 	// gate / countdown state
 	gateReqs  <-chan *gate.Pending
@@ -212,16 +245,18 @@ type Model struct {
 	queued []string
 
 	// phase machine
-	ctx         context.Context
-	launcher    Launcher
-	phase       Phase
-	gen         int       // current driver generation
-	turnText    string    // assistant text accumulated for the current turn
-	planBody    string    // approved plan text, captured at ExitPlanMode
-	processing  bool      // a turn is in flight (model working)
-	interrupted bool      // user interrupted the current turn; don't auto-nudge
-	spinFrame   int       // advances every tick to animate the "working…" spinner
-	turnStart   time.Time // when the in-flight turn began, for the elapsed display
+	ctx           context.Context
+	launcher      Launcher
+	phase         Phase
+	gen           int       // current driver generation
+	turnText      string    // assistant text accumulated for the current turn
+	planBody      string    // approved plan text, captured at ExitPlanMode
+	finishOutcome string    // "completed" | "abandoned", set once the session calls Finish
+	finishSummary string    // the summary that came with it
+	processing    bool      // a turn is in flight (model working)
+	interrupted   bool      // user interrupted the current turn; don't auto-nudge
+	spinFrame     int       // advances every tick to animate the "working…" spinner
+	turnStart     time.Time // when the in-flight turn began, for the elapsed display
 }
 
 // New builds the initial model bound to a started driver.
@@ -287,6 +322,8 @@ func New(drv *driver.Driver, cfg Config) Model {
 
 		sessionLister: cfg.Sessions,
 		dispatcher:    cfg.Dispatcher,
+		fleet:         cfg.Fleet,
+		tickets:       cfg.Tickets,
 
 		cwd:       cfg.Cwd,
 		resumeID:  cfg.Resume,
@@ -334,6 +371,9 @@ func (m Model) Init() tea.Cmd {
 	cmds := []tea.Cmd{textarea.Blink, waitGate(m.gateReqs), waitAsk(m.askReqs), tickCmd()}
 	if m.dispatcher != nil {
 		cmds = append(cmds, waitChild(m.dispatcher.Events()))
+	}
+	if m.fleet != nil {
+		cmds = append(cmds, waitFleet(m.fleet.Events()))
 	}
 	switch {
 	case m.drv != nil:
@@ -566,11 +606,18 @@ func (m Model) billingNote() string {
 // ask overlay (which outranks the gate panel in both key routing and rendering) and
 // then "auto-approve" a tool acy had already answered. See enqueue in gate.go.
 var intercepted = map[string]bool{
-	"ExitPlanMode":   true,
-	mcp.ToolAsk:      true,
-	mcp.ToolDispatch: true,
-	mcp.ToolFinish:   true,
-	mcp.ToolPlan:     true,
+	"ExitPlanMode":         true,
+	mcp.ToolAsk:            true,
+	mcp.ToolDispatch:       true,
+	mcp.ToolFinish:         true,
+	mcp.ToolPlan:           true,
+	mcp.ToolLaunchEngineer: true,
+	mcp.ToolAwait:          true,
+	mcp.ToolAnswerEngineer: true,
+	mcp.ToolFleetStatus:    true,
+	mcp.ToolReadTickets:    true,
+	mcp.ToolUpdateTicket:   true,
+	mcp.ToolCreateTicket:   true,
 }
 
 // baseToolName strips an "mcp__<server>__" prefix so an MCP-provided tool is
@@ -609,6 +656,10 @@ func (m *Model) ingestToolUse(b driver.ContentBlock) {
 		return // rendered by openAsk, which owns the answer
 	case mcp.ToolDispatch:
 		return // rendered by startDispatch, which owns the task
+	case mcp.ToolLaunchEngineer, mcp.ToolAwait, mcp.ToolAnswerEngineer, mcp.ToolFleetStatus:
+		return // rendered when the corresponding Pending resolves — see fleet.go
+	case mcp.ToolReadTickets, mcp.ToolUpdateTicket, mcp.ToolCreateTicket:
+		return // rendered when the corresponding Pending resolves — see tickets.go
 	case mcp.ToolFinish:
 		// The run ending, read from the tool call itself. The `acy mcp` child
 		// answers Finish locally, so this event is the only place the outcome

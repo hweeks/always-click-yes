@@ -97,6 +97,8 @@ func (m *Model) applyResume(msg resumeMsg) tea.Cmd {
 	m.entries = nil
 	m.turnText = ""
 	m.planBody = ""
+	m.finishOutcome = ""
+	m.finishSummary = ""
 	m.costSettled = 0
 	m.costCurrent = 0
 	m.parentTokens = state.Tokens{}
@@ -115,6 +117,8 @@ func (m *Model) applyResume(msg resumeMsg) tea.Cmd {
 	phase := PhasePlan
 	if msg.hasSnap {
 		m.planBody = msg.snap.PlanBody
+		m.finishOutcome = msg.snap.FinishOutcome
+		m.finishSummary = msg.snap.FinishSummary
 		m.costSettled = msg.snap.CostSettled // a resumed process restarts its own total at zero
 		// Tokens carry over verbatim: they were counted per turn, so there is no
 		// per-process figure to reconcile — only a tally to keep going.
@@ -125,6 +129,7 @@ func (m *Model) applyResume(msg resumeMsg) tea.Cmd {
 		m.tasks = msg.snap.Tasks
 		m.lineage = msg.snap.Lineage
 		phase = parsePhase(msg.snap.Phase)
+		m.resumeFleet(msg.snap.Engineers)
 
 		// A run belongs to the project it was started in. Resuming it from somewhere
 		// else would otherwise rewrite its Cwd on the next persist, and `--continue`
@@ -197,6 +202,39 @@ func (m *Model) noteInterruptedTasks() {
 		len(stuck), strings.Join(stuck, ", "))})
 }
 
+// resumeFleet hands a restored snapshot's engineers back to the fleet
+// manager — the fleet's counterpart to noteInterruptedTasks. Manager.Resume
+// re-attaches every engineer that was still running when this session died
+// (its journal replays anything missed, including a Result that landed while
+// the architect was dead) and re-records every finished one as-is; this only
+// has to note which ones were unfinished, for the resume prompt.
+func (m *Model) resumeFleet(engineers []state.Engineer) {
+	if len(engineers) == 0 {
+		return
+	}
+
+	var running []string
+	for _, e := range engineers {
+		if e.Unfinished() {
+			running = append(running, fmt.Sprintf("%s (%s)", e.EngineerID, e.Title))
+		}
+	}
+	if len(running) > 0 {
+		m.resumedEngineers = running
+		m.appendEntry(entry{kind: eWarn, body: fmt.Sprintf(
+			"⚠ %d engineer(s) were still running when this session died and are being re-attached: %s\n"+
+				"Their journals may hold missed events; their worktrees may hold partial work — check before building on it.",
+			len(running), strings.Join(running, ", "))})
+	}
+
+	if m.fleet == nil {
+		return
+	}
+	if err := m.fleet.Resume(m.ctx, engineers); err != nil {
+		alog.Printf("resume: fleet resume failed: %v", err)
+	}
+}
+
 // resumePrompt is the single message a restored auto-run is sent.
 //
 // This is not the nudge loop coming back. That loop fired after *every* idle
@@ -212,6 +250,12 @@ func (m *Model) resumePrompt() string {
 		b.WriteString(strings.Join(m.interruptedTasks, ", "))
 		b.WriteString(". Their work may be partly applied, so check the current state of those files ")
 		b.WriteString("before deciding whether to re-dispatch them. ")
+	}
+	if len(m.resumedEngineers) > 0 {
+		b.WriteString("These engineers were still running when it died and have been re-attached: ")
+		b.WriteString(strings.Join(m.resumedEngineers, ", "))
+		b.WriteString(". Their journals may hold missed events and their worktrees may hold partial work, ")
+		b.WriteString("so check each one's status before launching more. Call ReadTickets to re-orient on the board. ")
 	}
 	b.WriteString("Take stock of what is actually done, then carry on with the approved plan. ")
 	b.WriteString("Call Finish when it is all complete and verified.")
@@ -304,12 +348,16 @@ func parsePhase(s string) Phase {
 
 // snapshot is acy's current state, in the form that survives a restart.
 func (m *Model) snapshot() state.Snapshot {
-	return state.Snapshot{
-		SessionID:   m.sessionID,
-		Cwd:         m.cwd,
-		Phase:       m.phase.String(),
-		Model:       m.model,
-		PlanBody:    m.planBody,
+	snap := state.Snapshot{
+		SessionID: m.sessionID,
+		Cwd:       m.cwd,
+		Phase:     m.phase.String(),
+		Model:     m.model,
+		PlanBody:  m.planBody,
+
+		FinishOutcome: m.finishOutcome,
+		FinishSummary: m.finishSummary,
+
 		CostSettled: m.totalCost(), // bank the running session too: on resume it restarts at zero
 
 		ParentTokens: m.parentTokens,
@@ -320,6 +368,10 @@ func (m *Model) snapshot() state.Snapshot {
 
 		Lineage: m.lineage,
 	}
+	if m.fleet != nil {
+		snap.Engineers = m.fleet.Ledger()
+	}
+	return snap
 }
 
 // persist records acy's state for the current session. It runs at every transition

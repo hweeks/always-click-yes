@@ -65,6 +65,16 @@ type Frame struct {
 	Tasks   []Task       `json:"tasks"`
 	Picker  []SessionRow `json:"picker"` // the /resume rows; empty unless Picking
 
+	// Engineers is the architect's fleet ledger, oldest first; empty for a
+	// session with no fleet wired. Fleet is capacity across the fleet's hosts —
+	// zero/zero for the same reason.
+	Engineers []Engineer   `json:"engineers"`
+	Fleet     FleetSummary `json:"fleet"`
+
+	// Tickets is the architect's ticket board, sorted by id; empty for a
+	// session with no ticket store wired.
+	Tickets []Ticket `json:"tickets"`
+
 	// InterruptedTasks names the tasks a restart caught mid-flight, so a client
 	// can say what a resumed run may have left half-done.
 	InterruptedTasks []string `json:"interruptedTasks"`
@@ -72,6 +82,13 @@ type Frame struct {
 	LogPath    string `json:"logPath"`
 	ConfigPath string `json:"configPath"`
 	Cwd        string `json:"cwd"`
+
+	// FinishOutcome and FinishSummary are set once the session calls Finish —
+	// "completed" or "abandoned", and the summary it gave. Both are omitted
+	// before then, so a client can tell "not finished" from "finished with an
+	// empty summary".
+	FinishOutcome string `json:"finishOutcome,omitempty"`
+	FinishSummary string `json:"finishSummary,omitempty"`
 }
 
 // Cost splits the bill by who spent it. Parent is every claude process this
@@ -188,6 +205,38 @@ type Task struct {
 	Running bool `json:"running"`
 }
 
+// Engineer is one remote engineer in the architect's fleet, as the ledger
+// remembers it.
+type Engineer struct {
+	ID      string  `json:"id"`
+	Ticket  string  `json:"ticket"`
+	Title   string  `json:"title"`
+	Host    string  `json:"host"`
+	State   string  `json:"state"` // launching | running | done | failed | cancelled
+	Outcome string  `json:"outcome"`
+	PRURL   string  `json:"prUrl"`
+	CostUSD float64 `json:"costUsd"`
+	Branch  string  `json:"branch"`
+}
+
+// FleetSummary is capacity across the fleet's hosts, plus how many engineers
+// are counted as active within it.
+type FleetSummary struct {
+	Active        int `json:"active"`
+	CapacityUsed  int `json:"capacityUsed"`
+	CapacityTotal int `json:"capacityTotal"`
+}
+
+// Ticket is one line of the architect's ticket board, as Frame projects it —
+// the summary a client lists, not the full brief ReadTickets/UpdateTicket
+// hand the model.
+type Ticket struct {
+	ID     string `json:"id"`
+	Title  string `json:"title"`
+	Status string `json:"status"`
+	PRURL  string `json:"prUrl"`
+}
+
 // SessionRow is one line of the /resume picker.
 type SessionRow struct {
 	ID            string `json:"id"`
@@ -270,11 +319,18 @@ func (m Model) Frame() Frame {
 		Tasks:  m.frameTasks(),
 		Picker: m.framePicker(),
 
+		Engineers: m.frameEngineers(),
+		Fleet:     m.frameFleet(),
+		Tickets:   m.frameTickets(),
+
 		InterruptedTasks: strs(m.interruptedTasks),
 
 		LogPath:    m.logPath,
 		ConfigPath: m.configPath,
 		Cwd:        m.cwd,
+
+		FinishOutcome: m.finishOutcome,
+		FinishSummary: m.finishSummary,
 	}
 }
 
@@ -360,6 +416,55 @@ func (m Model) frameTasks() []Task {
 			Tokens:  frameTokens(t.Tokens),
 			Running: t.Unfinished(),
 		})
+	}
+	return out
+}
+
+// frameEngineers projects the fleet mirror syncFleet keeps — see fleet.go —
+// rather than calling back into m.fleet, so Frame stays a read of the model's
+// own state even when a fleet is wired.
+func (m Model) frameEngineers() []Engineer {
+	out := make([]Engineer, 0, len(m.engineers))
+	for _, e := range m.engineers {
+		out = append(out, Engineer{
+			ID:      e.EngineerID,
+			Ticket:  e.Ticket,
+			Title:   e.Title,
+			Host:    e.Host,
+			State:   e.State,
+			Outcome: e.Outcome,
+			PRURL:   e.PRURL,
+			CostUSD: e.CostUSD,
+			Branch:  e.Branch,
+		})
+	}
+	return out
+}
+
+func (m Model) frameFleet() FleetSummary {
+	return FleetSummary{
+		Active:        m.fleetActive,
+		CapacityUsed:  m.fleetCapUsed,
+		CapacityTotal: m.fleetCapTotal,
+	}
+}
+
+// frameTickets reads the board directly rather than through a mirror kept in
+// sync by an event stream — unlike the fleet, there is no push side to
+// tickets, so a read is the only way to know its current state. A nil store
+// or a read error both project as no tickets, matching how an unwired fleet
+// projects as no engineers.
+func (m Model) frameTickets() []Ticket {
+	if m.tickets == nil {
+		return []Ticket{}
+	}
+	ts, err := m.tickets.List()
+	if err != nil {
+		return []Ticket{}
+	}
+	out := make([]Ticket, 0, len(ts))
+	for _, t := range ts {
+		out = append(out, Ticket{ID: t.ID, Title: t.Title, Status: t.Status, PRURL: t.PR})
 	}
 	return out
 }

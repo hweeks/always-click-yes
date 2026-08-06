@@ -146,6 +146,123 @@ func TestParseRoleDefaultsToParent(t *testing.T) {
 	if got := ParseRole("child"); got != RoleChild {
 		t.Errorf("ParseRole(\"child\") = %q, want %q", got, RoleChild)
 	}
+	if got := ParseRole("architect"); got != RoleArchitect {
+		t.Errorf("ParseRole(\"architect\") = %q, want %q", got, RoleArchitect)
+	}
+}
+
+// An architect gets the parent's four delegation tools, the four fleet tools
+// — LaunchEngineer, Await, AnswerEngineer, FleetStatus — and the three
+// ticket tools — ReadTickets, UpdateTicket, CreateTicket — eleven in all,
+// and nothing else. Every schema must be valid JSON, or claude silently
+// drops the tool.
+func TestArchitectRoleAdvertisesElevenTools(t *testing.T) {
+	defs := toolDefs(RoleArchitect)
+
+	want := []string{ToolAsk, ToolPlan, ToolDispatch, ToolFinish,
+		ToolLaunchEngineer, ToolAwait, ToolAnswerEngineer, ToolFleetStatus,
+		ToolReadTickets, ToolUpdateTicket, ToolCreateTicket}
+	if len(defs) != len(want) {
+		t.Fatalf("toolDefs(RoleArchitect) returned %d tools, want %d: %v", len(defs), len(want), names(defs))
+	}
+	seen := map[string]bool{}
+	for _, td := range defs {
+		seen[td.Name] = true
+		if td.Description == "" {
+			t.Errorf("%s has no description; the model has nothing to decide from", td.Name)
+		}
+		var schema map[string]any
+		if err := json.Unmarshal(td.InputSchema, &schema); err != nil {
+			t.Errorf("%s inputSchema is not valid JSON: %v", td.Name, err)
+		}
+	}
+	for _, w := range want {
+		if !seen[w] {
+			t.Errorf("toolDefs(RoleArchitect) = %v, missing %s", names(defs), w)
+		}
+	}
+}
+
+// The parent and child tool lists are load-bearing elsewhere (TestServeListsTools,
+// TestChildRoleCannotDelegate) and must not shift by a single tool just because a
+// third role was added.
+func TestParentAndChildToolListsUnchangedByArchitect(t *testing.T) {
+	parentWant := []string{ToolAsk, ToolPlan, ToolDispatch, ToolFinish}
+	if got := names(toolDefs(RoleParent)); !equalNames(got, parentWant) {
+		t.Errorf("toolDefs(RoleParent) = %v, want exactly %v", got, parentWant)
+	}
+	childWant := []string{ToolAsk}
+	if got := names(toolDefs(RoleChild)); !equalNames(got, childWant) {
+		t.Errorf("toolDefs(RoleChild) = %v, want exactly %v", got, childWant)
+	}
+}
+
+func names(defs []toolDef) []string {
+	out := make([]string, len(defs))
+	for i, td := range defs {
+		out[i] = td.Name
+	}
+	return out
+}
+
+func equalNames(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// Every new schema must be valid JSON and round-trip through json.Unmarshal —
+// an invalid one is rejected silently by claude and the tool just never appears.
+func TestNewSchemasRoundTripThroughJSON(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		schema string
+	}{
+		{ToolLaunchEngineer, launchEngineerSchema},
+		{ToolAwait, awaitSchema},
+		{ToolAnswerEngineer, answerEngineerSchema},
+		{ToolFleetStatus, fleetStatusSchema},
+		{ToolReadTickets, readTicketsSchema},
+		{ToolUpdateTicket, updateTicketSchema},
+		{ToolCreateTicket, createTicketSchema},
+	} {
+		var v map[string]any
+		if err := json.Unmarshal([]byte(tc.schema), &v); err != nil {
+			t.Errorf("%s schema failed to unmarshal: %v", tc.name, err)
+			continue
+		}
+		back, err := json.Marshal(v)
+		if err != nil {
+			t.Errorf("%s schema failed to re-marshal: %v", tc.name, err)
+			continue
+		}
+		var again map[string]any
+		if err := json.Unmarshal(back, &again); err != nil {
+			t.Errorf("%s schema did not round-trip: %v", tc.name, err)
+		}
+	}
+}
+
+// The refusal constants exist and are non-empty; their exact text is the model's
+// education at the moment of refusal, so a blank string here would be a silent
+// regression to "the tool just doesn't work."
+func TestFleetRefusalConstantsExist(t *testing.T) {
+	for name, s := range map[string]string{
+		"LaunchNotArmed":      LaunchNotArmed,
+		"AwaitNothingRunning": AwaitNothingRunning,
+		"FleetUnavailable":    FleetUnavailable,
+		"TicketsUnavailable":  TicketsUnavailable,
+	} {
+		if s == "" {
+			t.Errorf("%s is empty", name)
+		}
+	}
 }
 
 // tools/call passes the BARE tool name (not mcp__acy__-prefixed) and carries the

@@ -64,10 +64,45 @@ var ParentSystemPrompt = strings.Join([]string{
 	"codebase, and you cannot change it.",
 	"",
 	"Work happens by delegation. " + mcp.Qualified(mcp.ToolDispatch) + " hands one task to a fresh",
-	"engineer with the full toolset and blocks until they report back. They begin with no memory of",
+	"worker session with the full toolset and blocks until they report back. They begin with no memory of",
 	"this conversation, so a task has to stand alone: what to change, where, and how they will know",
 	"it worked. One task per call, scoped so that a report can honestly say \"completed\". Read each",
 	"report before you dispatch the next one.",
+	"",
+	mcp.Qualified(mcp.ToolPlan) + " shows the human a finished plan.",
+	mcp.Qualified(mcp.ToolAsk) + " puts a real choice to them and blocks for an answer.",
+	mcp.Qualified(mcp.ToolFinish) + " ends the run, once the work is done and you have seen it verified.",
+}, "\n")
+
+// ArchSystemPrompt is appended to the architect's system prompt in arch mode,
+// in place of ParentSystemPrompt.
+//
+// The architect reads the codebase the same way the parent does — Read, Grep,
+// Glob, and nothing that changes it — but delegates whole tickets to remote
+// engineers instead of local children. LaunchEngineer starts a full acy
+// instance on a fleet host: it plans its own subtasks in its own worktree and
+// ends by opening a PR, so a brief has to stand completely alone, the way
+// Dispatch's instruction does, scoped to one PR of work. Await is the
+// architect's main loop rather than a blocking call, so the prompt says so
+// plainly: launch to capacity, then Await, then react.
+var ArchSystemPrompt = strings.Join([]string{
+	"You are the architect of a fleet run. You have Read, Grep and Glob: you can understand this",
+	"codebase, and you cannot change it.",
+	"",
+	"Work happens by delegation to remote engineers. " + mcp.Qualified(mcp.ToolLaunchEngineer) + " starts a full",
+	"engineer instance on a fleet host: it plans its own subtasks in its own worktree and ends by opening a",
+	"PR, so a brief must stand completely alone — ticket-sized, one PR of work. Launch up to capacity, then",
+	mcp.Qualified(mcp.ToolAwait) + " — your main loop. A result means read it and launch the next ticket; a",
+	"question means " + mcp.Qualified(mcp.ToolAnswerEngineer) + " from the plan — never leave a question waiting.",
+	mcp.Qualified(mcp.ToolDispatch) + " still runs small local read/verify/fix jobs in this checkout.",
+	"",
+	"The ticket board is this run's memory. Once the plan is approved, " + mcp.Qualified(mcp.ToolCreateTicket) + " for",
+	"each unit of work — one ticket per PR-sized piece — before launching any engineers; the brief you write",
+	"becomes the engineer's whole work order. " + mcp.Qualified(mcp.ToolReadTickets) + " it on a resume, and after",
+	"every merge. Keep statuses current with " + mcp.Qualified(mcp.ToolUpdateTicket) + " at every transition —",
+	"launch to in-progress (record the branch), PR opened to in-review (record the PR url), merged once the",
+	"human merges it, or blocked with a note the moment an engineer is stuck. A resumed run has no memory of",
+	"this conversation; the board is how it learns where it left off.",
 	"",
 	mcp.Qualified(mcp.ToolPlan) + " shows the human a finished plan.",
 	mcp.Qualified(mcp.ToolAsk) + " puts a real choice to them and blocks for an answer.",
@@ -98,6 +133,23 @@ var ChildSystemPrompt = strings.Join([]string{
 // the session already in front of them rather than to a freshly resumed process.
 const kickoffPrompt = "The plan is approved. Begin now: dispatch the work one task at a time, " +
 	"reading each report before the next. Call Finish when it is all done and verified."
+
+// archKickoffPrompt is kickoffPrompt's fleet-loop counterpart. kickoffPrompt's
+// "dispatch the work one task at a time" describes the wrong tool once the
+// session has a fleet to run instead of a queue of local children.
+const archKickoffPrompt = "The plan is approved. Begin now: launch engineers for the first tickets up to " +
+	"capacity, then Await. Keep the pipeline full — react to each result by launching the next ticket, and " +
+	"answer any question immediately. Call Finish when every ticket is merged-or-accounted-for."
+
+// kickoffPromptFor picks the phase-appropriate kickoff message: hasFleet is
+// Config.Fleet != nil, and arming has to say the right thing about which tool
+// starts the work.
+func kickoffPromptFor(hasFleet bool) string {
+	if hasFleet {
+		return archKickoffPrompt
+	}
+	return kickoffPrompt
+}
 
 // --- launch plumbing ---
 
@@ -314,6 +366,7 @@ func (m *Model) onDriverReady(msg driverReadyMsg) tea.Cmd {
 	// anyway rather than dropping it, and take the panel down before it starts
 	// eating keystrokes meant for the new session.
 	m.abandonAsk()
+	m.abandonFleetAwait()
 	alog.Printf("phase: %s (gen=%d)", msg.phase, m.gen)
 
 	cmds := []tea.Cmd{waitEvent(m.drv.Events(), m.gen)}
@@ -331,6 +384,7 @@ func (m *Model) onDriverReady(msg driverReadyMsg) tea.Cmd {
 		m.beginTurn()
 		m.appendEntry(entry{kind: eYou, body: prompt})
 		m.interruptedTasks = nil
+		m.resumedEngineers = nil
 	}
 
 	m.persist()
@@ -360,9 +414,10 @@ func (m *Model) arm() {
 	alog.Printf("phase: AUTO-RUN (armed in place, gen=%d)", m.gen)
 	m.appendEntry(entry{kind: eGood, body: "▶ armed — delegating from here; Esc stops a running task"})
 
-	_ = m.drv.Send(kickoffPrompt)
+	prompt := kickoffPromptFor(m.fleet != nil)
+	_ = m.drv.Send(prompt)
 	m.beginTurn()
-	m.appendEntry(entry{kind: eYou, body: kickoffPrompt})
+	m.appendEntry(entry{kind: eYou, body: prompt})
 	m.persist()
 }
 
@@ -373,6 +428,8 @@ func (m *Model) finish(outcome, summary string) {
 		return
 	}
 	m.phase = PhaseComplete
+	m.finishOutcome = outcome
+	m.finishSummary = summary
 	m.status = "complete — vet the work below"
 	if outcome == "abandoned" {
 		m.status = "abandoned — see the summary below"

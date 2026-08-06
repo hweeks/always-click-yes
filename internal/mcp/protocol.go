@@ -36,11 +36,22 @@ const (
 	ToolPlan     = "PresentPlan"
 	ToolDispatch = "Dispatch"
 	ToolFinish   = "Finish"
+
+	ToolLaunchEngineer = "LaunchEngineer"
+	ToolAwait          = "Await"
+	ToolAnswerEngineer = "AnswerEngineer"
+	ToolFleetStatus    = "FleetStatus"
+
+	ToolReadTickets  = "ReadTickets"
+	ToolUpdateTicket = "UpdateTicket"
+	ToolCreateTicket = "CreateTicket"
 )
 
 // Role says which side of the run an `acy mcp` process is serving. It is fixed
-// at spawn time by the --role flag, because the two sides need different tools:
-// a parent delegates, a child does the work.
+// at spawn time by the --role flag, because the different sides need different
+// tools: a parent delegates to local children, an architect delegates to
+// remote engineer instances as well as local children, and a child does the
+// work.
 //
 // Without this a child would inherit --mcp-config from its parent, gain Dispatch
 // along with everything else, and be able to spawn children of its own — an
@@ -48,17 +59,22 @@ const (
 type Role string
 
 const (
-	RoleParent Role = "parent"
-	RoleChild  Role = "child"
+	RoleParent    Role = "parent"
+	RoleChild     Role = "child"
+	RoleArchitect Role = "architect"
 )
 
 // ParseRole defaults to parent: an unrecognised or absent role should produce
 // the supervised, fully-featured session rather than silently disarming it.
 func ParseRole(s string) Role {
-	if Role(s) == RoleChild {
+	switch Role(s) {
+	case RoleChild:
 		return RoleChild
+	case RoleArchitect:
+		return RoleArchitect
+	default:
+		return RoleParent
 	}
-	return RoleParent
 }
 
 // Qualified returns the name claude uses for one of our tools in the event stream
@@ -215,7 +231,7 @@ const DispatchNotArmed = "Dispatch is not available yet: this run has not been a
 const DispatchUnavailable = "(delegation is not available in this session, so this task was not run — " +
 	"say so plainly rather than reporting it as done)"
 
-const dispatchDescription = "Hand one task to a fresh engineer and block until they report back. " +
+const dispatchDescription = "Hand one task to a fresh worker session and block until they report back. " +
 	"They have the full toolset — editing, shell, tests — and they begin with no memory of this " +
 	"conversation: they cannot see the plan, the user's messages, or any earlier report, so the task " +
 	"has to stand on its own. They work, verify, return a structured report, and their session ends. " +
@@ -231,10 +247,24 @@ func toolDefs(role Role) []toolDef {
 		// deliberately does not delegate.
 		return defs
 	}
-	return append(defs,
+	defs = append(defs,
 		toolDef{Name: ToolPlan, Description: planDescription, InputSchema: json.RawMessage(planSchema)},
 		toolDef{Name: ToolDispatch, Description: dispatchDescription, InputSchema: json.RawMessage(DispatchSchema)},
 		toolDef{Name: ToolFinish, Description: finishDescription, InputSchema: json.RawMessage(finishSchema)},
+	)
+	if role != RoleArchitect {
+		// A parent delegates to local children only; the fleet tools below are
+		// the architect's alone.
+		return defs
+	}
+	return append(defs,
+		toolDef{Name: ToolLaunchEngineer, Description: launchEngineerDescription, InputSchema: json.RawMessage(launchEngineerSchema)},
+		toolDef{Name: ToolAwait, Description: awaitDescription, InputSchema: json.RawMessage(awaitSchema)},
+		toolDef{Name: ToolAnswerEngineer, Description: answerEngineerDescription, InputSchema: json.RawMessage(answerEngineerSchema)},
+		toolDef{Name: ToolFleetStatus, Description: fleetStatusDescription, InputSchema: json.RawMessage(fleetStatusSchema)},
+		toolDef{Name: ToolReadTickets, Description: readTicketsDescription, InputSchema: json.RawMessage(readTicketsSchema)},
+		toolDef{Name: ToolUpdateTicket, Description: updateTicketDescription, InputSchema: json.RawMessage(updateTicketSchema)},
+		toolDef{Name: ToolCreateTicket, Description: createTicketDescription, InputSchema: json.RawMessage(createTicketSchema)},
 	)
 }
 
@@ -314,6 +344,224 @@ const DispatchSchema = `{
     }
   }
 }`
+
+// --- the architect's fleet tools ---
+//
+// These four are advertised only for RoleArchitect. An architect does not edit
+// code itself — it delegates whole tickets to remote engineer instances (each a
+// fresh acy run on its own machine, in its own worktree) the same way a parent
+// delegates a task to a local child, except an engineer is unattended, takes
+// unbounded wall-clock, and reports back through Await rather than a blocking
+// call.
+
+const launchEngineerDescription = "Launch a remote engineer on a ticket. Non-blocking — returns " +
+	"immediately with the engineer's id, host and branch; the engineer works unattended in its own " +
+	"worktree and ends by opening a PR. Launch up to capacity, then Await. One ticket per engineer."
+
+// launchEngineerSchema is the parameter shape the architect sees for
+// LaunchEngineer. "brief" carries the same weight DispatchSchema's
+// "instruction" does, for the same reason: the engineer is a fresh acy
+// instance on another machine with no memory of this conversation, and plans
+// its own subtasks from this brief alone — a vague one fails silently, days
+// later, on a machine nobody is watching.
+const launchEngineerSchema = `{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["ticket", "title", "brief", "success"],
+  "properties": {
+    "ticket": {
+      "type": "string",
+      "maxLength": 64,
+      "description": "A short identifier for this unit of work, e.g. a ticket key. One ticket per engineer."
+    },
+    "title": {
+      "type": "string",
+      "maxLength": 120,
+      "description": "A few words naming the task, for the human watching. For example: add the token ledger"
+    },
+    "brief": {
+      "type": "string",
+      "maxLength": 8000,
+      "description": "The full standalone work order. The engineer is a fresh acy instance on another machine with no memory of this conversation, and plans its own subtasks from this brief alone — state the change, where it goes, and every constraint that matters."
+    },
+    "success": {
+      "type": "string",
+      "maxLength": 1000,
+      "description": "A concrete check proving the ticket is done. Without this the engineer decides for itself what done means."
+    },
+    "host": {
+      "type": "string",
+      "description": "Pin this engineer to a named fleet host. Omit to let the fleet auto-place it."
+    },
+    "budget_usd": {
+      "type": "number",
+      "description": "Optional spend ceiling for this engineer. Omit unless you have a reason; the default is the fleet's."
+    }
+  }
+}`
+
+const awaitDescription = "Block until the next fleet event and return it — an engineer's result " +
+	"(with PR URL and cost), an escalated question (answer it with AnswerEngineer), a PR merge/close, " +
+	"or a reconnection notice. This is your main loop: launch to capacity, Await, react, repeat. Do " +
+	"not poll FleetStatus in a loop; Await is the cheap wait."
+
+const awaitSchema = `{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {}
+}`
+
+const answerEngineerDescription = "Answer an escalated question from the plan and tickets; the " +
+	"engineer is blocked on it."
+
+const answerEngineerSchema = `{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["engineer_id", "question_id", "answer"],
+  "properties": {
+    "engineer_id": {
+      "type": "string",
+      "description": "The engineer this question came from."
+    },
+    "question_id": {
+      "type": "string",
+      "description": "The question being answered, from the escalation Await returned."
+    },
+    "answer": {
+      "type": "string",
+      "maxLength": 2000,
+      "description": "The answer. The engineer is blocked on it and resumes as soon as it arrives."
+    }
+  }
+}`
+
+const fleetStatusDescription = "A snapshot of every engineer (state, host, branch, PR, cost) and " +
+	"host capacity; for taking stock, not for waiting — use Await to wait."
+
+const fleetStatusSchema = `{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {}
+}`
+
+// LaunchNotArmed is returned when the architect calls LaunchEngineer before the
+// human has armed the run. Mirrors DispatchNotArmed: launching an engineer
+// starts real unattended work on a real machine, and only a human's Ctrl+G
+// starts it.
+const LaunchNotArmed = "LaunchEngineer is not available yet: this run has not been armed.\n\n" +
+	"Launching engineers starts real, unattended work on real machines. A human reads your plan and " +
+	"presses Ctrl+G, and that keystroke is the only thing that starts it. Present your plan and stop."
+
+// AwaitNothingRunning is returned when the architect calls Await with nothing
+// that could ever produce an event: no engineer running and no PR open.
+// Without this the call blocks forever on a fleet that will never speak.
+const AwaitNothingRunning = "Await has nothing to wait for: no engineer is running and no PR is " +
+	"open.\n\nBlocking here would wait forever. Launch an engineer first, or call Finish if there is " +
+	"nothing left to do."
+
+// FleetUnavailable is returned when the session has no fleet wired at all —
+// no fleet section in .acy.json, or acy was not started in architect mode.
+// Like SupervisorGone and DispatchUnavailable this fails open: the caller's
+// turn is blocked on this reply, and the honest answer is to say plainly that
+// no engineers exist rather than let the model believe a fleet is out there.
+const FleetUnavailable = "(this session has no fleet configured — .acy.json has no fleet section, " +
+	"or acy was not started in architect mode — so no engineers exist in this session; say so " +
+	"plainly rather than pretending they do)"
+
+// --- the architect's ticket board ---
+//
+// The ticket board is the run's memory: a markdown file per ticket under
+// .acy/tickets, in the repo itself rather than in acy's own state directory,
+// so it survives a resumed run and travels with a clone or a PR diff. These
+// three tools are the architect's only way to read or change it — advertised
+// for RoleArchitect alone, the same as the fleet tools above.
+
+const createTicketDescription = "Turn the approved plan into the board: one ticket per PR-sized unit of " +
+	"work, called before launching any engineers. The brief becomes the engineer's whole work order — a " +
+	"fresh instance with no memory of this conversation plans its own subtasks from it alone, so write it " +
+	"to stand completely on its own. A new ticket starts as todo."
+
+const createTicketSchema = `{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "title", "brief"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "maxLength": 32,
+      "pattern": "^[a-z0-9-]+$",
+      "description": "A short identifier for this ticket, lowercase letters, digits and dashes only, e.g. \"add-token-ledger\"."
+    },
+    "title": {
+      "type": "string",
+      "maxLength": 120,
+      "description": "A few words naming the task, for the human watching. For example: add the token ledger"
+    },
+    "brief": {
+      "type": "string",
+      "maxLength": 8000,
+      "description": "The full standalone work order. The engineer that eventually takes this ticket has no memory of this conversation and plans its own subtasks from this brief alone — state the change, where it goes, and every constraint that matters."
+    },
+    "depends_on": {
+      "type": "array",
+      "maxItems": 10,
+      "items": {"type": "string"},
+      "description": "Ids of tickets that must merge before this one can start. Optional."
+    }
+  }
+}`
+
+const readTicketsDescription = "The ticket board under .acy/tickets: every ticket with id, title, " +
+	"status, branch, PR, dependencies, and brief. Read it at the start of a run and after every merge."
+
+const readTicketsSchema = `{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {}
+}`
+
+const updateTicketDescription = "Record a ticket's new state the moment it changes — in-progress when " +
+	"its engineer launches (record the branch), in-review when its PR opens (record the PR url), merged " +
+	"when the human merges, blocked with a note when stuck. Writes and commits the ticket file " +
+	"deterministically; you never edit tickets by hand."
+
+const updateTicketSchema = `{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "status"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "The ticket's id, as ReadTickets reported it."
+    },
+    "status": {
+      "type": "string",
+      "enum": ["todo", "in-progress", "in-review", "merged", "blocked"],
+      "description": "The ticket's new status."
+    },
+    "note": {
+      "type": "string",
+      "maxLength": 1000,
+      "description": "Optional. Appended to the ticket's log, timestamped — say why, especially for blocked."
+    },
+    "branch": {
+      "type": "string",
+      "maxLength": 100,
+      "description": "Optional. The branch the engineer is working on — record it when the engineer launches. Omit to leave it unchanged."
+    },
+    "pr": {
+      "type": "string",
+      "maxLength": 300,
+      "description": "Optional. The PR URL — record it when the PR opens. Omit to leave it unchanged."
+    }
+  }
+}`
+
+// TicketsUnavailable is returned when the session has no ticket store wired at
+// all — this is not an arch run. Like FleetUnavailable this fails open: the
+// caller's turn is blocked on this reply.
+const TicketsUnavailable = "(this session has no ticket store — it is not an arch run — so there is " +
+	"no board to read or update; say so plainly rather than pretending one exists)"
 
 func serverInfo() map[string]any {
 	return map[string]any{"name": ServerName, "version": version.String()}

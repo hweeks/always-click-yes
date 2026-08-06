@@ -302,6 +302,57 @@ unknown key, a bare-number duration, or malformed JSON aborts the run rather
 than silently falling back to defaults the project tried to override. The
 transcript's opening lines say which file the settings came from.
 
+## Arch mode (experimental)
+
+`acy arch` is `acy run` for a whole fleet of machines instead of one checkout.
+The parent session becomes the **architect**: it still only reads the
+codebase (`Read`/`Grep`/`Glob`), but once armed it delegates whole tickets to
+**engineers** — full `acy` instances running unattended on the hosts your
+fleet config names — instead of local children. Each engineer plans its own
+subtasks in its own git worktree and finishes by opening a PR; the architect's
+loop is launch up to capacity, `Await` the next event, react, repeat.
+
+It requires a `"fleet"` section in `.acy.json`:
+
+```json
+{
+  "fleet": {
+    "baseBranch": "main",
+    "engineerModel": "sonnet",
+    "engineerBudgetUSD": 15,
+    "hosts": [
+      { "name": "local" },
+      { "name": "box2", "ssh": "you@box2.example.com", "repoPath": "/home/you/proj", "maxEngineers": 2 }
+    ]
+  }
+}
+```
+
+A host with no `ssh` runs engineers on this machine; anything else reaches the
+target over ssh. Check every configured host before trusting a run to it:
+
+```sh
+acy fleet doctor              # ssh, acy, claude, gh, git and state-dir health, per host
+acy arch                      # plan, arm, and the fleet takes it from there
+acy engineer tail <id>        # replay + follow one engineer's journal by hand
+```
+
+**Read this before pointing it at real hosts.** An engineer is an unattended
+agent with `Bash` on whatever machine it runs, auto-approving its own tool
+calls on the same countdown `acy run` uses — nothing is watching it between
+launch and its result or a question. Detached, it keeps working with nobody
+connected at all; a `deadmanHours` ceiling is what bounds an orphaned engineer
+if nobody ever comes back for it. Only point `hosts` at machines and repos
+you'd trust an unsupervised process on, and reach them with **key-only SSH in
+`BatchMode`** — no interactive password or host-key prompt an engineer could
+get stuck behind unattended.
+
+The full operator's guide — host preparation, every fleet config field,
+budgets, and resuming after a crash — is
+[`docs/arch-mode.md`](docs/arch-mode.md). The wire format between the
+architect and its engineers is specced in
+[`docs/engineer-protocol.md`](docs/engineer-protocol.md).
+
 ## Local development
 
 Working on `acy` itself? The Makefile keeps the dogfood loop one command away:
@@ -313,6 +364,7 @@ make run     # build the latest acy from this checkout and launch it, right here
 That builds a fresh binary from your working tree and starts it supervising the repo
 you're standing in — which for this project is the point: `acy` is developed by running
 `acy` on itself (see `AGENTS.md`). Other targets: `make build` (just the binary),
+`make arch` (same dogfood loop, in arch mode — requires a "fleet" section in `.acy.json`),
 `make test` (unit tests), `make race` (what CI runs), `make live` (the paid live suite,
 `ACY_LIVE=1`), `make lint`, and `make clean`.
 
@@ -424,6 +476,8 @@ Type these in the message box (they're handled by `acy`, not forwarded to Claude
 | `/log` | show the debug-log path |
 | `/tokens` | the token ledger: current context size, cache reads and cost, split parent vs children. This is the number to watch — the parent's line should stay flat while the children's climbs |
 | `/tasks` | the delegated-task ledger: one row per task with its outcome, cost and cache reads. `/tokens` says what the run spent; this says what it spent it *on* |
+| `/fleet` | arch mode only: the architect's engineer ledger — state, host, outcome and cost per engineer |
+| `/tickets` | arch mode only: the architect's ticket board — every ticket's status, branch, PR and brief |
 | `/done` | end the run by hand, if the session stopped without calling `Finish` |
 | `/quit` | quit (same as `Ctrl+C`) |
 

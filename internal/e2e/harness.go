@@ -31,9 +31,9 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/hweeks/always-click-yes/internal/cli"
 	"github.com/hweeks/always-click-yes/internal/hub"
 	"github.com/hweeks/always-click-yes/internal/state"
+	"github.com/hweeks/always-click-yes/internal/supervisor"
 	"github.com/hweeks/always-click-yes/internal/ui"
 )
 
@@ -74,7 +74,7 @@ var acyBinary = sync.OnceValues(func() (string, error) {
 // harness is one supervised run, driven without a terminal.
 type harness struct {
 	t   *testing.T
-	sup *cli.Supervisor
+	sup *supervisor.Supervisor
 	hub *hub.Hub
 
 	// crashed makes crash idempotent: a test that kills a run and then hits a
@@ -84,15 +84,33 @@ type harness struct {
 
 // options configures a harness. The zero value is a fresh run in a scratch project.
 type options struct {
-	Cwd       string        // scratch project; defaults to a new temp dir
-	Resume    string        // resume this session id
-	Continue  bool          // resume the newest run in Cwd
-	Countdown time.Duration // gate countdown; short, so tests don't wait 30s per tool
-	Model     string
+	Cwd        string        // scratch project; defaults to a new temp dir
+	Resume     string        // resume this session id
+	Continue   bool          // resume the newest run in Cwd
+	Countdown  time.Duration // gate countdown; short, so tests don't wait 30s per tool
+	Model      string
+	ChildModel string
+
+	// Ctx parents the supervisor's own context; nil means
+	// context.Background(). A test that needs to simulate a real crash —
+	// cancelling the supervisor out from under it without ever calling its
+	// Close, the way a killed terminal would — supplies its own cancelable
+	// context here rather than relying on newHarness's t.Cleanup(cancel),
+	// which only fires at the end of the test.
+	Ctx context.Context
 
 	// ParentTools is the supervising session's --tools registry. Empty means
 	// the product default, which is what a test of real behaviour wants.
 	ParentTools []string
+
+	// ArchMode, Fleet and Tickets mirror internal/cli/arch.go's own assembly
+	// of supervisor.Flags: ArchMode picks the architect role/prompt, Fleet
+	// wires its manager in, and Tickets wires the ticket board in. All three
+	// zero values (false, nil, nil) leave every existing caller's behavior —
+	// a plain `acy run` session — unchanged.
+	ArchMode bool
+	Fleet    ui.FleetManager
+	Tickets  ui.TicketStore
 }
 
 // newHarness wires a real supervisor — real gate socket, real hook settings, real
@@ -121,24 +139,29 @@ func newHarness(t *testing.T, opt options) *harness {
 		opt.Countdown = 2 * time.Second // long enough to veto in a test, short enough not to bore one
 	}
 	// An empty --tools list means the FULL registry, not the default one, so the
-	// default has to be applied here: the harness builds cli.Flags directly and
-	// never sees cobra's flag defaults. Getting this wrong would hand the
+	// default has to be applied here: the harness builds supervisor.Flags directly
+	// and never sees cobra's flag defaults. Getting this wrong would hand the
 	// supervising session Write and Edit and quietly invalidate every test that
 	// asserts it delegates.
 	if opt.ParentTools == nil {
-		opt.ParentTools = cli.DefaultParentTools
+		opt.ParentTools = supervisor.DefaultParentTools
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	parent := opt.Ctx
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithCancel(parent)
 	t.Cleanup(cancel)
 
-	sup, err := cli.NewSupervisor(ctx, cli.Flags{
-		Bin:       "claude",
-		Cwd:       opt.Cwd,
-		HookBin:   bin,
-		Model:     opt.Model,
-		Countdown: opt.Countdown,
-		MaxLines:  10,
+	sup, err := supervisor.NewSupervisor(ctx, supervisor.Flags{
+		Bin:        "claude",
+		Cwd:        opt.Cwd,
+		HookBin:    bin,
+		Model:      opt.Model,
+		ChildModel: opt.ChildModel,
+		Countdown:  opt.Countdown,
+		MaxLines:   10,
 		// The real parent registry, not a stub. It used to be a deliberately
 		// useless single tool, which was fine when the plan phase only had to
 		// avoid writing — but the supervising session's registry is now the
@@ -148,6 +171,9 @@ func newHarness(t *testing.T, opt options) *harness {
 		LogPath:   filepath.Join(t.TempDir(), "acy-debug.log"),
 		Resume:    opt.Resume,
 		Continue:  opt.Continue,
+		ArchMode:  opt.ArchMode,
+		Fleet:     opt.Fleet,
+		Tickets:   opt.Tickets,
 	})
 	if err != nil {
 		t.Fatalf("wire supervisor: %v", err)
