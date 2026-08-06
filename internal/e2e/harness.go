@@ -91,6 +91,14 @@ type options struct {
 	Model      string
 	ChildModel string
 
+	// Ctx parents the supervisor's own context; nil means
+	// context.Background(). A test that needs to simulate a real crash —
+	// cancelling the supervisor out from under it without ever calling its
+	// Close, the way a killed terminal would — supplies its own cancelable
+	// context here rather than relying on newHarness's t.Cleanup(cancel),
+	// which only fires at the end of the test.
+	Ctx context.Context
+
 	// ParentTools is the supervising session's --tools registry. Empty means
 	// the product default, which is what a test of real behaviour wants.
 	ParentTools []string
@@ -139,7 +147,11 @@ func newHarness(t *testing.T, opt options) *harness {
 		opt.ParentTools = supervisor.DefaultParentTools
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	parent := opt.Ctx
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithCancel(parent)
 	t.Cleanup(cancel)
 
 	sup, err := supervisor.NewSupervisor(ctx, supervisor.Flags{
