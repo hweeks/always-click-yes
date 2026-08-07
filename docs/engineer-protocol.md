@@ -21,7 +21,7 @@ crosses from one to the other.
 
 | type | fields |
 |---|---|
-| `spec` | `ticket, title, brief, success, base_branch, branch, model, child_model, child_effort, budget_usd, deadman_hours` |
+| `spec` | `ticket, title, brief, success, base_branch, branch, model, child_model, child_effort, budget_usd, deadman_hours, verify_commands, verify_timeout_seconds` |
 | `answer` | `question_id, text` |
 | `cancel` | `reason` |
 
@@ -29,6 +29,10 @@ crosses from one to the other.
 whole of what it knows about its job. There is no earlier conversation to
 fall back on, which is why `brief` and `success` exist as their own fields
 rather than folded into an ambient system prompt.
+
+`verify_commands` and `verify_timeout_seconds` carry the fleet's
+`verifyCommands`/`verifyTimeoutSeconds` config through to the engineer, so it
+can run the same checks acy's own `finalize` step will invoke.
 
 `answer` resolves exactly one outstanding `question` (matched by
 `question_id`); `cancel` tells the engineer to stop, with `reason` recorded

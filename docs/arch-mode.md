@@ -172,6 +172,8 @@ repo root to get every key name right on a fresh clone.
     "runBudgetUSD": 200,
     "deadmanHours": 24,
     "ticketCommit": "direct",
+    "verifyCommands": ["go build ./...", "go test -race ./...", "gofmt -l .", "golangci-lint run ./..."],
+    "verifyTimeoutSeconds": 900,
     "hosts": [
       { "name": "local" },
       {
@@ -210,6 +212,29 @@ repo root to get every key name right on a fresh clone.
 - **`ticketCommit`** (default `"direct"`, or `"none"`) — whether the ticket board
   (`.acy/tickets/*.md` in the repo) is committed and pushed as it changes, or left as
   local, uncommitted state.
+- **`verifyCommands`** (default `["go build ./...", "go test -race ./...", "gofmt -l .",
+  "golangci-lint run ./..."]`) — commands run in an engineer's worktree after it
+  finishes, as evidence collected by acy itself rather than the model's own claim of
+  having run tests. An explicit `[]` disables verification entirely. Each entry is
+  whitespace-split into argv directly — no shell is involved, so pipes, redirects,
+  globs, and quoted arguments don't work the way they would on a command line. A
+  command whose binary isn't found is recorded as `skipped` rather than failing the
+  run. `ACY_LIVE` (and anything else prefixed `ACY_LIVE`) is stripped from the
+  environment before any command runs: `ACY_LIVE=1` gates `internal/e2e`'s live suite,
+  which spends real money on a real `claude` session, and a verify command that
+  inherited it could silently kick off a live run of its own.
+- **`verifyTimeoutSeconds`** (default `900`, i.e. 15 minutes) — the wall-clock ceiling
+  for each command in `verifyCommands`. Must be greater than zero.
+
+  If any configured check actually ran and exited non-zero (`failed`), the engineer's
+  final outcome is overridden to `"failed"` regardless of what the model itself
+  reported — but the branch is still pushed and the PR still opened either way, so the
+  failure is something a reviewer can see rather than something that silently
+  disappears. A `skipped` (missing binary) or `timeout` status does *not* override the
+  outcome — those are facts about the host, not a verdict on the work. Either way, the
+  verification digest (`Verification (run by acy in the worktree, not reported by the
+  session): ...`) is appended to both the engineer's `Result.Summary` and the PR body
+  it opens, so a reviewer sees it without needing to inspect the raw journal.
 - **`hosts`** — the machines engineers may run on. A host with no `ssh` runs engineers
   locally, as direct child processes of the architect's own host; anything with `ssh`
   reaches the target over the hard-wired `BatchMode` ssh described above.

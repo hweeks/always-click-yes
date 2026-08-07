@@ -22,6 +22,7 @@ import (
 	"github.com/hweeks/always-click-yes/internal/engineerwire"
 	"github.com/hweeks/always-click-yes/internal/gitops"
 	"github.com/hweeks/always-click-yes/internal/supervisor"
+	"github.com/hweeks/always-click-yes/internal/verify"
 	"github.com/hweeks/always-click-yes/internal/version"
 )
 
@@ -70,6 +71,19 @@ type Config struct {
 
 	GitRunner gitops.Runner // defaults to gitops.DefaultRunner
 
+	// VerifyCommands are the commands finalize runs in the worktree to check
+	// the engineer's work, populated from Spec.VerifyCommands by the caller
+	// (engineerd) rather than read from Spec directly inside Core, so a test
+	// can set it without constructing a whole Spec.
+	VerifyCommands []string
+	// VerifyTimeout is the per-command wall-clock ceiling for VerifyCommands,
+	// populated from Spec.VerifyTimeoutSeconds by the same caller, for the
+	// same reason.
+	VerifyTimeout time.Duration
+	// VerifyRunner defaults to verify.DefaultRunner, exactly as GitRunner
+	// defaults to gitops.DefaultRunner below.
+	VerifyRunner verify.Runner
+
 	AskTimeout   time.Duration // defaults to defaultAskTimeout (15m)
 	PollInterval time.Duration // defaults to defaultPollInterval (1s)
 	StallIdle    time.Duration // defaults to defaultStallIdle (5m)
@@ -114,6 +128,9 @@ func NewCore(cfg Config, journal *engineerwire.Journal) *Core {
 	}
 	if cfg.GitRunner == nil {
 		cfg.GitRunner = gitops.DefaultRunner
+	}
+	if cfg.VerifyRunner == nil {
+		cfg.VerifyRunner = verify.DefaultRunner
 	}
 	if cfg.Host == "" {
 		if h, err := os.Hostname(); err == nil {

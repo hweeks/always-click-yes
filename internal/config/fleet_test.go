@@ -73,6 +73,115 @@ func TestLoadFileFleetDefaults(t *testing.T) {
 	if h.Shell != "" {
 		t.Errorf("Shell = %q, want empty — a host with no shell configured leaves derivation to rcWrap", h.Shell)
 	}
+	wantCommands := []string{"go build ./...", "go test -race ./...", "gofmt -l .", "golangci-lint run ./..."}
+	if !reflect.DeepEqual(fl.VerifyCommands, wantCommands) {
+		t.Errorf("VerifyCommands = %v, want %v", fl.VerifyCommands, wantCommands)
+	}
+	if fl.VerifyTimeoutSeconds == nil || *fl.VerifyTimeoutSeconds != 900 {
+		t.Errorf("VerifyTimeoutSeconds = %v, want 900", fl.VerifyTimeoutSeconds)
+	}
+}
+
+// An explicit "verifyCommands": [] is preserved as an empty, non-nil slice —
+// distinct from the absent case, which defaults to the four commands above.
+// This is how verification gets disabled for a project.
+func TestLoadFileFleetVerifyCommandsExplicitEmptyDisablesVerification(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, `{"fleet": {"verifyCommands": []}}`)
+
+	f, _, err := LoadFile(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(f.Fleet.VerifyCommands) != 0 {
+		t.Errorf("VerifyCommands = %v, want empty", f.Fleet.VerifyCommands)
+	}
+}
+
+// A whitespace-only entry in verifyCommands is rejected, naming its index.
+func TestLoadFileFleetVerifyCommandsRejectsWhitespaceEntry(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, `{"fleet": {"verifyCommands": ["go build ./...", "   "]}}`)
+
+	_, _, err := LoadFile(dir)
+	if err == nil {
+		t.Fatal("want an error, got none")
+	}
+	if !strings.Contains(err.Error(), "verifyCommands[1]") {
+		t.Errorf("error should name the offending index: %v", err)
+	}
+}
+
+// verifyTimeoutSeconds of zero or negative is rejected; absent defaults to
+// 900 (covered by TestLoadFileFleetDefaults above).
+func TestLoadFileFleetVerifyTimeoutSecondsRejectsNonPositive(t *testing.T) {
+	cases := map[string]string{
+		"zero":     `{"fleet": {"verifyTimeoutSeconds": 0}}`,
+		"negative": `{"fleet": {"verifyTimeoutSeconds": -1}}`,
+	}
+	for name, content := range cases {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeFile(t, dir, content)
+			_, _, err := LoadFile(dir)
+			if err == nil {
+				t.Fatalf("%s: want an error, got none", name)
+			}
+			if !strings.Contains(err.Error(), "verifyTimeoutSeconds") {
+				t.Errorf("%s: error should name the field: %v", name, err)
+			}
+		})
+	}
+}
+
+// A full, realistic .acy.json fixture including verifyCommands and
+// verifyTimeoutSeconds alongside the rest of the fleet config parses
+// cleanly under LoadFile's strict "unknown key" parsing.
+func TestLoadFileFleetVerifyFieldsCoexistWithRestOfFleetConfig(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, `{
+		"fleet": {
+			"baseBranch": "main",
+			"prCap": 4,
+			"engineerModel": "sonnet",
+			"engineerChildModel": "sonnet",
+			"engineerEffort": "medium",
+			"engineerBudgetUSD": 15,
+			"runBudgetUSD": 200,
+			"deadmanHours": 24,
+			"ticketCommit": "direct",
+			"verifyCommands": ["go build ./...", "go test -race ./...", "gofmt -l .", "golangci-lint run ./..."],
+			"verifyTimeoutSeconds": 900,
+			"hosts": [
+				{ "name": "local" },
+				{
+					"name": "box2",
+					"ssh": "you@box2.example.com",
+					"repoPath": "/home/you/proj",
+					"maxEngineers": 2,
+					"acyBin": "acy",
+					"path": ["/opt/homebrew/bin", "/home/you/.local/bin"],
+					"rc": "~/.zshrc"
+				}
+			]
+		}
+	}`)
+
+	f, found, err := LoadFile(dir)
+	if err != nil || !found {
+		t.Fatalf("LoadFile: found=%v err=%v", found, err)
+	}
+	fl := f.Fleet
+	wantCommands := []string{"go build ./...", "go test -race ./...", "gofmt -l .", "golangci-lint run ./..."}
+	if !reflect.DeepEqual(fl.VerifyCommands, wantCommands) {
+		t.Errorf("VerifyCommands = %v, want %v", fl.VerifyCommands, wantCommands)
+	}
+	if fl.VerifyTimeoutSeconds == nil || *fl.VerifyTimeoutSeconds != 900 {
+		t.Errorf("VerifyTimeoutSeconds = %v, want 900", fl.VerifyTimeoutSeconds)
+	}
+	if fl.BaseBranch != "main" || fl.TicketCommit != "direct" || len(fl.Hosts) != 2 {
+		t.Errorf("rest of fleet config disturbed by new keys: %+v", fl)
+	}
 }
 
 // Every field, explicitly set, round-trips with no defaulting applied.

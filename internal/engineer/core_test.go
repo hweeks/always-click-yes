@@ -160,6 +160,16 @@ func testSpec() engineerwire.Spec {
 // that no test but TestRunStallsAfterNudges can trip it by accident.
 func newTestCore(t *testing.T, spec engineerwire.Spec, git gitops.Runner, fs *fakeSession) (*Core, *engineerwire.Journal) {
 	t.Helper()
+	cfg, j := newTestConfig(t, spec, git, fs)
+	return NewCore(cfg, j), j
+}
+
+// newTestConfig builds the same Config newTestCore does, but hands the
+// caller the Config itself rather than an already-built Core — so a test
+// that needs to also set VerifyCommands/VerifyTimeout/VerifyRunner can do so
+// before calling NewCore, without duplicating every other field here.
+func newTestConfig(t *testing.T, spec engineerwire.Spec, git gitops.Runner, fs *fakeSession) (Config, *engineerwire.Journal) {
+	t.Helper()
 	dir := t.TempDir()
 	j, err := engineerwire.Open(dir)
 	if err != nil {
@@ -180,7 +190,7 @@ func newTestCore(t *testing.T, spec engineerwire.Spec, git gitops.Runner, fs *fa
 			return fs, func() {}, nil
 		},
 	}
-	return NewCore(cfg, j), j
+	return cfg, j
 }
 
 // journalResults returns every Result in j, in order.

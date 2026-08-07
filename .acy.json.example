@@ -7,6 +7,8 @@
     "runBudgetUSD": 200,
     "deadmanHours": 24,
     "ticketCommit": "direct",
+    "verifyCommands": ["go build ./...", "go test -race ./...", "gofmt -l .", "golangci-lint run ./..."],
+    "verifyTimeoutSeconds": 900,
     "hosts": [
       {
         "name": "example-macos",

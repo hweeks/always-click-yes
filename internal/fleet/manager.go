@@ -367,6 +367,10 @@ func buildSpec(cfg config.FleetConfig, req LaunchReq, ticket, branch string, bud
 	if cfg.DeadmanHours != nil {
 		deadman = *cfg.DeadmanHours
 	}
+	var verifyTimeout int
+	if cfg.VerifyTimeoutSeconds != nil {
+		verifyTimeout = *cfg.VerifyTimeoutSeconds
+	}
 	return engineerwire.Spec{
 		Ticket:  ticket,
 		Title:   req.Title,
@@ -382,6 +386,9 @@ func buildSpec(cfg config.FleetConfig, req LaunchReq, ticket, branch string, bud
 
 		BudgetUSD:    budget,
 		DeadmanHours: deadman,
+
+		VerifyCommands:       cfg.VerifyCommands,
+		VerifyTimeoutSeconds: verifyTimeout,
 	}
 }
 

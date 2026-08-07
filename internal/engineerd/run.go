@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"time"
 
 	"github.com/hweeks/always-click-yes/internal/alog"
 	"github.com/hweeks/always-click-yes/internal/engineer"
@@ -49,12 +50,7 @@ func RunDetachedTarget(dir string) error {
 	}
 	defer removePIDFile(dir)
 
-	core := engineer.NewCore(engineer.Config{
-		Spec:        stored.Spec,
-		EngineerID:  id,
-		ClonePath:   stored.ClonePath,
-		WorktreeDir: stored.WorktreeDir,
-	}, j)
+	core := engineer.NewCore(buildEngineerConfig(id, stored), j)
 
 	ctrl, err := ListenControl(dir, core)
 	if err != nil {
@@ -65,6 +61,24 @@ func RunDetachedTarget(dir string) error {
 	result := core.Run(context.Background())
 	alog.Printf("engineerd: engineer %s finished: outcome=%s summary=%s", id, result.Outcome, result.Summary)
 	return nil
+}
+
+// buildEngineerConfig turns a StoredSpec into the engineer.Config
+// RunDetachedTarget drives. VerifyTimeout comes out as 0 whenever
+// stored.Spec.VerifyTimeoutSeconds is 0 — an old spec.json from before that
+// field existed, or one built without going through config.FleetConfig's
+// resolve — which is a valid "no timeout" time.Duration that verify.Run
+// already treats as "bound only by ctx" per its own doc comment.
+func buildEngineerConfig(id string, stored StoredSpec) engineer.Config {
+	return engineer.Config{
+		Spec:        stored.Spec,
+		EngineerID:  id,
+		ClonePath:   stored.ClonePath,
+		WorktreeDir: stored.WorktreeDir,
+
+		VerifyCommands: stored.Spec.VerifyCommands,
+		VerifyTimeout:  time.Duration(stored.Spec.VerifyTimeoutSeconds) * time.Second,
+	}
 }
 
 func pidFilePath(dir string) string { return filepath.Join(dir, PIDFile) }

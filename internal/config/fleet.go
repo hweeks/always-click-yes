@@ -48,16 +48,24 @@ type FleetHost struct {
 // "fleet" key parses exactly as it always has — File.Fleet stays nil, and
 // nothing below runs.
 type FleetConfig struct {
-	BaseBranch         string      `json:"baseBranch,omitempty"`
-	PRCap              *int        `json:"prCap,omitempty"`
-	EngineerModel      string      `json:"engineerModel,omitempty"`
-	EngineerChildModel string      `json:"engineerChildModel,omitempty"`
-	EngineerEffort     string      `json:"engineerEffort,omitempty"`
-	EngineerBudgetUSD  *float64    `json:"engineerBudgetUSD,omitempty"`
-	RunBudgetUSD       *float64    `json:"runBudgetUSD,omitempty"`
-	DeadmanHours       *float64    `json:"deadmanHours,omitempty"`
-	TicketCommit       string      `json:"ticketCommit,omitempty"`
-	Hosts              []FleetHost `json:"hosts,omitempty"`
+	BaseBranch         string   `json:"baseBranch,omitempty"`
+	PRCap              *int     `json:"prCap,omitempty"`
+	EngineerModel      string   `json:"engineerModel,omitempty"`
+	EngineerChildModel string   `json:"engineerChildModel,omitempty"`
+	EngineerEffort     string   `json:"engineerEffort,omitempty"`
+	EngineerBudgetUSD  *float64 `json:"engineerBudgetUSD,omitempty"`
+	RunBudgetUSD       *float64 `json:"runBudgetUSD,omitempty"`
+	DeadmanHours       *float64 `json:"deadmanHours,omitempty"`
+	TicketCommit       string   `json:"ticketCommit,omitempty"`
+	// VerifyCommands are the commands acy itself runs in an engineer's
+	// worktree after the run finishes — machine-collected evidence, in
+	// contrast with the model's own claim of having run tests.
+	// internal/engineer/drive.go's finalize is what reads this.
+	VerifyCommands []string `json:"verifyCommands,omitempty"`
+	// VerifyTimeoutSeconds is the per-command wall-clock ceiling for
+	// VerifyCommands, read by the same place.
+	VerifyTimeoutSeconds *int        `json:"verifyTimeoutSeconds,omitempty"`
+	Hosts                []FleetHost `json:"hosts,omitempty"`
 }
 
 // Defaults for the fleet fields the .acy.json spec calls out by name.
@@ -68,6 +76,9 @@ const (
 	defaultTicketCommit = "direct"
 	defaultMaxEngineers = 1
 	defaultACYBin       = "acy"
+	// defaultVerifyTimeoutSeconds is 15 minutes: go test -race ./... on a
+	// loaded fleet host is not fast, which is why this isn't shorter.
+	defaultVerifyTimeoutSeconds = 900
 )
 
 // resolve fills in every default and validates the fleet config, using dir —
@@ -105,6 +116,35 @@ func (f *FleetConfig) resolve(dir, path string) error {
 	case "direct", "none":
 	default:
 		return fmt.Errorf("%s: fleet.ticketCommit must be \"direct\" or \"none\", got %q", path, f.TicketCommit)
+	}
+
+	// encoding/json leaves f.VerifyCommands nil when "verifyCommands" is
+	// absent from the source JSON entirely, but gives a non-nil, zero-length
+	// slice for an explicit "verifyCommands": []. That's exactly what lets
+	// this nil check tell "absent" (default the four commands below) apart
+	// from "explicit []" (disable verification). A later refactor to
+	// *[]string, or swapping this for a len(f.VerifyCommands) == 0 check,
+	// would silently collapse that distinction — don't make either change
+	// without re-reading this comment.
+	if f.VerifyCommands == nil {
+		f.VerifyCommands = []string{
+			"go build ./...",
+			"go test -race ./...",
+			"gofmt -l .",
+			"golangci-lint run ./...",
+		}
+	}
+	for i, cmd := range f.VerifyCommands {
+		if strings.TrimSpace(cmd) == "" {
+			return fmt.Errorf("%s: fleet.verifyCommands[%d] must not be empty", path, i)
+		}
+	}
+
+	if f.VerifyTimeoutSeconds == nil {
+		n := defaultVerifyTimeoutSeconds
+		f.VerifyTimeoutSeconds = &n
+	} else if *f.VerifyTimeoutSeconds <= 0 {
+		return fmt.Errorf("%s: fleet.verifyTimeoutSeconds must be greater than zero", path)
 	}
 
 	seen := make(map[string]bool, len(f.Hosts))
