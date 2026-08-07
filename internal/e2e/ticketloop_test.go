@@ -349,6 +349,7 @@ type ghStateEntry struct {
 	Number      int    `json:"number"`
 	URL         string `json:"url"`
 	HeadRefName string `json:"headRefName"`
+	BaseRefName string `json:"baseRefName"`
 	State       string `json:"state"`
 }
 
@@ -359,11 +360,18 @@ type ghStateEntry struct {
 // list`; this one answers from state the test controls.
 //
 // `pr create` appends one line (a distinct, incrementing PR number, its
-// --head branch, and state OPEN) and prints the PR's URL, matching real
-// gh's behavior closely enough for gitops.CreatePR to read it back
+// --head/--base branches, and state OPEN) and prints the PR's URL, matching
+// real gh's behavior closely enough for gitops.CreatePR to read it back
 // unmodified. `pr list` reprints every line as a JSON array, regardless of
 // the --json field list it was asked for — the fields the watcher requests
 // are exactly the fields this state already carries.
+//
+// It also answers `gh stack link --base <trunk> <branches...>` (recorded in
+// the argv file like every other call; prints a fixed "Stack #1 linked" line
+// — gitops.StackLink only reads the first run of digits out of it, and that
+// number is informational only) and `gh stack sync` (with or without
+// --prune; recorded, exits 0, prints nothing), for tests that drive a real
+// fleet.StackKeeper against this stub rather than only PRWatcher.
 //
 // The counter and the state file are both guarded by an mkdir-based lock,
 // the same atomic-on-any-POSIX-filesystem primitive stubGhCounting uses,
@@ -391,16 +399,21 @@ func stubGhStateful(t *testing.T) (argvFile, stateFile string) {
 		"if [ \"$1\" = pr ] && [ \"$2\" = create ]; then\n" +
 		"  shift 2\n" +
 		"  head=\"\"\n" +
+		"  base=\"\"\n" +
 		"  while [ $# -gt 0 ]; do\n" +
-		"    if [ \"$1\" = --head ]; then head=\"$2\"; shift 2; else shift; fi\n" +
+		"    case \"$1\" in\n" +
+		"      --head) head=\"$2\"; shift 2 ;;\n" +
+		"      --base) base=\"$2\"; shift 2 ;;\n" +
+		"      *) shift ;;\n" +
+		"    esac\n" +
 		"  done\n" +
 		"  lock=\"$ACY_E2E_GH_STATE.lock\"\n" +
 		"  while ! mkdir \"$lock\" 2>/dev/null; do sleep 0.05; done\n" +
 		"  n=$(cat \"$ACY_E2E_GH_COUNTER\")\n" +
 		"  n=$((n + 1))\n" +
 		"  echo \"$n\" > \"$ACY_E2E_GH_COUNTER\"\n" +
-		"  printf '{\"number\":%d,\"url\":\"https://example.invalid/pr/%d\",\"headRefName\":\"%s\",\"state\":\"OPEN\"}\\n' " +
-		"\"$n\" \"$n\" \"$head\" >> \"$ACY_E2E_GH_STATE\"\n" +
+		"  printf '{\"number\":%d,\"url\":\"https://example.invalid/pr/%d\",\"headRefName\":\"%s\",\"baseRefName\":\"%s\",\"state\":\"OPEN\"}\\n' " +
+		"\"$n\" \"$n\" \"$head\" \"$base\" >> \"$ACY_E2E_GH_STATE\"\n" +
 		"  rmdir \"$lock\"\n" +
 		"  echo \"https://example.invalid/pr/$n\"\n" +
 		"  exit 0\n" +
@@ -416,6 +429,15 @@ func stubGhStateful(t *testing.T) (argvFile, stateFile string) {
 		"  fi\n" +
 		"  rmdir \"$lock\"\n" +
 		"  printf '\\n'\n" +
+		"  exit 0\n" +
+		"fi\n" +
+		"\n" +
+		"if [ \"$1\" = stack ] && [ \"$2\" = link ]; then\n" +
+		"  echo \"Stack #1 linked\"\n" +
+		"  exit 0\n" +
+		"fi\n" +
+		"\n" +
+		"if [ \"$1\" = stack ] && [ \"$2\" = sync ]; then\n" +
 		"  exit 0\n" +
 		"fi\n" +
 		"\n" +
