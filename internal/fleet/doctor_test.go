@@ -13,6 +13,14 @@ import (
 	"github.com/hweeks/always-click-yes/internal/version"
 )
 
+// fakeExitErr satisfies gitops.ExitCode's exitCoder interface without
+// pulling in os/exec, so checkGHStack's exit-code-9 branch can be tested
+// against a canned code instead of a real process failure.
+type fakeExitErr struct{ code int }
+
+func (e fakeExitErr) Error() string { return fmt.Sprintf("exit %d", e.code) }
+func (e fakeExitErr) ExitCode() int { return e.code }
+
 // response is one scriptedRunner reply, keyed by the exact argv it answers.
 type response struct {
 	stdout, stderr string
@@ -532,18 +540,93 @@ func TestCheckState(t *testing.T) {
 	})
 }
 
+// TestCheckGHStack proves checkGHStack is informational only: every branch
+// — a working version probe, a repo that hasn't enabled the stacked-PRs
+// preview, an extension present but with an unrecognized --version flag,
+// and an extension missing entirely — reports OK:true, the same "OK
+// anyway" contract checkGo has.
+func TestCheckGHStack(t *testing.T) {
+	t.Run("version present", func(t *testing.T) {
+		sr := newScriptedRunner(map[string]response{
+			"gh stack --version": {stdout: "gh-stack version 0.1.0\n"},
+		})
+		c := checkGHStack(context.Background(), sr.run)
+		if !c.OK {
+			t.Errorf("checkGHStack = %+v, want OK", c)
+		}
+		if !strings.Contains(c.Detail, "gh-stack version 0.1.0") {
+			t.Errorf("Detail = %q, want it to report the version", c.Detail)
+		}
+	})
+
+	t.Run("preview not enabled for this repository is still OK", func(t *testing.T) {
+		sr := newScriptedRunner(map[string]response{
+			"gh stack --version": {stderr: "stacked pull requests are not enabled", err: fakeExitErr{code: 9}},
+		})
+		c := checkGHStack(context.Background(), sr.run)
+		if !c.OK {
+			t.Errorf("checkGHStack = %+v, want OK — an un-enabled preview is not a broken fleet", c)
+		}
+		if !strings.Contains(c.Detail, "not enabled") {
+			t.Errorf("Detail = %q, want it to mention the preview is not enabled", c.Detail)
+		}
+	})
+
+	t.Run("extension present but --version unsupported falls back to extension list", func(t *testing.T) {
+		sr := newScriptedRunner(map[string]response{
+			"gh stack --version": {stderr: "unknown flag: --version", err: errors.New("exit status 1")},
+			"gh extension list":  {stdout: "github/gh-stack\t0.1.0\ngithub/gh-copilot\t1.0.0\n"},
+		})
+		c := checkGHStack(context.Background(), sr.run)
+		if !c.OK {
+			t.Errorf("checkGHStack = %+v, want OK", c)
+		}
+	})
+
+	t.Run("extension missing entirely names the install fix", func(t *testing.T) {
+		sr := newScriptedRunner(map[string]response{
+			"gh stack --version": {stderr: "unknown command \"stack\"", err: errors.New("exit status 1")},
+			"gh extension list":  {stdout: "github/gh-copilot\t1.0.0\n"},
+		})
+		c := checkGHStack(context.Background(), sr.run)
+		if !c.OK {
+			t.Errorf("checkGHStack = %+v, want OK — a missing extension is not a broken fleet", c)
+		}
+		if !strings.Contains(c.Detail, "gh extension install github/gh-stack") {
+			t.Errorf("Detail = %q, want it to name the install fix", c.Detail)
+		}
+	})
+
+	t.Run("both calls fail", func(t *testing.T) {
+		sr := newScriptedRunner(map[string]response{
+			"gh stack --version": {stderr: "unknown command \"stack\"", err: errors.New("exit status 1")},
+			"gh extension list":  {stderr: "not authenticated", err: errors.New("exit status 1")},
+		})
+		c := checkGHStack(context.Background(), sr.run)
+		if !c.OK {
+			t.Errorf("checkGHStack = %+v, want OK", c)
+		}
+		if !strings.Contains(c.Detail, "gh extension install github/gh-stack") {
+			t.Errorf("Detail = %q, want it to name the install fix", c.Detail)
+		}
+	})
+}
+
 func TestDoctorWithShortCircuitsOnSSHFailure(t *testing.T) {
 	sr := newScriptedRunner(map[string]response{
 		"true": {stderr: "Could not resolve hostname", err: errors.New("exit status 255")},
 	})
-	checks := doctorWith(context.Background(), config.FleetHost{SSH: "nowhere"}, "main", sr.run, sr.run, sr.run)
+	local := newScriptedRunner(map[string]response{
+		"gh stack --version": {stdout: "gh-stack version 0.1.0\n"},
+	})
+	checks := doctorWith(context.Background(), config.FleetHost{SSH: "nowhere"}, "main", sr.run, sr.run, sr.run, local.run)
 	if len(checks) != len(checkNames) {
 		t.Fatalf("got %d checks, want %d", len(checks), len(checkNames))
 	}
 	if checks[0].Name != "ssh" || checks[0].OK {
 		t.Fatalf("checks[0] = %+v", checks[0])
 	}
-	for _, c := range checks[1:] {
+	for _, c := range checks[1 : len(checks)-1] {
 		if c.OK {
 			t.Errorf("%s should be skipped, not OK: %+v", c.Name, c)
 		}
@@ -551,8 +634,18 @@ func TestDoctorWithShortCircuitsOnSSHFailure(t *testing.T) {
 			t.Errorf("%s Detail = %q, want it to say skipped", c.Name, c.Detail)
 		}
 	}
+	last := checks[len(checks)-1]
+	if last.Name != "stack" || !last.OK {
+		t.Fatalf("last check = %+v, want stack/OK — an unreachable remote host says nothing about the local machine", last)
+	}
+	if strings.Contains(last.Detail, "skipped") {
+		t.Errorf("stack Detail = %q, should not be reported as skipped", last.Detail)
+	}
 	if len(sr.calls) != 1 {
-		t.Errorf("only the ssh check should have run a command, got %v", sr.calls)
+		t.Errorf("only the ssh check should have run a command against the remote host, got %v", sr.calls)
+	}
+	if len(local.calls) != 1 {
+		t.Errorf("stack check should still probe the local machine, got %v", local.calls)
 	}
 }
 
@@ -569,8 +662,11 @@ func TestDoctorWithRunsEveryCheckInOrder(t *testing.T) {
 		"git -C /srv/repo ls-remote --exit-code origin main": {},
 		"sh -c " + stateProbeScript:                          {},
 	})
+	localRunner := newScriptedRunner(map[string]response{
+		"gh stack --version": {stdout: "gh-stack version 0.1.0\n"},
+	})
 	h := config.FleetHost{SSH: "box1", ACYBin: "acy", RepoPath: "/srv/repo"}
-	checks := doctorWith(context.Background(), h, "main", sr.run, sr.run, sr.run)
+	checks := doctorWith(context.Background(), h, "main", sr.run, sr.run, sr.run, localRunner.run)
 	if len(checks) != len(checkNames) {
 		t.Fatalf("got %d checks, want %d", len(checks), len(checkNames))
 	}
@@ -607,8 +703,11 @@ func TestDoctorWithRunsRemainingChecksThroughPathOnlyWhenRcBroken(t *testing.T) 
 		"git -C /srv/repo ls-remote --exit-code origin main": {},
 		"sh -c " + stateProbeScript:                          {},
 	})
+	localRunner := newScriptedRunner(map[string]response{
+		"gh stack --version": {stdout: "gh-stack version 0.1.0\n"},
+	})
 	h := config.FleetHost{SSH: "spark", ACYBin: "acy", RepoPath: "/srv/repo", Rc: "~/.bashrc"}
-	checks := doctorWith(context.Background(), h, "main", bare.run, pathOnly.run, full.run)
+	checks := doctorWith(context.Background(), h, "main", bare.run, pathOnly.run, full.run, localRunner.run)
 
 	if len(checks) != len(checkNames) {
 		t.Fatalf("got %d checks, want %d", len(checks), len(checkNames))

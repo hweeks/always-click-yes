@@ -91,7 +91,7 @@ func TestFleetDoctorJSONLocalEndToEnd(t *testing.T) {
 	if len(reports) != 1 || reports[0].Host != "local" {
 		t.Fatalf("reports = %+v", reports)
 	}
-	wantNames := []string{"ssh", "acy", "claude", "gh", "go", "repo", "state"}
+	wantNames := []string{"ssh", "acy", "claude", "gh", "go", "repo", "state", "stack"}
 	if len(reports[0].Checks) != len(wantNames) {
 		t.Fatalf("checks = %+v, want %d entries", reports[0].Checks, len(wantNames))
 	}

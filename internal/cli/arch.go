@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/spf13/cobra"
@@ -23,6 +24,10 @@ import (
 // its budget launching and reacting to engineers rather than writing prose,
 // so the stronger default is worth it in a way it might not be for `run`.
 const defaultArchModel = "opus"
+
+// stackProbeTimeout bounds resolveStackMode's gh-stack availability probe. A
+// `gh stack --version` check has no business taking longer than this.
+const stackProbeTimeout = 5 * time.Second
 
 func newArchCmd() *cobra.Command {
 	var f supervisor.Flags
@@ -79,6 +84,45 @@ func resolveArchFlags(f *supervisor.Flags, changed func(string) bool) (*config.F
 	return file.Fleet, nil
 }
 
+// resolveStackMode decides the effective fleet.stackMode for this run,
+// probing gh-stack's availability whenever the config asks for anything but
+// "off". The probe is bounded by timeout so a wedged `gh` at startup cannot
+// wedge `acy arch` itself — a timeout is just another probe failure, not a
+// distinct case.
+//
+// "ask" and "chain" deliberately diverge once the probe fails. "ask" means
+// the architect may *offer* stacking to a human during planning; an
+// architect must never ask a human to choose an option it cannot then
+// perform, so an unavailable probe silently downgrades the effective mode to
+// "off" and returns an explanatory note instead of an error — the run itself
+// must not be blocked over this. "chain" means an operator explicitly
+// decided stacking is mandatory for this run; silently substituting "off"
+// there would hide that decision from them, so this returns a hard,
+// actionable error instead of a note.
+func resolveStackMode(ctx context.Context, cfg *config.FleetConfig, run gitops.Runner, dir string, timeout time.Duration) (mode, note string, err error) {
+	if cfg.StackMode == "off" {
+		return "off", "", nil
+	}
+
+	probeCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	probeErr := gitops.StackAvailable(probeCtx, run, dir)
+	if probeErr == nil {
+		return cfg.StackMode, "", nil
+	}
+
+	reason := "the gh-stack extension isn't usable — install it with `gh extension install github/gh-stack`"
+	if errors.Is(probeErr, gitops.ErrStackNotEnabled) {
+		reason = "stacked pull requests are a public preview feature and must be enabled for this repository"
+	}
+
+	if cfg.StackMode == "chain" {
+		return "", "", fmt.Errorf("acy arch: fleet.stackMode is \"chain\" but %s: %w", reason, probeErr)
+	}
+
+	return "off", fmt.Sprintf("fleet.stackMode is %q, but %s, so this run starts with stacking off.", cfg.StackMode, reason), nil
+}
+
 // runArch is runSupervisor's arch-mode sibling: the same overlay, the same
 // budget check, the same tea.Program path, plus the fleet manager arch mode
 // needs and requires.
@@ -100,6 +144,13 @@ func runArch(ctx context.Context, f supervisor.Flags, changed func(string) bool)
 			return err
 		}
 	}
+
+	mode, note, err := resolveStackMode(ctx, fleetCfg, gitops.DefaultRunner, cwd, stackProbeTimeout)
+	if err != nil {
+		return err
+	}
+	fleetCfg.StackMode = mode
+	f.StartupNote = note
 
 	prCap := 0
 	if fleetCfg.PRCap != nil {
