@@ -305,6 +305,8 @@ func (m Model) update(msg tea.Msg) (Model, tea.Cmd) {
 			m.startAnswerEngineer(msg.p)
 		case mcp.ToolFleetStatus:
 			m.startFleetStatus(msg.p)
+		case mcp.ToolAssembleStack:
+			m.startAssembleStack(msg.p)
 		case mcp.ToolReadTickets:
 			m.startReadTickets(msg.p)
 		case mcp.ToolUpdateTicket:

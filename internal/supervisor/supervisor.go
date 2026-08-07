@@ -19,6 +19,7 @@ import (
 	"github.com/hweeks/always-click-yes/internal/fleet"
 	"github.com/hweeks/always-click-yes/internal/gate"
 	"github.com/hweeks/always-click-yes/internal/gateway"
+	"github.com/hweeks/always-click-yes/internal/gitops"
 	"github.com/hweeks/always-click-yes/internal/mcp"
 	"github.com/hweeks/always-click-yes/internal/orchestrator"
 	"github.com/hweeks/always-click-yes/internal/session"
@@ -106,6 +107,16 @@ type Flags struct {
 	// architect's system prompt can say the right thing about whether
 	// stacking is on offer.
 	StackMode string
+
+	// GitRunner is AssembleStack's git/gh runner. Not a flag: `acy arch` is
+	// the only caller that sets it, alongside Fleet — it always passes
+	// gitops.DefaultRunner.
+	GitRunner gitops.Runner
+
+	// Trunk is the fleet's resolved base branch, the trunk AssembleStack
+	// rebases and links against. Not a flag: `acy arch` is the only caller
+	// that sets it, alongside Fleet/StackMode.
+	Trunk string
 
 	// RenderHTML asks each transcript entry to carry a server-rendered HTML
 	// fragment (ui.Frame.Entries[].HTML). Not a flag either: `acy serve` stamps
@@ -587,6 +598,9 @@ func NewSupervisor(ctx context.Context, f Flags) (*Supervisor, error) {
 		Dispatcher:  orch,
 		Fleet:       f.Fleet,
 		Tickets:     f.Tickets,
+		GitRunner:   f.GitRunner,
+		Trunk:       f.Trunk,
+		StackMode:   f.StackMode,
 		LoadState:   state.Load,
 		SaveState:   state.Save,
 		Replay:      func(id string) ([]driver.Event, error) { return session.Replay(cwd, id) },

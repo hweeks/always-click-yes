@@ -41,6 +41,7 @@ const (
 	ToolAwait          = "Await"
 	ToolAnswerEngineer = "AnswerEngineer"
 	ToolFleetStatus    = "FleetStatus"
+	ToolAssembleStack  = "AssembleStack"
 
 	ToolReadTickets  = "ReadTickets"
 	ToolUpdateTicket = "UpdateTicket"
@@ -262,6 +263,7 @@ func toolDefs(role Role) []toolDef {
 		toolDef{Name: ToolAwait, Description: awaitDescription, InputSchema: json.RawMessage(awaitSchema)},
 		toolDef{Name: ToolAnswerEngineer, Description: answerEngineerDescription, InputSchema: json.RawMessage(answerEngineerSchema)},
 		toolDef{Name: ToolFleetStatus, Description: fleetStatusDescription, InputSchema: json.RawMessage(fleetStatusSchema)},
+		toolDef{Name: ToolAssembleStack, Description: assembleStackDescription, InputSchema: json.RawMessage(assembleStackSchema)},
 		toolDef{Name: ToolReadTickets, Description: readTicketsDescription, InputSchema: json.RawMessage(readTicketsSchema)},
 		toolDef{Name: ToolUpdateTicket, Description: updateTicketDescription, InputSchema: json.RawMessage(updateTicketSchema)},
 		toolDef{Name: ToolCreateTicket, Description: createTicketDescription, InputSchema: json.RawMessage(createTicketSchema)},
@@ -450,6 +452,47 @@ const fleetStatusSchema = `{
   "properties": {}
 }`
 
+// assembleStackDescription is the architect's other half of the breadth-then-
+// depth loop: LaunchEngineer/Await/AnswerEngineer/FleetStatus run tickets one
+// at a time or in a hand-declared chain (stack_on), while AssembleStack folds
+// several already-finished, already-independent tickets' open PRs into one
+// stack after the fact — the fan-out equivalent of stack_on's fan-in.
+//
+// The code-independence sentence is the load-bearing part: this tool can
+// rewrite history to be linear, but it cannot make a verification real that
+// wasn't real at PR time. If ticket B's engineer wrote against a symbol
+// ticket A's engineer was adding, B's own build/test run already either
+// failed (and the ticket isn't actually done) or silently succeeded against
+// stale code — rebasing B onto A afterward doesn't rerun that verification,
+// it just makes the mistake look tidy.
+const assembleStackDescription = "Fold several already-finished, independent tickets' open PRs into " +
+	"one GitHub stack. Give ticket ids (not branch names), bottom-to-top: each must already be " +
+	"finished with an open PR launched against trunk, not already itself part of a stack. The " +
+	"tickets must be genuinely code-independent of each other — if one engineer wrote against a " +
+	"symbol another was adding, that engineer's own verification already failed at PR time, and " +
+	"this tool cannot make that verification real by rebasing afterward; use stack_on at launch " +
+	"time instead when a ticket genuinely depends on another's work. Runs in a scratch worktree, " +
+	"never your own checkout, and force-pushes every branch — safely, because gh stack push's own " +
+	"per-branch --force-with-lease rejects anything it doesn't recognize. On success, answers with " +
+	"the new stack's number and its top PR's URL. On a rebase conflict, stop and escalate to a " +
+	"human rather than retry."
+
+// assembleStackSchema is the parameter shape the architect sees for
+// AssembleStack.
+const assembleStackSchema = `{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["tickets"],
+  "properties": {
+    "tickets": {
+      "type": "array",
+      "minItems": 2,
+      "items": {"type": "string"},
+      "description": "Ticket ids (not branch names), ordered bottom-to-top. Each must already be finished with an open PR launched against trunk, not already part of a stack — and the tickets must be genuinely code-independent: if one engineer wrote against a symbol another was adding, its own verification already failed at PR time, and folding the PRs afterward cannot make that verification real."
+    }
+  }
+}`
+
 // LaunchNotArmed is returned when the architect calls LaunchEngineer before the
 // human has armed the run. Mirrors DispatchNotArmed: launching an engineer
 // starts real unattended work on a real machine, and only a human's Ctrl+G
@@ -457,6 +500,14 @@ const fleetStatusSchema = `{
 const LaunchNotArmed = "LaunchEngineer is not available yet: this run has not been armed.\n\n" +
 	"Launching engineers starts real, unattended work on real machines. A human reads your plan and " +
 	"presses Ctrl+G, and that keystroke is the only thing that starts it. Present your plan and stop."
+
+// AssembleStackNotArmed is returned when the architect calls AssembleStack
+// before the human has armed the run. Mirrors LaunchNotArmed: folding several
+// open PRs into a stack force-pushes real branches on GitHub, and only a
+// human's Ctrl+G starts that.
+const AssembleStackNotArmed = "AssembleStack is not available yet: this run has not been armed.\n\n" +
+	"Assembling a stack force-pushes real branches on GitHub. A human reads your plan and presses " +
+	"Ctrl+G, and that keystroke is the only thing that starts it. Present your plan and stop."
 
 // AwaitNothingRunning is returned when the architect calls Await with nothing
 // that could ever produce an event: no engineer running and no PR open.

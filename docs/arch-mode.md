@@ -335,20 +335,41 @@ system prompt in place of the parent's. The flow:
    merge. `FleetStatus` gives it (and you, via `/fleet`) a non-blocking snapshot of
    every engineer's state, host, branch, PR and cost without waiting for the next
    event.
-5. **PR-cap backpressure.** <a name="pr-cap-backpressure"></a> Once `prCap` PRs are
+5. **Breadth, then depth: `AssembleStack`.** `stack_on` (steps 2 and 4) declares a stack
+   up front, one launch at a time. `AssembleStack` is the other direction: launch
+   several independent tickets wide against trunk — no `stack_on` — up to capacity,
+   and once each has finished with its own open PR, `AssembleStack` folds their
+   branches into one stack after the fact, bottom-to-top by ticket id, answering with
+   the new stack's number and its top PR's URL. That top PR can then be the `stack_on`
+   target of a further ticket that genuinely needs all of them, so breadth becomes the
+   base of later depth. It only ever runs against tickets that are already finished,
+   already have an open PR against trunk, and are not already part of a stack — and,
+   critically, it only makes sense when those tickets never touched each other's code.
+   If one engineer wrote against a symbol another was adding, that engineer's own
+   verification already failed at PR time (or silently passed against stale code), and
+   folding the PRs together afterward makes the git history linear without making that
+   verification real. Use `stack_on` at launch time instead whenever a ticket genuinely
+   depends on another's work. `AssembleStack` runs `gh stack` entirely in a scratch
+   worktree it creates and tears down itself — never the operator's own checkout — and
+   force-pushes every branch it touches, safely, because `gh stack push`'s own
+   per-branch `--force-with-lease` rejects anything it doesn't recognize. A rebase
+   conflict during assembly is not retried: the architect is told to stop and escalate
+   to a human, the same rule `StackAssemble`'s own doc comment gives for any stack
+   rebase conflict.
+6. **PR-cap backpressure.** <a name="pr-cap-backpressure"></a> Once `prCap` PRs are
    open, `LaunchEngineer` refuses with a message telling the architect to `Await`
    merges first. This is deliberate: it's the difference between a fleet that keeps
    working ahead of what a human can review, and one that piles up PRs faster than
    anyone can merge them. Raise `prCap` if you actually have the review bandwidth for
    it, not as a way around the refusal.
-6. **Merge-driven ticket updates.** `internal/fleet`'s `PRWatcher` polls `gh pr list`
+7. **Merge-driven ticket updates.** `internal/fleet`'s `PRWatcher` polls `gh pr list`
    and turns a merged or closed `acy/`-headed PR into a fleet event, but nothing in
    `fleet` or `ui` writes the ticket board on its own — the architect's system prompt
    tells it to call `UpdateTicket` at every transition (launch → in-progress → PR
    opened → in-review → merged, or blocked with a note), so the board is prompt-driven
    state, not code-driven state. `/tickets` shows you the same board the architect
    reads.
-7. **Finish.** The architect calls `Finish` once every ticket is merged or otherwise
+8. **Finish.** The architect calls `Finish` once every ticket is merged or otherwise
    accounted for (blocked with a note is accounted for; silently unmentioned isn't).
 
 ## Resuming after a crash
