@@ -103,6 +103,7 @@ const (
 	KindReconnected                  // Follow reattached after a drop
 	KindFailed                       // terminal: Start failed, or the engineer was cancelled
 	KindPR                           // wraps a PREvent from a PRWatcher; never dropped, like a result
+	KindStack                        // wraps a *StackEvent from a StackKeeper; never dropped, like KindPR
 )
 
 // Event is anything an engineer produces, tagged with which one it came
@@ -121,6 +122,7 @@ type Event struct {
 	Question *engineerwire.Question
 	Result   *engineerwire.Result
 	PR       *PREvent
+	Stack    *StackEvent
 
 	Gap     int64
 	Attempt int
@@ -213,6 +215,7 @@ type Manager struct {
 	prWatcher       *PRWatcher
 	prCap           int
 	prWatcherCancel context.CancelFunc // stops the forwarding goroutine; nil unless WithPRWatcher was used
+	stackKeeper     *StackKeeper
 
 	mu       sync.Mutex
 	seq      int
@@ -277,6 +280,17 @@ func WithPRWatcher(w *PRWatcher, prCap int) Option {
 	}
 }
 
+// WithStackKeeper wires k into forwardPRWatcher so an arch-mode chain gets
+// registered as a real GitHub stack as its PRs open, and repaired with a
+// sync whenever a merge lands on trunk underneath it. k is reacted to only
+// inside forwardPRWatcher's own goroutine, so there is exactly one caller of
+// Link/Sync and no need for StackKeeper to guard against concurrent calls
+// itself. A WithStackKeeper with no WithPRWatcher is simply inert — nothing
+// ever calls reactToStackTrigger without a watcher forwarding PREvents.
+func WithStackKeeper(k *StackKeeper) Option {
+	return func(m *Manager) { m.stackKeeper = k }
+}
+
 // NewManager builds a Manager for cfg. transports is injectable so tests can
 // supply fakes instead of real processes; a nil transports defaults to
 // ForHost.
@@ -331,7 +345,57 @@ func (m *Manager) forwardPRWatcher(ctx context.Context) {
 			}
 			pr := ev
 			m.emit(Event{Kind: KindPR, PR: &pr})
+			if m.stackKeeper != nil {
+				m.reactToStackTrigger(ctx, pr)
+			}
 		}
+	}
+}
+
+// reactToStackTrigger decides, from one PREvent, whether m.stackKeeper has
+// anything to do: a newly opened mid-stack PR needs registering, and any
+// merge into trunk needs a repair sync. A merge into another acy/* branch
+// (mid-stack) must never trigger a sync — an atomic stack merge reports each
+// of its own PRs merging in turn, and reacting to every one of them would
+// set off a rebase storm; only the merge that actually lands on trunk changes
+// what the remaining chain needs to rebase onto.
+func (m *Manager) reactToStackTrigger(ctx context.Context, ev PREvent) {
+	switch {
+	case ev.State == "open" && strings.HasPrefix(ev.Base, prHeadPrefix):
+		m.reactToStackOpen(ctx, ev)
+	case ev.State == "merged" && ev.Base == m.stackKeeper.trunk:
+		m.logAndMaybeEmitStack(m.stackKeeper.Sync(ctx))
+	}
+}
+
+func (m *Manager) reactToStackOpen(ctx context.Context, ev PREvent) {
+	branches := m.ChainForBranch(ev.Head)
+	if len(branches) < 2 {
+		return // no chain yet, or a root with no stacked child (nothing to register)
+	}
+	m.logAndMaybeEmitStack(m.stackKeeper.Link(ctx, branches))
+}
+
+// logAndMaybeEmitStack applies the package's failure-handling rule for a
+// StackEvent: success and an ErrStackConflict both reach the architect via
+// KindStack (conflict must stop and surface to a human — never auto-resolve,
+// never retried on a timer, only whatever the next natural PREvent triggers
+// again). ErrStackLocked and any other gh failure are only logged, exactly
+// PRWatcher.Run's "log and skip" discipline — a week-long unattended run must
+// survive gh being briefly unreachable or another process briefly holding
+// the stack lock.
+func (m *Manager) logAndMaybeEmitStack(ev StackEvent) {
+	switch {
+	case ev.Err == nil:
+		alog.Printf("fleet: stack %s ok", ev.Op)
+		m.emit(Event{Kind: KindStack, Stack: &ev})
+	case errors.Is(ev.Err, gitops.ErrStackConflict):
+		alog.Printf("fleet: stack %s conflict on %q: %v", ev.Op, ev.Branch, ev.Err)
+		m.emit(Event{Kind: KindStack, Stack: &ev})
+	case errors.Is(ev.Err, gitops.ErrStackLocked):
+		alog.Printf("fleet: stack %s: locked by another process, will retry on the next trigger: %v", ev.Op, ev.Err)
+	default:
+		alog.Printf("fleet: stack %s failed: %v", ev.Op, ev.Err)
 	}
 }
 
@@ -631,6 +695,17 @@ func (m *Manager) findByTicketLocked(ticket string) *engineer {
 	return nil
 }
 
+// findByBranchLocked returns the most recently launched ledger entry whose
+// branch is branch, or nil. Callers hold m.mu.
+func (m *Manager) findByBranchLocked(branch string) *engineer {
+	for i := len(m.ledger) - 1; i >= 0; i-- {
+		if m.ledger[i].branch == branch {
+			return m.ledger[i]
+		}
+	}
+	return nil
+}
+
 // childOfLocked returns parent's child in its chain, if it has one. A
 // parent not yet part of any chain (stackID == "") cannot have a child.
 // Callers hold m.mu.
@@ -889,6 +964,11 @@ func (m *Manager) Answer(engineerID, questionID, text string) error {
 // smaller than that still leaves Follow's loop stopped promptly.
 const cancelGrace = 50 * time.Millisecond
 
+// stackKeeperCloseTimeout bounds how long Close waits for the stack
+// keeper's worktree removal before giving up and shutting down anyway — a
+// stuck `git worktree remove` must not hang the whole fleet's shutdown.
+const stackKeeperCloseTimeout = 10 * time.Second
+
 // Cancel stops one engineer: it forwards an engineerwire.Cancel over the
 // same answers channel Follow already drains, then — after cancelGrace, so
 // that message has a real chance to reach the wire — ends engCtx so
@@ -970,12 +1050,31 @@ func (m *Manager) Statuses() []EngineerStatus {
 func (m *Manager) Chain(stackID string) []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.chainLocked(stackID)
+}
+
+// chainLocked is Chain's body, shared with ChainForBranch. Callers hold m.mu.
+func (m *Manager) chainLocked(stackID string) []string {
 	chain := m.chains[stackID]
 	out := make([]string, len(chain))
 	for i, eng := range chain {
 		out[i] = eng.branch
 	}
 	return out
+}
+
+// ChainForBranch is Chain, looked up by one of the chain's own branches
+// rather than its stack id — what reactToStackOpen needs when all a PREvent
+// hands it is the head branch that just opened a PR. Empty if branch is
+// unknown or belongs to no chain.
+func (m *Manager) ChainForBranch(branch string) []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	eng := m.findByBranchLocked(branch)
+	if eng == nil || eng.stackID == "" {
+		return nil
+	}
+	return m.chainLocked(eng.stackID)
 }
 
 // Ledger is the run's engineers in the form the snapshot stores — the fleet's
@@ -1186,6 +1285,11 @@ func (m *Manager) Close() {
 	}
 	m.CancelAll("the fleet is shutting down")
 	m.wg.Wait()
+	if m.stackKeeper != nil {
+		closeCtx, cancel := context.WithTimeout(context.Background(), stackKeeperCloseTimeout)
+		m.stackKeeper.Close(closeCtx)
+		cancel()
+	}
 	m.baseCancel()
 	close(m.events)
 }
