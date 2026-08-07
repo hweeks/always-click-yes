@@ -57,6 +57,9 @@ func TestLoadFileFleetDefaults(t *testing.T) {
 	if fl.TicketCommit != "direct" {
 		t.Errorf("TicketCommit = %q, want direct", fl.TicketCommit)
 	}
+	if fl.StackMode != "ask" {
+		t.Errorf("StackMode = %q, want ask", fl.StackMode)
+	}
 	if len(fl.Hosts) != 1 {
 		t.Fatalf("Hosts = %+v, want 1 entry", fl.Hosts)
 	}
@@ -198,6 +201,7 @@ func TestLoadFileFleetExplicitValues(t *testing.T) {
 			"runBudgetUSD": 100,
 			"deadmanHours": 6,
 			"ticketCommit": "none",
+			"stackMode": "chain",
 			"hosts": [
 				{"name": "local", "maxEngineers": 3},
 				{"name": "box1", "ssh": "user@box1", "repoPath": "/srv/repo", "maxEngineers": 2, "acyBin": "/opt/acy", "path": ["/opt/homebrew/bin", "/home/box1/.local/bin"], "rc": "~/.bashrc", "shell": "bash"}
@@ -230,6 +234,9 @@ func TestLoadFileFleetExplicitValues(t *testing.T) {
 	}
 	if fl.TicketCommit != "none" {
 		t.Errorf("TicketCommit = %q", fl.TicketCommit)
+	}
+	if fl.StackMode != "chain" {
+		t.Errorf("StackMode = %q, want chain", fl.StackMode)
 	}
 	if len(fl.Hosts) != 2 {
 		t.Fatalf("Hosts = %+v", fl.Hosts)
@@ -273,6 +280,7 @@ func TestLoadFileFleetRejectsBadInput(t *testing.T) {
 		"ssh without repoPath":         `{"fleet": {"hosts": [{"name": "a", "ssh": "user@host"}]}}`,
 		"host missing a name":          `{"fleet": {"hosts": [{"ssh": "user@host", "repoPath": "/x"}]}}`,
 		"bad ticketCommit":             `{"fleet": {"ticketCommit": "sideways"}}`,
+		"bad stackMode":                `{"fleet": {"stackMode": "sideways"}}`,
 		"negative prCap":               `{"fleet": {"prCap": -1}}`,
 		"negative deadman":             `{"fleet": {"deadmanHours": -1}}`,
 		"negative engineer budget":     `{"fleet": {"engineerBudgetUSD": -1}}`,
@@ -311,6 +319,24 @@ func TestLoadFileFleetPRCapZeroIsAllowed(t *testing.T) {
 	}
 	if f.Fleet.PRCap == nil || *f.Fleet.PRCap != 0 {
 		t.Errorf("PRCap = %v, want explicit 0", f.Fleet.PRCap)
+	}
+}
+
+// Each of the three valid stackMode values is accepted verbatim when set
+// explicitly, with no error.
+func TestLoadFileFleetStackModeAcceptsValidValues(t *testing.T) {
+	for _, mode := range []string{"off", "ask", "chain"} {
+		t.Run(mode, func(t *testing.T) {
+			dir := t.TempDir()
+			writeFile(t, dir, `{"fleet": {"stackMode": "`+mode+`"}}`)
+			f, _, err := LoadFile(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if f.Fleet.StackMode != mode {
+				t.Errorf("StackMode = %q, want %q", f.Fleet.StackMode, mode)
+			}
+		})
 	}
 }
 

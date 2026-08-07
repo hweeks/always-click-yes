@@ -301,6 +301,13 @@ func (c *Core) exitReason(ctx context.Context) string {
 // called. Without this line a capable child reaches for `gh pr create` on its
 // own initiative — standard PR etiquette for a coding agent — and drive's own
 // PR ends up a duplicate.
+//
+// When the spec carries a StackTrunk, this engineer's branch is stacked on
+// another engineer's still-open PR rather than on trunk directly. The
+// architect is the only thing tracking which PR chains onto which, so it
+// alone owns the stack's linearity — a session that "helpfully" rebases onto
+// main, resets its branch, or merges trunk in would silently break that
+// chain out from under the architect, with no signal that it happened.
 func briefText(spec engineerwire.Spec) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Ticket: %s\nTitle: %s\n\n%s\n\nSuccess criteria:\n%s\n\n",
@@ -308,6 +315,11 @@ func briefText(spec engineerwire.Spec) string {
 	b.WriteString("Plan briefly, then wait; the run will be armed for you. Commit your work locally, " +
 		"but do not push the branch or open a pull request yourself: pushing and opening the PR happen " +
 		"automatically once you call Finish.")
+	if spec.StackTrunk != "" {
+		fmt.Fprintf(&b, " Your branch is stacked on %s, which is itself an open pull request not yet "+
+			"merged to trunk: do not rebase your branch, reset it, or merge trunk (or anything else) into it.",
+			spec.BaseBranch)
+	}
 	return b.String()
 }
 

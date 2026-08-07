@@ -57,6 +57,7 @@ type FleetConfig struct {
 	RunBudgetUSD       *float64 `json:"runBudgetUSD,omitempty"`
 	DeadmanHours       *float64 `json:"deadmanHours,omitempty"`
 	TicketCommit       string   `json:"ticketCommit,omitempty"`
+	StackMode          string   `json:"stackMode,omitempty"`
 	// VerifyCommands are the commands acy itself runs in an engineer's
 	// worktree after the run finishes — machine-collected evidence, in
 	// contrast with the model's own claim of having run tests.
@@ -74,6 +75,7 @@ const (
 	defaultPRCap        = 4
 	defaultDeadmanHours = 24.0
 	defaultTicketCommit = "direct"
+	defaultStackMode    = "ask"
 	defaultMaxEngineers = 1
 	defaultACYBin       = "acy"
 	// defaultVerifyTimeoutSeconds is 15 minutes: go test -race ./... on a
@@ -116,6 +118,18 @@ func (f *FleetConfig) resolve(dir, path string) error {
 	case "direct", "none":
 	default:
 		return fmt.Errorf("%s: fleet.ticketCommit must be \"direct\" or \"none\", got %q", path, f.TicketCommit)
+	}
+
+	// The default is deliberately "ask", not "off": existing arch users get
+	// one extra planning question after this change lands. That's
+	// intentional, not a bug — don't "fix" it by silently defaulting to
+	// "off".
+	switch f.StackMode {
+	case "":
+		f.StackMode = defaultStackMode
+	case "off", "ask", "chain":
+	default:
+		return fmt.Errorf("%s: fleet.stackMode must be \"off\", \"ask\", or \"chain\", got %q", path, f.StackMode)
 	}
 
 	// encoding/json leaves f.VerifyCommands nil when "verifyCommands" is

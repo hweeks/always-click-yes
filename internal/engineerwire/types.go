@@ -46,6 +46,15 @@ type Spec struct {
 	BaseBranch string `json:"base_branch"`
 	Branch     string `json:"branch"`
 
+	// StackTrunk is set when BaseBranch names another engineer's branch
+	// rather than the real trunk the whole stack lands on — it carries that
+	// real trunk's name. It is purely informational: used for the brief text
+	// and PR footer (later tickets), and must never be read by any
+	// git-affecting logic. This is an additive optional field; an older
+	// engineer binary that doesn't know about it will just ignore it, so
+	// ProtocolVersion does not need to change.
+	StackTrunk string `json:"stack_trunk,omitempty"`
+
 	Model       string `json:"model,omitempty"`
 	ChildModel  string `json:"child_model,omitempty"`
 	ChildEffort string `json:"child_effort,omitempty"`
