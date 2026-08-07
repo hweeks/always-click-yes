@@ -840,7 +840,7 @@ func TestBuildSpecCarriesVerifyConfig(t *testing.T) {
 	cfg.VerifyCommands = []string{"go build ./...", "go test ./..."}
 	cfg.VerifyTimeoutSeconds = new(120)
 
-	spec := buildSpec(cfg, LaunchReq{Ticket: "T1"}, "T1", "eng/t1", 1.0)
+	spec := buildSpec(cfg, LaunchReq{Ticket: "T1"}, "T1", "eng/t1", cfg.BaseBranch, "", 1.0)
 
 	if got, want := spec.VerifyCommands, cfg.VerifyCommands; len(got) != len(want) {
 		t.Fatalf("VerifyCommands = %v, want %v", got, want)
@@ -863,9 +863,339 @@ func TestBuildSpecVerifyTimeoutNilDefaultsToZero(t *testing.T) {
 	cfg := testFleetConfig(testHost("a", 1))
 	cfg.VerifyTimeoutSeconds = nil
 
-	spec := buildSpec(cfg, LaunchReq{Ticket: "T1"}, "T1", "eng/t1", 1.0)
+	spec := buildSpec(cfg, LaunchReq{Ticket: "T1"}, "T1", "eng/t1", cfg.BaseBranch, "", 1.0)
 
 	if spec.VerifyTimeoutSeconds != 0 {
 		t.Errorf("VerifyTimeoutSeconds = %d, want 0", spec.VerifyTimeoutSeconds)
+	}
+}
+
+// --- stacked launches ---
+
+// finishEngineer sends a completed Result with prURL on ticket's mock
+// engine and waits for it to reach StateDone — the shared setup every
+// stacking test needs before a child can stack on that ticket.
+func finishEngineer(t *testing.T, m *Manager, mt *mockTransport, ticket, prURL string) {
+	t.Helper()
+	mt.byTicket[ticket].send(engineerwire.Result{Outcome: "completed", PRURL: prURL})
+	waitFor(t, time.Second, func() bool {
+		for _, st := range m.Statuses() {
+			if st.Ticket == ticket {
+				return st.State == StateDone
+			}
+		}
+		return false
+	})
+}
+
+// A stacked launch's Spec targets the parent's own branch as its base and
+// the fleet's real trunk as StackTrunk, and the returned status records
+// which chain it joined and what it sits on top of.
+func TestManagerLaunchStackedCarriesParentBranchAndTrunk(t *testing.T) {
+	mt := newMockTransport()
+	cfg := testFleetConfig(testHost("a", 2))
+	cfg.StackMode = "chain"
+	m := NewManager(cfg, mt.forHost)
+	t.Cleanup(m.Close)
+
+	parentSt, err := m.Launch(context.Background(), LaunchReq{Ticket: "T1"})
+	if err != nil {
+		t.Fatalf("Launch parent: %v", err)
+	}
+	drainEvent(t, m, time.Second) // KindStarted
+	finishEngineer(t, m, mt, "T1", "https://example/pr/1")
+	drainEvent(t, m, time.Second) // KindResult
+
+	childSt, err := m.Launch(context.Background(), LaunchReq{Ticket: "T2", StackOn: "T1"})
+	if err != nil {
+		t.Fatalf("Launch child: %v", err)
+	}
+
+	spec := mt.specFor("T2")
+	if spec.BaseBranch != parentSt.Branch {
+		t.Errorf("child BaseBranch = %q, want parent branch %q", spec.BaseBranch, parentSt.Branch)
+	}
+	if spec.StackTrunk != cfg.BaseBranch {
+		t.Errorf("child StackTrunk = %q, want %q", spec.StackTrunk, cfg.BaseBranch)
+	}
+	if childSt.StackBase != parentSt.Branch {
+		t.Errorf("child StackBase = %q, want parent branch %q", childSt.StackBase, parentSt.Branch)
+	}
+	if childSt.StackID == "" {
+		t.Error("child StackID is empty, want a chain id")
+	}
+}
+
+// Four ways a stacked launch is refused, each of which must launch nothing:
+// no new ledger entry, and no Start call recorded on the mock transport.
+func TestManagerLaunchStackRefusals(t *testing.T) {
+	t.Run("stackMode off disables stacking entirely", func(t *testing.T) {
+		mt := newMockTransport()
+		cfg := testFleetConfig(testHost("a", 1))
+		cfg.StackMode = "off"
+		m := NewManager(cfg, mt.forHost)
+		t.Cleanup(m.Close)
+
+		_, err := m.Launch(context.Background(), LaunchReq{Ticket: "T1", StackOn: "whatever"})
+		if err == nil {
+			t.Fatal("Launch with stackMode off: want error, got nil")
+		}
+		for _, want := range []string{"disabled", "stackMode"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q missing %q", err.Error(), want)
+			}
+		}
+		if len(m.Statuses()) != 0 {
+			t.Errorf("Statuses() = %+v, want none launched", m.Statuses())
+		}
+		if _, ok := mt.byTicket["T1"]; ok {
+			t.Error("an engineer was started for T1, want none")
+		}
+	})
+
+	t.Run("StackOn names a ticket that was never launched", func(t *testing.T) {
+		mt := newMockTransport()
+		cfg := testFleetConfig(testHost("a", 1))
+		cfg.StackMode = "chain"
+		m := NewManager(cfg, mt.forHost)
+		t.Cleanup(m.Close)
+
+		_, err := m.Launch(context.Background(), LaunchReq{Ticket: "T1", StackOn: "ghost"})
+		if err == nil {
+			t.Fatal("Launch stacked on an unknown ticket: want error, got nil")
+		}
+		if !strings.Contains(err.Error(), "ghost") {
+			t.Errorf("error %q does not name the unknown ticket", err.Error())
+		}
+		if len(m.Statuses()) != 0 {
+			t.Errorf("Statuses() = %+v, want none launched", m.Statuses())
+		}
+		if _, ok := mt.byTicket["T1"]; ok {
+			t.Error("an engineer was started for T1, want none")
+		}
+	})
+
+	t.Run("StackOn names a parent that has not finished", func(t *testing.T) {
+		mt := newMockTransport()
+		cfg := testFleetConfig(testHost("a", 1))
+		cfg.StackMode = "chain"
+		m := NewManager(cfg, mt.forHost)
+		t.Cleanup(m.Close)
+
+		if _, err := m.Launch(context.Background(), LaunchReq{Ticket: "P"}); err != nil {
+			t.Fatalf("Launch parent: %v", err)
+		}
+		drainEvent(t, m, time.Second) // KindStarted
+
+		_, err := m.Launch(context.Background(), LaunchReq{Ticket: "C", StackOn: "P"})
+		if err == nil {
+			t.Fatal("Launch stacked on an unfinished parent: want error, got nil")
+		}
+		if !strings.Contains(err.Error(), "no open PR yet") && !strings.Contains(err.Error(), "Await") {
+			t.Errorf("error %q does not indicate the parent has no PR yet", err.Error())
+		}
+		if got := len(m.Statuses()); got != 1 {
+			t.Errorf("Statuses() has %d entries, want 1 (only the parent)", got)
+		}
+		if _, ok := mt.byTicket["C"]; ok {
+			t.Error("an engineer was started for C, want none")
+		}
+	})
+
+	t.Run("StackOn names a parent that already has a child", func(t *testing.T) {
+		mt := newMockTransport()
+		cfg := testFleetConfig(testHost("a", 1))
+		cfg.StackMode = "chain"
+		m := NewManager(cfg, mt.forHost)
+		t.Cleanup(m.Close)
+
+		if _, err := m.Launch(context.Background(), LaunchReq{Ticket: "P"}); err != nil {
+			t.Fatalf("Launch parent: %v", err)
+		}
+		drainEvent(t, m, time.Second) // KindStarted
+		finishEngineer(t, m, mt, "P", "https://example/pr/p")
+		drainEvent(t, m, time.Second) // KindResult
+
+		if _, err := m.Launch(context.Background(), LaunchReq{Ticket: "C1", StackOn: "P"}); err != nil {
+			t.Fatalf("Launch first child: %v", err)
+		}
+		drainEvent(t, m, time.Second) // KindStarted
+
+		_, err := m.Launch(context.Background(), LaunchReq{Ticket: "C2", StackOn: "P"})
+		if err == nil {
+			t.Fatal("Launch a second child on the same parent: want error, got nil")
+		}
+		if !strings.Contains(err.Error(), "C1") {
+			t.Errorf("error %q does not name the ticket that already claimed the parent", err.Error())
+		}
+		if got := len(m.Statuses()); got != 2 {
+			t.Errorf("Statuses() has %d entries, want 2 (parent + first child only)", got)
+		}
+		if _, ok := mt.byTicket["C2"]; ok {
+			t.Error("an engineer was started for C2, want none")
+		}
+	})
+}
+
+// Stacking being available (StackMode != "off") must not change the default
+// behavior of a launch that leaves StackOn empty.
+func TestManagerLaunchUnstackedUnaffectedByStackMode(t *testing.T) {
+	mt := newMockTransport()
+	cfg := testFleetConfig(testHost("a", 1))
+	cfg.StackMode = "chain"
+	m := NewManager(cfg, mt.forHost)
+	t.Cleanup(m.Close)
+
+	st, err := m.Launch(context.Background(), LaunchReq{Ticket: "T1"})
+	if err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+
+	spec := mt.specFor("T1")
+	if spec.BaseBranch != cfg.BaseBranch {
+		t.Errorf("BaseBranch = %q, want fleet default %q", spec.BaseBranch, cfg.BaseBranch)
+	}
+	if spec.StackTrunk != "" {
+		t.Errorf("StackTrunk = %q, want empty", spec.StackTrunk)
+	}
+	if st.StackID != "" || st.StackBase != "" {
+		t.Errorf("StackID/StackBase = %q/%q, want both empty", st.StackID, st.StackBase)
+	}
+}
+
+// Chain reports a three-deep stack's branches bottom-to-top, and every
+// engineer in it shares the same stack id.
+func TestManagerChainThreeDeepBottomToTop(t *testing.T) {
+	mt := newMockTransport()
+	cfg := testFleetConfig(testHost("a", 1))
+	cfg.StackMode = "chain"
+	m := NewManager(cfg, mt.forHost)
+	t.Cleanup(m.Close)
+
+	stA, err := m.Launch(context.Background(), LaunchReq{Ticket: "A"})
+	if err != nil {
+		t.Fatalf("Launch A: %v", err)
+	}
+	drainEvent(t, m, time.Second) // KindStarted
+	finishEngineer(t, m, mt, "A", "https://example/pr/a")
+	drainEvent(t, m, time.Second) // KindResult
+
+	stB, err := m.Launch(context.Background(), LaunchReq{Ticket: "B", StackOn: "A"})
+	if err != nil {
+		t.Fatalf("Launch B: %v", err)
+	}
+	drainEvent(t, m, time.Second) // KindStarted
+	finishEngineer(t, m, mt, "B", "https://example/pr/b")
+	drainEvent(t, m, time.Second) // KindResult
+
+	stC, err := m.Launch(context.Background(), LaunchReq{Ticket: "C", StackOn: "B"})
+	if err != nil {
+		t.Fatalf("Launch C: %v", err)
+	}
+	drainEvent(t, m, time.Second) // KindStarted, C is left running
+
+	var stackIDForA string
+	for _, st := range m.Statuses() {
+		if st.Ticket == "A" {
+			stackIDForA = st.StackID
+		}
+	}
+	if stackIDForA == "" || stackIDForA != stB.StackID || stB.StackID != stC.StackID {
+		t.Fatalf("stack ids: A=%q B=%q C=%q, want all equal and non-empty", stackIDForA, stB.StackID, stC.StackID)
+	}
+
+	got := m.Chain(stackIDForA)
+	want := []string{stA.Branch, stB.Branch, stC.Branch}
+	if len(got) != len(want) {
+		t.Fatalf("Chain() = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("Chain()[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// A Ledger()/Resume() round trip must restore a chain well enough for a
+// fresh manager to accept a new child stacked on the still-unfinished tip it
+// resumed.
+func TestManagerLedgerResumeAcceptsNewChildAfterward(t *testing.T) {
+	mt := newMockTransport()
+	cfg := testFleetConfig(testHost("a", 2))
+	cfg.StackMode = "chain"
+	m := NewManager(cfg, mt.forHost)
+
+	if _, err := m.Launch(context.Background(), LaunchReq{Ticket: "A"}); err != nil {
+		t.Fatalf("Launch A: %v", err)
+	}
+	drainEvent(t, m, time.Second) // KindStarted
+	finishEngineer(t, m, mt, "A", "https://example/pr/a")
+	drainEvent(t, m, time.Second) // KindResult
+
+	if _, err := m.Launch(context.Background(), LaunchReq{Ticket: "B", StackOn: "A"}); err != nil {
+		t.Fatalf("Launch B: %v", err)
+	}
+	drainEvent(t, m, time.Second) // KindStarted, B is left running
+
+	snapshot := m.Ledger()
+	m.Close()
+
+	var branchA, branchB, wireIDB string
+	for _, e := range snapshot {
+		switch e.Ticket {
+		case "A":
+			branchA = e.Branch
+		case "B":
+			branchB = e.Branch
+			wireIDB = e.WireID
+		}
+	}
+	if wireIDB == "" {
+		t.Fatalf("snapshot %+v missing B's wire id", snapshot)
+	}
+
+	mt2 := newMockTransport()
+	engB := mt2.registerEngine(wireIDB)
+	m2 := NewManager(cfg, mt2.forHost)
+	t.Cleanup(m2.Close)
+
+	if err := m2.Resume(context.Background(), snapshot); err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+
+	engB.send(engineerwire.Result{Outcome: "completed", PRURL: "https://example/pr/b"})
+	waitFor(t, time.Second, func() bool {
+		for _, st := range m2.Statuses() {
+			if st.Ticket == "B" {
+				return st.State == StateDone
+			}
+		}
+		return false
+	})
+
+	stC, err := m2.Launch(context.Background(), LaunchReq{Ticket: "C", StackOn: "B"})
+	if err != nil {
+		t.Fatalf("Launch C stacked on the resumed chain: %v", err)
+	}
+
+	var stackID string
+	for _, st := range m2.Statuses() {
+		if st.Ticket == "B" {
+			stackID = st.StackID
+		}
+	}
+	if stackID == "" {
+		t.Fatal("B has no StackID after resume")
+	}
+
+	got := m2.Chain(stackID)
+	want := []string{branchA, branchB, stC.Branch}
+	if len(got) != len(want) {
+		t.Fatalf("Chain() = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("Chain()[%d] = %q, want %q", i, got[i], want[i])
+		}
 	}
 }

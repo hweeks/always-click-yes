@@ -103,11 +103,17 @@ type Engineer struct {
 	// distinct from EngineerID, which is only the fleet ledger's short,
 	// say-it-out-loud label ("e1"). Re-attaching with the wrong one talks to
 	// nothing on the far end.
-	WireID    string    `json:"wire_id,omitempty"`
-	Ticket    string    `json:"ticket"`
-	Title     string    `json:"title,omitempty"`
-	Host      string    `json:"host,omitempty"`
-	Branch    string    `json:"branch,omitempty"`
+	WireID string `json:"wire_id,omitempty"`
+	Ticket string `json:"ticket"`
+	Title  string `json:"title,omitempty"`
+	Host   string `json:"host,omitempty"`
+	Branch string `json:"branch,omitempty"`
+	// StackID and StackBase identify this engineer's place in a stack, if
+	// any: StackID is the chain it belongs to, StackBase the parent branch
+	// its own Branch is stacked on top of. Both empty for an unstacked
+	// engineer launched against trunk.
+	StackID   string    `json:"stack_id,omitempty"`
+	StackBase string    `json:"stack_base,omitempty"`
 	State     string    `json:"state"`
 	Outcome   string    `json:"outcome,omitempty"`
 	PRURL     string    `json:"pr_url,omitempty"`
