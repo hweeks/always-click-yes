@@ -185,7 +185,7 @@ func (c *Core) finalize(ctx context.Context, outcome, summary string, cost float
 	}
 
 	title := fmt.Sprintf("%s: %s", spec.Ticket, spec.Title)
-	body := summary + prFooter(c.cfg.EngineerID, spec.Ticket)
+	body := summary + prFooter(c.cfg.EngineerID, spec.Ticket, spec.BaseBranch, spec.StackTrunk)
 	prURL, err := gitops.CreatePR(ctx, c.cfg.GitRunner, c.cfg.WorktreeDir, spec.BaseBranch, spec.Branch, title, body)
 	if err != nil {
 		return engineerwire.Result{Outcome: "failed", Summary: "opening PR: " + err.Error(), Branch: spec.Branch, CostUSD: cost, Tokens: tokens, Verification: checks}
@@ -280,8 +280,17 @@ func verifyExcerpt(output string) string {
 	return excerpt
 }
 
-func prFooter(engineerID, ticket string) string {
-	return fmt.Sprintf("\n\n---\nEngineer: %s · Ticket: %s", engineerID, ticket)
+// prFooter renders the standard PR footer. The stacked line only appears
+// when stackTrunk is set: for a plain PR against trunk, baseBranch already
+// equals stackTrunk, so repeating it would be noise. In the stacked case,
+// baseBranch names another engineer's branch rather than trunk, which is new
+// information a reviewer on a mid-stack PR needs without leaving the page.
+func prFooter(engineerID, ticket, baseBranch, stackTrunk string) string {
+	footer := fmt.Sprintf("\n\n---\nEngineer: %s · Ticket: %s", engineerID, ticket)
+	if stackTrunk != "" {
+		footer += fmt.Sprintf("\nStacked on `%s` → lands on `%s`", baseBranch, stackTrunk)
+	}
+	return footer
 }
 
 // changedFiles lists what the run touched, via the same Runner as the rest of

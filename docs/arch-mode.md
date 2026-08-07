@@ -172,6 +172,7 @@ repo root to get every key name right on a fresh clone.
     "runBudgetUSD": 200,
     "deadmanHours": 24,
     "ticketCommit": "direct",
+    "stackMode": "ask",
     "verifyCommands": ["go build ./...", "go test -race ./...", "gofmt -l .", "golangci-lint run ./..."],
     "verifyTimeoutSeconds": 900,
     "hosts": [
@@ -212,6 +213,13 @@ repo root to get every key name right on a fresh clone.
 - **`ticketCommit`** (default `"direct"`, or `"none"`) — whether the ticket board
   (`.acy/tickets/*.md` in the repo) is committed and pushed as it changes, or left as
   local, uncommitted state.
+- **`stackMode`** (default `"ask"`, or `"off"` / `"chain"`) — whether an engineer's work
+  lands as a stack of dependent branches/PRs. `"off"` means never stack, never ask.
+  `"ask"` means the architect asks the human during planning whether this run's work
+  should land as stacks — and `"ask"` degrades to `"off"` automatically when the
+  `gh-stack` extension or the repo's preview enablement is missing (a later ticket
+  implements this specific downgrade behavior, but the contract is documented here).
+  `"chain"` means stack by default without asking.
 - **`verifyCommands`** (default `["go build ./...", "go test -race ./...", "gofmt -l .",
   "golangci-lint run ./..."]`) — commands run in an engineer's worktree after it
   finishes, as evidence collected by acy itself rather than the model's own claim of

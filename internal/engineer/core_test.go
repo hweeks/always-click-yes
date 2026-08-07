@@ -99,6 +99,8 @@ type fakeGit struct {
 	prURL      string
 	prErr      error
 	diffOut    string
+
+	prBody string // body passed to the most recent "gh pr create" call
 }
 
 func (g *fakeGit) run(_ context.Context, _ string, name string, args ...string) (string, error) {
@@ -120,6 +122,14 @@ func (g *fakeGit) run(_ context.Context, _ string, name string, args ...string) 
 	case name == "git" && len(args) >= 1 && args[0] == "diff":
 		return g.diffOut, nil
 	case name == "gh" && len(args) >= 2 && args[0] == "pr" && args[1] == "create":
+		for i, a := range args {
+			if a == "--body" && i+1 < len(args) {
+				g.mu.Lock()
+				g.prBody = args[i+1]
+				g.mu.Unlock()
+				break
+			}
+		}
 		if g.prErr != nil {
 			return "", g.prErr
 		}
@@ -138,6 +148,12 @@ func (g *fakeGit) sawCall(substr string) bool {
 		}
 	}
 	return false
+}
+
+func (g *fakeGit) lastPRBody() string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.prBody
 }
 
 // --- test scaffolding ---
@@ -303,8 +319,49 @@ func TestRunHappyPathPushesAndOpensPR(t *testing.T) {
 	if !git.sawCall("pr create") {
 		t.Fatal("CreatePR never ran")
 	}
+	if strings.Contains(git.lastPRBody(), "Stacked on") {
+		t.Fatalf("non-stacked PR body should not mention being stacked, got %q", git.lastPRBody())
+	}
 
 	assertOneResult(t, j)
+}
+
+// TestFinalizeStackedPRBodyNamesParentAndTrunk covers the mid-stack case:
+// spec.BaseBranch names another engineer's branch rather than the real
+// trunk, and spec.StackTrunk names where the stack ultimately lands. The PR
+// body's footer must call both out so a reviewer looking at a mid-stack PR
+// can tell it's mid-stack without leaving the page.
+func TestFinalizeStackedPRBodyNamesParentAndTrunk(t *testing.T) {
+	fs := newFakeSession(Snapshot{Ready: true, Phase: PhasePlan})
+	fs.onArm = func(f *fakeSession) { f.cur.Phase = PhaseAutoRun }
+	fs.afterSnapshot = func(f *fakeSession) {
+		if f.cur.Phase == PhaseAutoRun && f.cur.FinishOutcome == "" {
+			f.cur.FinishOutcome = "completed"
+			f.cur.FinishSummary = "added spin() and verified with widget_test.go"
+		}
+	}
+
+	git := &fakeGit{revListOut: "3\n", prURL: "https://github.com/acme/widgets/pull/8", diffOut: "widget.go\n"}
+	spec := testSpec()
+	spec.BaseBranch = "acy/eng-1-parent"
+	spec.StackTrunk = "main"
+	c, _ := newTestCore(t, spec, git.run, fs)
+
+	result := c.Run(context.Background())
+
+	if result.Outcome != "completed" {
+		t.Fatalf("outcome = %q, want completed", result.Outcome)
+	}
+	if !git.sawCall("pr create") {
+		t.Fatal("CreatePR never ran")
+	}
+	body := git.lastPRBody()
+	if !strings.Contains(body, "acy/eng-1-parent") {
+		t.Fatalf("PR body = %q, want it to name the parent branch acy/eng-1-parent", body)
+	}
+	if !strings.Contains(body, "main") {
+		t.Fatalf("PR body = %q, want it to name the stack trunk main", body)
+	}
 }
 
 // --- no commits ---
@@ -572,4 +629,29 @@ func TestBuildFailureStillJournalsOneResult(t *testing.T) {
 		t.Fatalf("summary = %q, want it to carry the build error", result.Summary)
 	}
 	assertOneResult(t, j)
+}
+
+func TestBriefTextStackedInstruction(t *testing.T) {
+	unstacked := briefText(engineerwire.Spec{
+		Ticket:     "T-1",
+		Title:      "title",
+		BaseBranch: "main",
+		StackTrunk: "",
+	})
+	if strings.Contains(unstacked, "stacked on") || strings.Contains(unstacked, "rebase") {
+		t.Fatalf("unstacked brief should not mention stacking/rebase, got: %q", unstacked)
+	}
+
+	stacked := briefText(engineerwire.Spec{
+		Ticket:     "T-2",
+		Title:      "title",
+		BaseBranch: "acy/eng-1-foo",
+		StackTrunk: "main",
+	})
+	if !strings.Contains(stacked, "acy/eng-1-foo") {
+		t.Fatalf("stacked brief should name the base branch, got: %q", stacked)
+	}
+	if !strings.Contains(stacked, "rebase") {
+		t.Fatalf("stacked brief should carry do-not-rebase language, got: %q", stacked)
+	}
 }

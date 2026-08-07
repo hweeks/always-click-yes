@@ -7,6 +7,7 @@
     "runBudgetUSD": 200,
     "deadmanHours": 24,
     "ticketCommit": "direct",
+    "stackMode": "ask",
     "verifyCommands": ["go build ./...", "go test -race ./...", "gofmt -l .", "golangci-lint run ./..."],
     "verifyTimeoutSeconds": 900,
     "hosts": [

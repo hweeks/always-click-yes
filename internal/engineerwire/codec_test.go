@@ -49,6 +49,7 @@ func TestRoundTrip(t *testing.T) {
 			Ticket: "ACY-1", Title: "add the wire types", Brief: "build internal/engineerwire",
 			Success: "go test ./internal/engineerwire/ passes", BaseBranch: "main", Branch: "agent/wire",
 			Model: "sonnet", ChildModel: "sonnet", ChildEffort: "high", BudgetUSD: 10, DeadmanHours: 4,
+			StackTrunk: "main",
 		}},
 		{"answer", Answer{QuestionID: "q1", Text: "sqlite, it's simplest"}},
 		{"cancel", Cancel{Reason: "superseded by a newer spec"}},
@@ -139,5 +140,46 @@ func TestDecodeMultipleLines(t *testing.T) {
 	}
 	if h, ok := got[0].(Hello); !ok || h.EngineerID != "e1" {
 		t.Errorf("first message = %#v, want the hello", got[0])
+	}
+}
+
+// TestDecodeSpecWithStackTrunkField proves forward compatibility for the
+// stack_trunk field: a spec line carrying it (as an architect built on a
+// newer acy would send when stacking engineers) decodes cleanly into Spec,
+// with StackTrunk populated rather than silently dropped.
+func TestDecodeSpecWithStackTrunkField(t *testing.T) {
+	line := `{"type":"spec","ticket":"ACY-2","title":"stacked task","brief":"do the thing",` +
+		`"success":"tests pass","base_branch":"agent/other-engineer","branch":"agent/mine",` +
+		`"stack_trunk":"main"}` + "\n"
+
+	got, err := NewDecoder(strings.NewReader(line)).Decode()
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	spec, ok := got.(Spec)
+	if !ok {
+		t.Fatalf("Decode returned %T, want Spec", got)
+	}
+	if spec.StackTrunk != "main" {
+		t.Errorf("StackTrunk = %q, want %q", spec.StackTrunk, "main")
+	}
+}
+
+// TestDecodeSpecIgnoresUnknownField proves the general compatibility claim
+// that lets the wire evolve without a protocol bump: decodeLine does not set
+// json.Decoder's DisallowUnknownFields, so a spec line carrying a field an
+// older (or simply different) engineer binary doesn't recognize decodes
+// successfully instead of erroring, with the unknown field just dropped.
+func TestDecodeSpecIgnoresUnknownField(t *testing.T) {
+	line := `{"type":"spec","ticket":"ACY-3","title":"future task","brief":"do the thing",` +
+		`"success":"tests pass","base_branch":"main","branch":"agent/mine",` +
+		`"totally_unknown_field":"whatever"}` + "\n"
+
+	got, err := NewDecoder(strings.NewReader(line)).Decode()
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if _, ok := got.(Spec); !ok {
+		t.Fatalf("Decode returned %T, want Spec", got)
 	}
 }
