@@ -313,6 +313,13 @@ system prompt in place of the parent's. The flow:
    this conversation. A ticket can optionally name a `depends_on` (must merge first)
    or a `stack_on` (its branch may sit on that ticket's still-open PR instead of
    waiting for a merge) — at most one ticket may claim a given `stack_on` parent.
+   This is board bookkeeping, not the mechanism itself: `LaunchEngineer`'s own
+   `stack_on` argument (step 4) is what actually stacks the branch when the ticket
+   is launched. When `fleet.stackMode` is `"ask"`, the architect puts the stacking
+   choice to you first, as a standard planning question — one review surface and one
+   clean landing on trunk, versus tickets that must run in order rather than in
+   parallel — before creating any tickets; `"chain"` stacks by default without
+   asking, and `"off"` never stacks.
 3. **Arm (`Ctrl+G`).** Flips the session into AUTO-RUN, same keystroke as a plain run.
    The architect gets one kickoff prompt: launch engineers for the first tickets up
    to capacity, then `Await`.
@@ -320,9 +327,14 @@ system prompt in place of the parent's. The flow:
    a queue it drains once: launch up to whatever capacity `hosts[].maxEngineers` and
    `prCap` allow, then block on `Await` for the next fleet event — an engineer's
    result, an escalated question, a PR merge or close, or a reconnect notice after a
-   dropped connection — react to it, and loop. `FleetStatus` gives it (and you, via
-   `/fleet`) a non-blocking snapshot of every engineer's state, host, branch, PR and
-   cost without waiting for the next event.
+   dropped connection — react to it, and loop. `LaunchEngineer` takes its own optional
+   `stack_on` argument — separate from the ticket board's `stack_on` field in step 2,
+   though normally set to the same parent id — naming a parent ticket, which stacks
+   the new engineer's branch on that ticket's still-open PR instead of trunk, so the
+   child can start as soon as the parent's PR opens rather than waiting for it to
+   merge. `FleetStatus` gives it (and you, via `/fleet`) a non-blocking snapshot of
+   every engineer's state, host, branch, PR and cost without waiting for the next
+   event.
 5. **PR-cap backpressure.** <a name="pr-cap-backpressure"></a> Once `prCap` PRs are
    open, `LaunchEngineer` refuses with a message telling the architect to `Await`
    merges first. This is deliberate: it's the difference between a fleet that keeps

@@ -193,7 +193,7 @@ and let the interface enforce the rest.
   closures and the orchestrator into one running supervisor: the shared foundation `acy run`,
   `acy serve` and `acy arch` all build on, none of which may import each other.
   `Flags.Fleet` / `Flags.Tickets` / `Flags.ArchMode` are arch mode's only forks into it —
-  they pick `mcp.RoleArchitect` / `ui.ArchSystemPrompt` over the parent role and are nil/false
+  they pick `mcp.RoleArchitect` / `ui.ArchSystemPromptFor` over the parent role and are nil/false
   for a plain run.
 - `internal/state` — acy's own snapshot per session (phase, plan, rounds, cost): the part
   of a run claude's transcript does not record. Atomic JSON under

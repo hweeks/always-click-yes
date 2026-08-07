@@ -356,7 +356,9 @@ const DispatchSchema = `{
 
 const launchEngineerDescription = "Launch a remote engineer on a ticket. Non-blocking — returns " +
 	"immediately with the engineer's id, host and branch; the engineer works unattended in its own " +
-	"worktree and ends by opening a PR. Launch up to capacity, then Await. One ticket per engineer."
+	"worktree and ends by opening a PR. Launch up to capacity, then Await. One ticket per engineer. " +
+	"Use stack_on when a ticket builds on another ticket's still-open PR, so the child can start " +
+	"immediately instead of waiting for a merge."
 
 // launchEngineerSchema is the parameter shape the architect sees for
 // LaunchEngineer. "brief" carries the same weight DispatchSchema's
@@ -396,6 +398,10 @@ const launchEngineerSchema = `{
     "budget_usd": {
       "type": "number",
       "description": "Optional spend ceiling for this engineer. Omit unless you have a reason; the default is the fleet's."
+    },
+    "stack_on": {
+      "type": "string",
+      "description": "The ticket id (not a branch name) of a parent ticket whose PR is still open, when this ticket builds on that work. The new engineer branches off the parent's PR branch and targets it, so it can start as soon as the parent's PR opens rather than waiting for a merge. Omit to launch against trunk."
     }
   }
 }`

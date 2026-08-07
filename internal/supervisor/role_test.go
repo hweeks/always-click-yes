@@ -10,17 +10,17 @@ import (
 // roleAndPrompt is the only fork ArchMode makes in NewSupervisor: everything
 // else about the parent session — tools, hooks, the gate — stays identical.
 func TestRoleAndPromptArchMode(t *testing.T) {
-	role, prompt := roleAndPrompt(true)
+	role, prompt := roleAndPrompt(true, "ask")
 	if role != mcp.RoleArchitect {
 		t.Errorf("role = %v, want RoleArchitect", role)
 	}
-	if prompt != ui.ArchSystemPrompt {
-		t.Error("prompt should be ui.ArchSystemPrompt")
+	if prompt != ui.ArchSystemPromptFor("ask") {
+		t.Error("prompt should be ui.ArchSystemPromptFor(\"ask\")")
 	}
 }
 
 func TestRoleAndPromptDefault(t *testing.T) {
-	role, prompt := roleAndPrompt(false)
+	role, prompt := roleAndPrompt(false, "")
 	if role != mcp.RoleParent {
 		t.Errorf("role = %v, want RoleParent", role)
 	}

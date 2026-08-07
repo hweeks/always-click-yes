@@ -175,6 +175,113 @@ func TestLaunchEngineerFullFleetIsNotAFailure(t *testing.T) {
 	}
 }
 
+// stack_on is optional: omitting it must never appear in a missing-field
+// message or block the launch.
+func TestLaunchEngineerStackOnOptional(t *testing.T) {
+	fake := newFakeFleetManager()
+	fake.launchRet = fleet.EngineerStatus{EngineerID: "e1", Host: "mbp1", Branch: "agent/e1-t1", Ticket: "T1"}
+	m := &Model{phase: PhaseAutoRun, fleet: fake}
+	p, reply := fleetPending(mcp.ToolLaunchEngineer, `{"ticket":"T1","title":"x","brief":"y","success":"z"}`)
+	m.startLaunchEngineer(p)
+
+	got := answer(t, reply)
+	if strings.Contains(got, "missing") || strings.Contains(got, "stack_on") {
+		t.Errorf("answer = %q, omitting stack_on must not be treated as a missing field", got)
+	}
+	if len(fake.launched) != 1 {
+		t.Fatalf("want 1 launch, got %d", len(fake.launched))
+	}
+	if fake.launched[0].StackOn != "" {
+		t.Errorf("StackOn = %q, want empty when omitted", fake.launched[0].StackOn)
+	}
+}
+
+// stack_on, when given, is forwarded into the launch request verbatim.
+func TestLaunchEngineerForwardsStackOn(t *testing.T) {
+	fake := newFakeFleetManager()
+	fake.launchRet = fleet.EngineerStatus{EngineerID: "e2", Host: "mbp1", Branch: "agent/e2-t2", Ticket: "T2"}
+	m := &Model{phase: PhaseAutoRun, fleet: fake}
+	p, reply := fleetPending(mcp.ToolLaunchEngineer,
+		`{"ticket":"T2","title":"x","brief":"y","success":"z","stack_on":"T1"}`)
+	m.startLaunchEngineer(p)
+	answer(t, reply)
+
+	if len(fake.launched) != 1 {
+		t.Fatalf("want 1 launch, got %d", len(fake.launched))
+	}
+	if got := fake.launched[0].StackOn; got != "T1" {
+		t.Errorf("StackOn = %q, want %q", got, "T1")
+	}
+}
+
+// A stack refusal from the manager surfaces intact, with a stacking-specific
+// trailing suggestion rather than the capacity/host one.
+func TestLaunchEngineerStackRefusalSuggestsFixingStackOn(t *testing.T) {
+	fake := newFakeFleetManager()
+	fake.launchErr = errors.New(`fleet: no engineer has been launched for ticket "T0" yet — launch it first, or drop stackOn to launch against trunk`)
+	fake.used, fake.total = 1, 4
+	m := &Model{phase: PhaseAutoRun, fleet: fake}
+	p, reply := fleetPending(mcp.ToolLaunchEngineer,
+		`{"ticket":"T2","title":"x","brief":"y","success":"z","stack_on":"T0"}`)
+	m.startLaunchEngineer(p)
+
+	got := answer(t, reply)
+	if !strings.Contains(got, `no engineer has been launched for ticket "T0" yet`) {
+		t.Errorf("answer = %q, want the manager's own refusal text surfaced intact", got)
+	}
+	if strings.Contains(got, "Await") || strings.Contains(got, "pick a different host") {
+		t.Errorf("answer = %q, a stacking refusal should not suggest awaiting a slot or picking a host", got)
+	}
+	if !strings.Contains(got, "stack_on") {
+		t.Errorf("answer = %q, want a stacking-appropriate suggestion mentioning stack_on", got)
+	}
+}
+
+// A successful stacked launch names the base branch in both the tool's
+// answer and the transcript entry, so the architect and a human watching can
+// both see the chain it just extended.
+func TestLaunchEngineerNamesStackBaseOnSuccess(t *testing.T) {
+	fake := newFakeFleetManager()
+	fake.launchRet = fleet.EngineerStatus{
+		EngineerID: "e2", Host: "mbp1", Branch: "agent/e2-t2", Ticket: "T2",
+		StackID: "s1", StackBase: "agent/e1-t1",
+	}
+	m := &Model{phase: PhaseAutoRun, fleet: fake}
+	p, reply := fleetPending(mcp.ToolLaunchEngineer,
+		`{"ticket":"T2","title":"x","brief":"y","success":"z","stack_on":"T1"}`)
+	m.startLaunchEngineer(p)
+
+	got := answer(t, reply)
+	if !strings.Contains(got, "agent/e1-t1") {
+		t.Errorf("answer = %q, want the stack base branch named", got)
+	}
+	if len(m.entries) != 1 {
+		t.Fatalf("want 1 transcript entry, got %d", len(m.entries))
+	}
+	if body := m.entries[0].body; !strings.Contains(body, "agent/e1-t1") {
+		t.Errorf("transcript body = %q, want the stack base branch named", body)
+	}
+}
+
+// An unstacked launch's rendering must stay byte-identical to before.
+func TestLaunchEngineerUnstackedRenderingUnchanged(t *testing.T) {
+	fake := newFakeFleetManager()
+	fake.launchRet = fleet.EngineerStatus{EngineerID: "e1", Host: "mbp1", Branch: "agent/e1-t1", Ticket: "T1"}
+	fake.used, fake.total = 1, 4
+	m := &Model{phase: PhaseAutoRun, fleet: fake}
+	p, reply := fleetPending(mcp.ToolLaunchEngineer, `{"ticket":"T1","title":"x","brief":"y","success":"z"}`)
+	m.startLaunchEngineer(p)
+
+	got := answer(t, reply)
+	want := "launched e1 on host mbp1, branch agent/e1-t1 (fleet capacity 1/4 in use)"
+	if got != want {
+		t.Errorf("answer = %q, want %q", got, want)
+	}
+	if body := m.entries[0].body; body != "ticket T1 · host mbp1 · branch agent/e1-t1" {
+		t.Errorf("transcript body = %q", body)
+	}
+}
+
 // --- Await ---
 
 func TestAwaitRefusedWithoutFleet(t *testing.T) {
@@ -402,6 +509,21 @@ func TestFleetStatusRendersTable(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("fleet status = %q, missing %q", got, want)
 		}
+	}
+}
+
+// A stacked engineer's row gets an indented "stacked on" annotation naming
+// its base branch and chain id, mirroring how a PRURL gets its own line.
+func TestFleetStatusTableShowsStackAnnotation(t *testing.T) {
+	engineers := []fleet.EngineerStatus{
+		{EngineerID: "e2", Ticket: "T2", Host: "h1", State: fleet.StateRunning, StackID: "s1", StackBase: "agent/e1-t1"},
+	}
+	got := fleetStatusTable(engineers, 1, 4)
+	if !strings.Contains(got, "stacked on agent/e1-t1") {
+		t.Errorf("fleetStatusTable = %q, want a stacked-on annotation naming the base branch", got)
+	}
+	if !strings.Contains(got, "s1") {
+		t.Errorf("fleetStatusTable = %q, want the chain id named", got)
 	}
 }
 
