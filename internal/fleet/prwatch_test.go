@@ -214,6 +214,116 @@ func TestPRWatcherOpenCountAndURLs(t *testing.T) {
 	}
 }
 
+// --- stacked-PR root counting ---
+
+// A three-deep stack of open acy/* PRs — a based on main, b based on a, c
+// based on b — is one line of work landing on main through a single linear
+// merge, so it must count as one against the cap: only a is a root, b and c
+// are mid-stack and uncapped.
+func TestPRWatcherStackCountsAsOneRoot(t *testing.T) {
+	gh := &fakeGHRunner{}
+	gh.queue(`[
+		{"url":"https://example/pr/1","state":"OPEN","headRefName":"acy/a","baseRefName":"main","number":1},
+		{"url":"https://example/pr/2","state":"OPEN","headRefName":"acy/b","baseRefName":"acy/a","number":2},
+		{"url":"https://example/pr/3","state":"OPEN","headRefName":"acy/c","baseRefName":"acy/b","number":3}
+	]`, nil)
+	w := NewPRWatcher("/repo", gh.run, time.Minute, nil)
+	if err := w.poll(context.Background()); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+
+	if got := w.OpenCount(); got != 1 {
+		t.Errorf("OpenCount() = %d, want 1 (only the root)", got)
+	}
+	if got := w.StackedCount(); got != 2 {
+		t.Errorf("StackedCount() = %d, want 2 (b and c are mid-stack)", got)
+	}
+	want := []string{"https://example/pr/1"}
+	got := w.OpenURLs()
+	if len(got) != len(want) || got[0] != want[0] {
+		t.Errorf("OpenURLs() = %v, want %v (root only, mid-stack excluded)", got, want)
+	}
+}
+
+// Three independent, unrelated acy/* PRs (none based on another acy/*
+// branch) are three separate lines of work, so all three count against the
+// cap and none are stacked.
+func TestPRWatcherIndependentPRsAllCountAsRoots(t *testing.T) {
+	gh := &fakeGHRunner{}
+	gh.queue(`[
+		{"url":"https://example/pr/1","state":"OPEN","headRefName":"acy/a","baseRefName":"main","number":1},
+		{"url":"https://example/pr/2","state":"OPEN","headRefName":"acy/b","baseRefName":"main","number":2},
+		{"url":"https://example/pr/3","state":"OPEN","headRefName":"acy/c","baseRefName":"main","number":3}
+	]`, nil)
+	w := NewPRWatcher("/repo", gh.run, time.Minute, nil)
+	if err := w.poll(context.Background()); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+
+	if got := w.OpenCount(); got != 3 {
+		t.Errorf("OpenCount() = %d, want 3", got)
+	}
+	if got := w.StackedCount(); got != 0 {
+		t.Errorf("StackedCount() = %d, want 0", got)
+	}
+}
+
+// A PR based on a plain branch like "main" — a real, non-empty, non-acy/*
+// base — must count as root just like the zero-value/empty-base case other
+// tests exercise.
+func TestPRWatcherMainBasedPRIsRoot(t *testing.T) {
+	gh := &fakeGHRunner{}
+	gh.queue(`[{"url":"https://example/pr/1","state":"OPEN","headRefName":"acy/a","baseRefName":"main","number":1}]`, nil)
+	w := NewPRWatcher("/repo", gh.run, time.Minute, nil)
+	if err := w.poll(context.Background()); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+
+	if got := w.OpenCount(); got != 1 {
+		t.Errorf("OpenCount() = %d, want 1 (main-based PR is a root)", got)
+	}
+	if got := w.StackedCount(); got != 0 {
+		t.Errorf("StackedCount() = %d, want 0", got)
+	}
+}
+
+// A mid-stack PR that transitions from open to merged across polls must
+// still produce a PREvent via the normal diffing path — counting changes,
+// but which events fire (and when) does not.
+func TestPRWatcherMidStackPRStillEmitsOnMerge(t *testing.T) {
+	gh := &fakeGHRunner{}
+	w := NewPRWatcher("/repo", gh.run, time.Minute, nil)
+
+	// Baseline: a root and its mid-stack child, both open.
+	gh.queue(`[
+		{"url":"https://example/pr/1","state":"OPEN","headRefName":"acy/a","baseRefName":"main","number":1},
+		{"url":"https://example/pr/2","state":"OPEN","headRefName":"acy/b","baseRefName":"acy/a","number":2}
+	]`, nil)
+	if err := w.poll(context.Background()); err != nil {
+		t.Fatalf("poll 1 (baseline): %v", err)
+	}
+	assertNoPREvent(t, w)
+	if got := w.StackedCount(); got != 1 {
+		t.Fatalf("StackedCount() after baseline = %d, want 1", got)
+	}
+
+	// The mid-stack PR merges.
+	gh.queue(`[
+		{"url":"https://example/pr/1","state":"OPEN","headRefName":"acy/a","baseRefName":"main","number":1},
+		{"url":"https://example/pr/2","state":"MERGED","headRefName":"acy/b","baseRefName":"acy/a","number":2}
+	]`, nil)
+	if err := w.poll(context.Background()); err != nil {
+		t.Fatalf("poll 2 (mid-stack merge): %v", err)
+	}
+	ev := drainPREvent(t, w, time.Second)
+	if ev.Head != "acy/b" || ev.State != "merged" || ev.Base != "acy/a" {
+		t.Fatalf("mid-stack merge event = %+v", ev)
+	}
+	if got := w.StackedCount(); got != 0 {
+		t.Errorf("StackedCount() after the merge = %d, want 0", got)
+	}
+}
+
 // --- Refresh rate limit ---
 
 func TestPRWatcherRefreshRateLimited(t *testing.T) {

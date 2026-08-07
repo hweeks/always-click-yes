@@ -738,6 +738,35 @@ func TestManagerLaunchRefusedAtPRCapThenRecoversAfterMerge(t *testing.T) {
 	}
 }
 
+// A refusal at the cap names how many further PRs are mid-stack and
+// uncapped, so the architect doesn't mistake the cap for less headroom than
+// it actually has.
+func TestManagerLaunchRefusedAtPRCapNamesStackedCount(t *testing.T) {
+	mt := newMockTransport()
+	gh := &fakeGHRunner{}
+	gh.queue(`[
+		{"url":"https://example/pr/1","state":"OPEN","headRefName":"acy/a","baseRefName":"main","number":1},
+		{"url":"https://example/pr/2","state":"OPEN","headRefName":"acy/b","baseRefName":"acy/a","number":2}
+	]`, nil)
+	watcher := NewPRWatcher("/repo", gh.run, time.Minute, nil)
+	if err := watcher.poll(context.Background()); err != nil {
+		t.Fatalf("bootstrap poll: %v", err)
+	}
+
+	m := NewManager(testFleetConfig(testHost("a", 1)), mt.forHost, WithPRWatcher(watcher, 1))
+	t.Cleanup(m.Close)
+
+	_, err := m.Launch(context.Background(), LaunchReq{Ticket: "T1"})
+	if err == nil {
+		t.Fatal("Launch at the PR cap: want error, got nil")
+	}
+	for _, want := range []string{"1/1", "1 more are mid-stack and uncapped", "https://example/pr/1", "Await"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal %q missing %q", err.Error(), want)
+		}
+	}
+}
+
 // prCap <= 0 means uncapped: Launch never consults the watcher at all.
 func TestManagerLaunchUncappedIgnoresWatcher(t *testing.T) {
 	mt := newMockTransport()
