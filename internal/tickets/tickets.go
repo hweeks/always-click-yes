@@ -57,8 +57,16 @@ type Ticket struct {
 	Branch    string
 	PR        string
 	DependsOn []string
-	Updated   time.Time
-	Body      string
+	// StackOn names the ticket this one's branch is stacked on, as part of a
+	// larger stacked-PR effort landing elsewhere in the codebase. This is
+	// deliberately weaker than DependsOn: DependsOn means the named ticket
+	// must MERGE before this one starts; StackOn means the named ticket only
+	// needs an OPEN PR — this ticket's branch sits on top of that ticket's
+	// branch and the two land together in the same linear stack, not one
+	// after the other. Collapsing these two is easy and wrong.
+	StackOn string
+	Updated time.Time
+	Body    string
 }
 
 // ErrNotFound is returned by Get when no ticket has the given id.
@@ -108,6 +116,14 @@ func validateShape(t Ticket) error {
 	}
 	if !validStatuses[t.Status] {
 		return fmt.Errorf("invalid status %q", t.Status)
+	}
+	// Unlike a self-referencing depends_on — legal here, since it only
+	// becomes a cycle once Validate can see the whole store — a
+	// self-referencing stack_on is never legal: a ticket cannot stack on its
+	// own branch at any point, so this is rejected immediately rather than
+	// deferred.
+	if t.StackOn == t.ID {
+		return fmt.Errorf("stack_on cannot reference its own ticket %q", t.ID)
 	}
 	return nil
 }
