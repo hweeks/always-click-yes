@@ -1,5 +1,31 @@
 # Changelog
 
+## [1.7.0](https://github.com/hweeks/always-click-yes/compare/v1.6.0...v1.7.0) (2026-08-07)
+
+
+### Features
+
+* add fleet.verifyCommands and fleet.verifyTimeoutSeconds config ([287d35e](https://github.com/hweeks/always-click-yes/commit/287d35eb77ceb6f9f5c243b3e6ae49c6addba307))
+* add internal/verify to run post-session verification commands ([728302a](https://github.com/hweeks/always-click-yes/commit/728302ac3296c26c7a05dbfd5ccd7789e4c09546))
+* add VerifyCheck/VerifyStatus to the engineer result wire type ([6b848d2](https://github.com/hweeks/always-click-yes/commit/6b848d2ec9b61d619312dd1975442e6aac3cc22e))
+* check for a Go toolchain on fleet hosts in doctor ([bc4d50a](https://github.com/hweeks/always-click-yes/commit/bc4d50a80e8792a55e9169578fd4cf2085585887))
+* run verification in finalize and append a summary digest ([4c5e79c](https://github.com/hweeks/always-click-yes/commit/4c5e79cf5d121a18b2fb124ce16fd4e73afcf2c2))
+* surface verification digest in fleet transcript and Await text ([a75b03c](https://github.com/hweeks/always-click-yes/commit/a75b03c0f6a451032f7325c04142bf2eb0041445))
+* thread verify commands and timeout through the engineer wire ([da21f44](https://github.com/hweeks/always-click-yes/commit/da21f44912d4c08dc1cf9cb9e3da837fb77a7638))
+
+
+### Bug Fixes
+
+* derive fleet rc shell from its rc file, diagnose a broken wrapper ([c981b31](https://github.com/hweeks/always-click-yes/commit/c981b3129aa1d8a6fe36a1d5e8e50b1e5f98028f))
+* derive fleet rc shell from its rc file, diagnose a broken wrapper ([ba1c7dd](https://github.com/hweeks/always-click-yes/commit/ba1c7dd748d118ae9186fef986aa45bd82694895))
+* document the ssh arg-joining trap and check for a Go toolchain in fleet doctor ([0adc528](https://github.com/hweeks/always-click-yes/commit/0adc528a1128b46e073d96d9d935cb15a7ca43f2))
+* wrap and box every transcript entry ([f79e8c6](https://github.com/hweeks/always-click-yes/commit/f79e8c61799366f9e2fa5af713c9015b27d29079))
+
+
+### Performance
+
+* memoize rebuild() so an idle tick does zero rendering work ([9dcb0c8](https://github.com/hweeks/always-click-yes/commit/9dcb0c8beaf188ca84acd00914dc9e6ed13e4abb))
+
 ## [1.6.0](https://github.com/hweeks/always-click-yes/compare/v1.5.0...v1.6.0) (2026-08-06)
 
 
