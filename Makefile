@@ -21,7 +21,7 @@ run: build
 # tickets to a fleet of engineers instead of running children locally. Reads
 # the "fleet" section of the repo-root .acy.json, so no flags here.
 arch: build
-	./$(BIN) arch
+	./$(BIN) arch --countdown 5s
 
 test:
 	go test ./...
