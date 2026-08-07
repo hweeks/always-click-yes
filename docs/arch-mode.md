@@ -225,10 +225,9 @@ repo root to get every key name right on a fresh clone.
 - **`stackMode`** (default `"ask"`, or `"off"` / `"chain"`) — whether an engineer's work
   lands as a stack of dependent branches/PRs. `"off"` means never stack, never ask.
   `"ask"` means the architect asks the human during planning whether this run's work
-  should land as stacks — and `"ask"` degrades to `"off"` automatically when the
-  `gh-stack` extension or the repo's preview enablement is missing (a later ticket
-  implements this specific downgrade behavior, but the contract is documented here).
-  `"chain"` means stack by default without asking.
+  should land as stacks. `"chain"` means stack by default without asking. See
+  [Stacked PRs](#stacked-prs) for what a stack actually is and what happens when the
+  `gh-stack` extension or the repo's preview enablement is missing.
 - **`verifyCommands`** (default `["go build ./...", "go test -race ./...", "gofmt -l .",
   "golangci-lint run ./..."]`) — commands run in an engineer's worktree after it
   finishes, as evidence collected by acy itself rather than the model's own claim of
@@ -311,15 +310,11 @@ system prompt in place of the parent's. The flow:
    Each ticket's brief has to stand completely alone, the same way a `Dispatch`
    instruction does: the engineer that eventually runs it starts with no memory of
    this conversation. A ticket can optionally name a `depends_on` (must merge first)
-   or a `stack_on` (its branch may sit on that ticket's still-open PR instead of
-   waiting for a merge) — at most one ticket may claim a given `stack_on` parent.
-   This is board bookkeeping, not the mechanism itself: `LaunchEngineer`'s own
-   `stack_on` argument (step 4) is what actually stacks the branch when the ticket
-   is launched. When `fleet.stackMode` is `"ask"`, the architect puts the stacking
-   choice to you first, as a standard planning question — one review surface and one
-   clean landing on trunk, versus tickets that must run in order rather than in
-   parallel — before creating any tickets; `"chain"` stacks by default without
-   asking, and `"off"` never stacks.
+   or a `stack_on` — board bookkeeping for a stack, not the mechanism itself; see
+   [Stacked PRs](#stacked-prs) — and at most one ticket may claim a given `stack_on`
+   parent. When `fleet.stackMode` is `"ask"`, the architect puts the stacking choice
+   to you first, as a standard planning question, before creating any tickets;
+   `"chain"` stacks by default without asking, and `"off"` never stacks.
 3. **Arm (`Ctrl+G`).** Flips the session into AUTO-RUN, same keystroke as a plain run.
    The architect gets one kickoff prompt: launch engineers for the first tickets up
    to capacity, then `Await`.
@@ -329,12 +324,10 @@ system prompt in place of the parent's. The flow:
    result, an escalated question, a PR merge or close, or a reconnect notice after a
    dropped connection — react to it, and loop. `LaunchEngineer` takes its own optional
    `stack_on` argument — separate from the ticket board's `stack_on` field in step 2,
-   though normally set to the same parent id — naming a parent ticket, which stacks
-   the new engineer's branch on that ticket's still-open PR instead of trunk, so the
-   child can start as soon as the parent's PR opens rather than waiting for it to
-   merge. `FleetStatus` gives it (and you, via `/fleet`) a non-blocking snapshot of
-   every engineer's state, host, branch, PR and cost without waiting for the next
-   event.
+   though normally set to the same parent id — naming the parent ticket to actually
+   stack this engineer's branch on top of (see [Stacked PRs](#stacked-prs)).
+   `FleetStatus` gives it (and you, via `/fleet`) a non-blocking snapshot of every
+   engineer's state, host, branch, PR and cost without waiting for the next event.
 5. **Breadth, then depth: `AssembleStack`.** `stack_on` (steps 2 and 4) declares a stack
    up front, one launch at a time. `AssembleStack` is the other direction: launch
    several independent tickets wide against trunk — no `stack_on` — up to capacity,
@@ -342,20 +335,8 @@ system prompt in place of the parent's. The flow:
    branches into one stack after the fact, bottom-to-top by ticket id, answering with
    the new stack's number and its top PR's URL. That top PR can then be the `stack_on`
    target of a further ticket that genuinely needs all of them, so breadth becomes the
-   base of later depth. It only ever runs against tickets that are already finished,
-   already have an open PR against trunk, and are not already part of a stack — and,
-   critically, it only makes sense when those tickets never touched each other's code.
-   If one engineer wrote against a symbol another was adding, that engineer's own
-   verification already failed at PR time (or silently passed against stale code), and
-   folding the PRs together afterward makes the git history linear without making that
-   verification real. Use `stack_on` at launch time instead whenever a ticket genuinely
-   depends on another's work. `AssembleStack` runs `gh stack` entirely in a scratch
-   worktree it creates and tears down itself — never the operator's own checkout — and
-   force-pushes every branch it touches, safely, because `gh stack push`'s own
-   per-branch `--force-with-lease` rejects anything it doesn't recognize. A rebase
-   conflict during assembly is not retried: the architect is told to stop and escalate
-   to a human, the same rule `StackAssemble`'s own doc comment gives for any stack
-   rebase conflict.
+   base of later depth. See [Stacked PRs](#stacked-prs) for what it requires and where
+   it stops making sense.
 6. **PR-cap backpressure.** <a name="pr-cap-backpressure"></a> Once `prCap` PRs are
    open, `LaunchEngineer` refuses with a message telling the architect to `Await`
    merges first. This is deliberate: it's the difference between a fleet that keeps
@@ -371,6 +352,77 @@ system prompt in place of the parent's. The flow:
    reads.
 8. **Finish.** The architect calls `Finish` once every ticket is merged or otherwise
    accounted for (blocked with a note is accounted for; silently unmentioned isn't).
+
+## Stacked PRs
+
+A stack is an ordered chain of PRs, each based on the branch below it rather than on
+trunk, with only the bottom PR's base actually pointing at trunk. GitHub reviews and
+merges the whole chain as one linear group, not as several PRs each independently
+racing to rebase against a trunk the others are also changing — that's the appeal: one
+review surface and one clean landing on trunk, instead of tickets that would otherwise
+have to run strictly in order because each blocks on the previous one's merge.
+
+**Building a stack.** There are two ways to put engineers into one, and they compose.
+`stack_on` is declared up front, for dependent work: a ticket can name a `stack_on`
+parent when it's created (at most one ticket may claim a given parent), and
+`LaunchEngineer`'s own `stack_on` argument — normally set to that same parent id — is
+what actually stacks the branch when the ticket is launched, so the child can start as
+soon as the parent's PR opens rather than waiting for it to merge. `AssembleStack` runs
+the other direction, after the fact: launch several independent tickets wide against
+trunk — no `stack_on` — up to capacity, and once each has finished with its own open
+PR, `AssembleStack` folds their branches into one stack, bottom-to-top by ticket id,
+answering with the new stack's number and its top PR's URL. The two combine into a
+breadth-then-depth loop: launch wide with no `stack_on`, `AssembleStack` the tickets
+that finish, then `stack_on` a further ticket onto the resulting top PR once that next
+ticket genuinely needs all of them — so breadth becomes the base of later depth.
+
+`AssembleStack` only ever runs against tickets that are already finished, already have
+an open PR against trunk, and are not already part of a stack — and, critically, it
+only makes sense when those tickets never touched each other's code. If one engineer
+wrote against a symbol another was adding, that engineer's own verification already
+failed at PR time (or silently passed against stale code), and folding the PRs
+together afterward makes the git history linear without making that verification real.
+Use `stack_on` at launch time instead whenever a ticket genuinely depends on another's
+work. `AssembleStack` itself runs `gh stack` entirely in a scratch worktree it creates
+and tears down, never the operator's own checkout, and force-pushes every branch it
+touches, safely, because `gh stack push`'s own per-branch `--force-with-lease` rejects
+anything it doesn't recognize.
+
+**Reviewing and merging a stack.** A human reviews and merges a stack from the top.
+GitHub enforces its merge requirements — required checks, required reviews — server
+side, against each PR's actual base branch, so a mid-stack PR is held to exactly the
+same bar as the bottom one, not some lesser bar just because it isn't pointed at trunk
+directly.
+
+**When trunk moves.** Once a chain's PRs are open, arch mode's own `StackKeeper` keeps
+the chain registered and repaired without a human doing it by hand: it links a newly
+opened mid-stack PR into the chain on GitHub as it opens, and whenever an `acy/`-headed
+PR merges into trunk itself, it runs `gh stack sync` to rebase and repair whatever's
+left of the chain. A mid-stack merge — which by construction lands on another `acy/*`
+branch, not trunk — never triggers this; only the merge that actually reaches trunk
+does. If that sync (or `AssembleStack`'s own rebase step) hits a rebase conflict, it is
+not retried: acy surfaces it and a human has to resolve it by hand, the same rule
+either path follows for a stack rebase conflict. The manual equivalent, for a human who
+would rather do this themselves without waiting on `StackKeeper`, is GitHub's own
+"Rebase stack" button in its UI.
+
+**Prerequisites.** The `gh-stack` extension is only ever invoked by the architect, on
+its own local machine, never on a fleet host — see the `gh-stack` check paragraph under
+[Preparing a host](#preparing-a-host), which already covers why `acy fleet doctor`
+still reports this check per-host despite that. The repository itself also needs
+GitHub's stacked-PRs preview feature enabled — it's a public preview, not generally
+available — or every `gh stack` command fails with exit code 9. `fleet.stackMode`
+reacts differently to a missing prerequisite depending on which value you set: `"ask"`
+degrades to `"off"` silently, with an explanatory note, because an architect must never
+ask a human to choose an option it then can't perform; `"chain"` fails the run outright
+with a hard error instead, because an operator who explicitly set `"chain"` decided
+stacking was mandatory, and silently substituting `"off"` there would hide that
+decision from them.
+
+**Known limits.** A stack can't span forks — every branch in it has to live in the same
+repository. GitHub Desktop doesn't support stacked PRs at all. And a merge queue admits
+a whole stack in order, not one PR at a time, so queuing a mid-stack PR by itself isn't
+the shortcut it might look like.
 
 ## Resuming after a crash
 
