@@ -10,6 +10,7 @@ import (
 
 	"github.com/hweeks/always-click-yes/internal/alog"
 	"github.com/hweeks/always-click-yes/internal/config"
+	"github.com/hweeks/always-click-yes/internal/gitops"
 	"github.com/hweeks/always-click-yes/internal/version"
 )
 
@@ -21,7 +22,7 @@ type Check struct {
 }
 
 // checkNames is the fixed order Doctor runs — and reports — checks in.
-var checkNames = []string{"ssh", "acy", "claude", "gh", "go", "repo", "state"}
+var checkNames = []string{"ssh", "acy", "claude", "gh", "go", "repo", "state", "stack"}
 
 // Runner runs name with args, either on this machine or wrapped for a
 // remote host, and reports stdout and stderr separately. Doctor needs both:
@@ -120,16 +121,23 @@ func detailFrom(stderr string, err error) string {
 // rest of the checks still run, just without the broken wrap.
 func Doctor(ctx context.Context, h config.FleetHost, base string) []Check {
 	bare, pathOnly, full := runnerForHost(h)
-	return doctorWith(ctx, h, base, bare, pathOnly, full)
+	return doctorWith(ctx, h, base, bare, pathOnly, full, runLocal)
 }
 
-func doctorWith(ctx context.Context, h config.FleetHost, base string, bare, pathOnly, full Runner) []Check {
+// doctorWith takes local as its own injected Runner, separate from
+// bare/pathOnly/full, because checkGHStack must always run against this
+// machine — the one `acy fleet doctor` itself is executing on — never
+// through h's ssh wrapping. Doctor passes the package's real runLocal;
+// tests pass a scriptedRunner instead so they don't shell out to a real
+// gh binary just because they exercise doctorWith directly.
+func doctorWith(ctx context.Context, h config.FleetHost, base string, bare, pathOnly, full, local Runner) []Check {
 	probe := checkSSH(ctx, h, bare, pathOnly, full)
 	if !probe.reachable {
 		checks := []Check{probe.check}
-		for _, name := range checkNames[1:] {
+		for _, name := range checkNames[1 : len(checkNames)-1] {
 			checks = append(checks, Check{Name: name, OK: false, Detail: "skipped: ssh check failed"})
 		}
+		checks = append(checks, checkGHStack(ctx, local))
 		return checks
 	}
 	run := probe.rest
@@ -141,6 +149,7 @@ func doctorWith(ctx context.Context, h config.FleetHost, base string, bare, path
 		checkGo(ctx, h, run),
 		checkRepo(ctx, h, base, run),
 		checkState(ctx, run),
+		checkGHStack(ctx, local),
 	}
 }
 
@@ -363,4 +372,48 @@ func checkState(ctx context.Context, run Runner) Check {
 		return Check{Name: "state", OK: false, Detail: detailFrom(stderr, err)}
 	}
 	return Check{Name: "state", OK: true}
+}
+
+// checkGHStack is the odd one out among checkNames: every other check
+// probes h, the host this doctor row is about. This one never does — `gh
+// stack` (the gh-stack extension) is only ever invoked by the architect on
+// its own local machine, in its own local checkout; fleet engineers open
+// ordinary chained PRs with plain `gh pr create` and never touch the
+// extension. So the question this check answers is "can the machine
+// running `acy fleet doctor` itself drive gh-stack", not "can host h" —
+// which is exactly why doctorWith hands it the local runner instead of run
+// (h's, possibly ssh-wrapped, runner) even when h is remote. Do not "fix"
+// this by moving it onto the per-host ssh-wrapped runner; that would answer
+// a question nobody asks and stop answering the one that matters.
+//
+// It is informational only, like checkGo, and every branch returns
+// OK:true: a repository that hasn't opted into the stacked-PRs preview
+// (gh-stack exit code 9, see gitops.ExitCode's table) or a machine that
+// simply doesn't have the extension installed is still a perfectly good
+// fleet for ordinary, flat, non-stacked PRs — that must not read as a
+// broken host any more than a missing Go toolchain does.
+func checkGHStack(ctx context.Context, run Runner) Check {
+	stdout, stderr, err := run(ctx, "gh", "stack", "--version")
+	if err == nil {
+		return Check{Name: "stack", OK: true, Detail: strings.TrimSpace(stdout)}
+	}
+	if code, ok := gitops.ExitCode(err); ok && code == 9 {
+		return Check{
+			Name: "stack",
+			OK:   true,
+			Detail: "gh-stack extension is installed, but stacked pull requests are not enabled " +
+				"(public preview) for this repository",
+		}
+	}
+
+	detail := detailFrom(stderr, err)
+	listOut, _, listErr := run(ctx, "gh", "extension", "list")
+	if listErr == nil && strings.Contains(listOut, "gh-stack") {
+		return Check{Name: "stack", OK: true, Detail: "gh-stack extension present (version unknown: " + detail + ")"}
+	}
+	return Check{
+		Name:   "stack",
+		OK:     true,
+		Detail: "gh-stack extension not found (" + detail + "); install it with `gh extension install github/gh-stack`",
+	}
 }
