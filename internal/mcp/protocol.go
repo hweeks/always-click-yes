@@ -507,6 +507,10 @@ const createTicketSchema = `{
       "maxItems": 10,
       "items": {"type": "string"},
       "description": "Ids of tickets that must merge before this one can start. Optional."
+    },
+    "stack_on": {
+      "type": "string",
+      "description": "The id of the single ticket this one's branch stacks on — not an array like depends_on, since only one ticket may claim a given parent. Use this when this ticket's branch can sit on top of that ticket's still-open PR and land together in the same stack; use depends_on instead when it must wait for that ticket to merge first. Optional."
     }
   }
 }`
@@ -525,6 +529,10 @@ const updateTicketDescription = "Record a ticket's new state the moment it chang
 	"when the human merges, blocked with a note when stuck. Writes and commits the ticket file " +
 	"deterministically; you never edit tickets by hand."
 
+// updateTicketSchema deliberately has no stack_on: a stack's shape is decided
+// once, when the board is written by CreateTicket, not renegotiated mid-run —
+// letting it move later would let the board disagree with branches that
+// already exist on top of each other.
 const updateTicketSchema = `{
   "type": "object",
   "additionalProperties": false,
