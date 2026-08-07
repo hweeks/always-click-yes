@@ -21,6 +21,7 @@ import (
 	"github.com/hweeks/always-click-yes/internal/driver"
 	"github.com/hweeks/always-click-yes/internal/fleet"
 	"github.com/hweeks/always-click-yes/internal/gate"
+	"github.com/hweeks/always-click-yes/internal/gitops"
 	"github.com/hweeks/always-click-yes/internal/htmlrender"
 	"github.com/hweeks/always-click-yes/internal/mcp"
 	"github.com/hweeks/always-click-yes/internal/session"
@@ -73,6 +74,23 @@ type Config struct {
 	// UpdateTicket are then refused with mcp.TicketsUnavailable). Only ever
 	// wired for a RoleArchitect session, alongside Fleet.
 	Tickets TicketStore
+
+	// GitRunner is AssembleStack's git/gh runner — the same gitops.Runner
+	// shape the fleet's own PR watcher and engineer worktrees use. Only ever
+	// wired for a RoleArchitect session, alongside Fleet; `acy arch` is the
+	// only caller that sets it.
+	GitRunner gitops.Runner
+
+	// Trunk is the fleet's resolved base branch (fleet.baseBranch), the trunk
+	// AssembleStack rebases and links against. Not a flag: `acy arch` is the
+	// only caller that sets it, alongside Fleet.
+	Trunk string
+
+	// StackMode is the run's already-resolved effective fleet.stackMode,
+	// never the raw configured value — the same value threaded to
+	// ArchSystemPromptFor. Needed here too so AssembleStack can refuse when
+	// it is "off". Not a flag: `acy arch` is the only caller that sets it.
+	StackMode string
 
 	// Resume is a session id to restore at startup: --resume/--continue set it, and
 	// Init then rebuilds the run instead of cold-starting a plan session.
@@ -221,6 +239,12 @@ type Model struct {
 	fleetCapUsed  int
 	fleetCapTotal int
 
+	// gitRunner, trunk and stackMode back AssembleStack — see Config.GitRunner/
+	// Config.Trunk/Config.StackMode for what each means and who sets them.
+	gitRunner gitops.Runner
+	trunk     string
+	stackMode string
+
 	// tickets is the architect's ticket board. nil disables it, the same way
 	// fleet does: ReadTickets/UpdateTicket are then refused rather than
 	// half-served.
@@ -331,6 +355,9 @@ func New(drv *driver.Driver, cfg Config) Model {
 		dispatcher:    cfg.Dispatcher,
 		fleet:         cfg.Fleet,
 		tickets:       cfg.Tickets,
+		gitRunner:     cfg.GitRunner,
+		trunk:         cfg.Trunk,
+		stackMode:     cfg.StackMode,
 
 		cwd:       cfg.Cwd,
 		resumeID:  cfg.Resume,
@@ -622,6 +649,7 @@ var intercepted = map[string]bool{
 	mcp.ToolAwait:          true,
 	mcp.ToolAnswerEngineer: true,
 	mcp.ToolFleetStatus:    true,
+	mcp.ToolAssembleStack:  true,
 	mcp.ToolReadTickets:    true,
 	mcp.ToolUpdateTicket:   true,
 	mcp.ToolCreateTicket:   true,
@@ -663,7 +691,7 @@ func (m *Model) ingestToolUse(b driver.ContentBlock) {
 		return // rendered by openAsk, which owns the answer
 	case mcp.ToolDispatch:
 		return // rendered by startDispatch, which owns the task
-	case mcp.ToolLaunchEngineer, mcp.ToolAwait, mcp.ToolAnswerEngineer, mcp.ToolFleetStatus:
+	case mcp.ToolLaunchEngineer, mcp.ToolAwait, mcp.ToolAnswerEngineer, mcp.ToolFleetStatus, mcp.ToolAssembleStack:
 		return // rendered when the corresponding Pending resolves — see fleet.go
 	case mcp.ToolReadTickets, mcp.ToolUpdateTicket, mcp.ToolCreateTicket:
 		return // rendered when the corresponding Pending resolves — see tickets.go

@@ -169,6 +169,8 @@ func runArch(ctx context.Context, f supervisor.Flags, changed func(string) bool)
 	f.ArchMode = true
 	f.Fleet = manager
 	f.Tickets = tickets.New(cwd, fleetCfg.TicketCommit, gitops.DefaultRunner)
+	f.GitRunner = gitops.DefaultRunner
+	f.Trunk = fleetCfg.BaseBranch
 
 	// Alt-screen by default; ACY_NO_ALTSCREEN=1 keeps output inline, exactly as
 	// `acy run` decides it.

@@ -119,6 +119,21 @@ func ArchSystemPromptFor(stackMode string) string {
 		"names the parent ticket; a branch may have at most one child.",
 	}
 
+	if stackMode != "off" {
+		lines = append(lines,
+			"",
+			"A stack does not have to be declared up front: launch several independent tickets wide against",
+			"trunk (no stack_on) up to capacity, and once each has finished with an open PR, "+mcp.Qualified(mcp.ToolAssembleStack),
+			"folds their branches into one stack, bottom-to-top by ticket id, answering with the new stack's",
+			"number and its top PR's URL. That top can then be the stack_on target of a further ticket that",
+			"genuinely needs all of them — breadth first, then depth on top of it. This only works when the",
+			"tickets never touched each other's code: if one engineer wrote against a symbol another was adding,",
+			"its own verification already failed at PR time, and folding the PRs afterward makes the history",
+			"linear without making that verification real. Use stack_on at launch time instead when a ticket",
+			"genuinely depends on another's work.",
+		)
+	}
+
 	if stackMode == "ask" {
 		lines = append(lines,
 			"",

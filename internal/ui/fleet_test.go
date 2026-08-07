@@ -609,7 +609,7 @@ func TestAskMsgRoutesFleetTools(t *testing.T) {
 // a countdown that ticks invisibly behind the ask-socket answer acy already
 // gave — mirrors TestDispatchIsIntercepted.
 func TestFleetToolsAreIntercepted(t *testing.T) {
-	for _, tool := range []string{mcp.ToolLaunchEngineer, mcp.ToolAwait, mcp.ToolAnswerEngineer, mcp.ToolFleetStatus} {
+	for _, tool := range []string{mcp.ToolLaunchEngineer, mcp.ToolAwait, mcp.ToolAnswerEngineer, mcp.ToolFleetStatus, mcp.ToolAssembleStack} {
 		t.Run(tool, func(t *testing.T) {
 			m := New(nil, Config{Countdown: 30 * time.Second})
 			m.now = time.Now()

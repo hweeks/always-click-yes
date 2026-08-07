@@ -320,3 +320,24 @@ func TestArchSystemPromptForAsksOnlyWhenStackModeIsAsk(t *testing.T) {
 		}
 	}
 }
+
+// The breadth-then-depth paragraph — launch tickets wide, then
+// AssembleStack folds their PRs into a chain — only makes sense once
+// stacking is on at all, so it must appear for "ask" and "chain" and be
+// absent for "off".
+func TestArchSystemPromptForAssembleStackOnlyWhenStackModeIsNotOff(t *testing.T) {
+	for _, mode := range []string{"ask", "chain"} {
+		prompt := ArchSystemPromptFor(mode)
+		if !strings.Contains(prompt, mcp.Qualified(mcp.ToolAssembleStack)) {
+			t.Errorf("ArchSystemPromptFor(%q) should mention mcp.Qualified(mcp.ToolAssembleStack)", mode)
+		}
+		if !strings.Contains(prompt, "code-independent") && !strings.Contains(prompt, "never touched each other's code") {
+			t.Errorf("ArchSystemPromptFor(%q) should state the code-independence limit", mode)
+		}
+	}
+
+	prompt := ArchSystemPromptFor("off")
+	if strings.Contains(prompt, mcp.Qualified(mcp.ToolAssembleStack)) {
+		t.Error(`ArchSystemPromptFor("off") should not mention AssembleStack`)
+	}
+}
