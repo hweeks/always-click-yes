@@ -135,6 +135,29 @@ type Question struct {
 	Questions  []AskQuestion `json:"questions"`
 }
 
+// VerifyStatus narrows VerifyCheck.Status to the set an architect understands.
+type VerifyStatus string
+
+const (
+	VerifyPassed  VerifyStatus = "passed"  // ran, exit 0
+	VerifyFailed  VerifyStatus = "failed"  // ran, non-zero exit
+	VerifySkipped VerifyStatus = "skipped" // binary not installed on this host — a fact, never a failure
+	VerifyTimeout VerifyStatus = "timeout" // per-command deadline elapsed
+	VerifyError   VerifyStatus = "error"   // could not be launched/run for any other reason
+)
+
+// VerifyCheck is one command acy itself ran in the worktree to check the
+// engineer's work, and what happened when it did.
+type VerifyCheck struct {
+	Name       string       `json:"name"`
+	Argv       []string     `json:"argv"`
+	Status     VerifyStatus `json:"status"`
+	ExitCode   int          `json:"exit_code"`
+	Output     string       `json:"output,omitempty"`
+	Truncated  bool         `json:"truncated,omitempty"`
+	DurationMS int64        `json:"duration_ms"`
+}
+
 // Result is the engineer's final report. Nothing follows it.
 type Result struct {
 	Type Type   `json:"type"`
@@ -149,4 +172,9 @@ type Result struct {
 	CostUSD float64      `json:"cost_usd,omitempty"`
 	Tokens  state.Tokens `json:"tokens,omitzero"`
 	Files   []string     `json:"files,omitempty"`
+
+	// Verification is machine-collected evidence: the commands acy itself ran
+	// in the worktree after the session's own verdict, never the model's
+	// report of having run them.
+	Verification []VerifyCheck `json:"verification,omitempty"`
 }

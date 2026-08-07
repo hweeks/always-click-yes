@@ -52,7 +52,7 @@ Every outbound message carries two fields no inbound message has:
 | `hello` | `engineer_id, protocol_version, acy_version, host, pid` |
 | `event` | `kind, text, cost_usd, tokens` |
 | `question` | `question_id, questions` |
-| `result` | `outcome, summary, branch, pr_url, cost_usd, tokens, files` |
+| `result` | `outcome, summary, branch, pr_url, cost_usd, tokens, files, verification` |
 
 `hello` is always the first thing an engineer sends and is therefore always
 `seq: 1`. `protocol_version` is the wire protocol's major version (currently
@@ -71,6 +71,20 @@ render a `question` with the exact same UI it already has for
 
 `result` is the engineer's final report. Nothing follows it — an engineer
 process that has sent a `result` is done and exits.
+
+`result.verification` is machine-collected: the commands acy's own code ran
+in the worktree after the session's own verdict, never the model's report of
+having run them. Each entry's `status` is one of:
+
+- `passed` — ran, exit 0
+- `failed` — ran, non-zero exit
+- `skipped` — the binary isn't installed on this host, a fact, not a failure
+- `timeout` — the per-command deadline elapsed
+- `error` — couldn't be launched or run for any other reason
+
+Each entry's `output` is capped, so a consumer should treat it as bounded
+evidence, not a full log: an oversized capture keeps the head and tail and
+marks `truncated: true` rather than growing without limit.
 
 `tokens` fields on `event` and `result` reuse `state.Tokens`
 (`internal/state/state.go`): `input`, `output`, `cache_create`, `cache_read`.
