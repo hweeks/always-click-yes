@@ -41,6 +41,18 @@ const archStackWaitTimeout = 5 * time.Second
 // the right trunk; a trunk merge triggers a `gh stack sync`; and a mid-stack
 // merge does not.
 func TestE2EArchStackChainAgainstFakeGH(t *testing.T) {
+	// Hermetic git: no ~/.gitconfig, no system config, a fixed commit
+	// identity — the same pattern internal/gitops/gitops_test.go's
+	// hermeticRunner and TestE2EArchRunsEngineersInParallel use, needed here
+	// because scratchGitRepo's initial commit runs on whatever machine CI
+	// picks, and only some of them happen to have a global git identity.
+	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+	t.Setenv("GIT_CONFIG_SYSTEM", "/dev/null")
+	t.Setenv("GIT_AUTHOR_NAME", "acy-arch-e2e")
+	t.Setenv("GIT_AUTHOR_EMAIL", "acy-arch-e2e@example.com")
+	t.Setenv("GIT_COMMITTER_NAME", "acy-arch-e2e")
+	t.Setenv("GIT_COMMITTER_EMAIL", "acy-arch-e2e@example.com")
+
 	clonePath, _ := scratchGitRepo(t)
 	argvFile, ghStateFile := stubGhStateful(t)
 
