@@ -223,10 +223,14 @@ func (m *Model) startAssembleStack(p *mcp.Pending) {
 // tree while they might be mid-edit is unacceptable — so every command that
 // needs a checkout runs here instead, never with dir == clonePath.
 //
-// This duplicates a small piece of what a concurrent ticket's
-// fleet.StackKeeper (a dedicated worktree owner, not yet on main) will also
-// need. Unify the two once both have landed; for now this tool must not
-// depend on code that isn't merged.
+// This is deliberately separate from fleet.StackKeeper's own worktree
+// (internal/fleet/stackkeeper.go): StackKeeper keeps one long-lived,
+// deterministic worktree for repeated background Sync passes across the
+// run's whole lifetime, while an AssembleStack call needs a throwaway
+// worktree it can tear down the moment this one init/rebase/push/link
+// sequence finishes. Sharing StackKeeper's worktree would risk this tool's
+// multi-step gh stack sequence racing a background sync running at the same
+// time.
 func assembleWorktree(ctx context.Context, run gitops.Runner, clonePath, trunk string) (dir string, cleanup func(), err error) {
 	dir, err = os.MkdirTemp("", "acy-assemble-")
 	if err != nil {
