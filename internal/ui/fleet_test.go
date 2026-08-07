@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -12,6 +13,7 @@ import (
 	"github.com/hweeks/always-click-yes/internal/engineerwire"
 	"github.com/hweeks/always-click-yes/internal/fleet"
 	"github.com/hweeks/always-click-yes/internal/gate"
+	"github.com/hweeks/always-click-yes/internal/gitops"
 	"github.com/hweeks/always-click-yes/internal/mcp"
 	"github.com/hweeks/always-click-yes/internal/state"
 )
@@ -547,6 +549,106 @@ func TestAwaitReturnsPREvent(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("transcript entry = %q, missing %q", body, want)
 		}
+	}
+}
+
+// --- stack events ---
+
+// A successful link renders and Awaits with the full chain named, mirroring
+// TestAwaitReturnsPREvent for the new Kind.
+func TestAwaitReturnsStackLinkEvent(t *testing.T) {
+	fake := newFakeFleetManager()
+	fake.active = 1
+	m := &Model{phase: PhaseAutoRun, fleet: fake}
+	p, reply := fleetPending(mcp.ToolAwait, `{}`)
+	m.startAwait(p)
+
+	m.ingestFleet(fleet.Event{
+		Kind:  fleet.KindStack,
+		Stack: &fleet.StackEvent{Op: "link", Branches: []string{"acy/t1-base", "acy/t2-child"}},
+	})
+
+	if m.fleetAwait != nil {
+		t.Error("the held Await should be cleared once the stack event resolves it")
+	}
+	got := answer(t, reply)
+	for _, want := range []string{"acy/t1-base", "acy/t2-child", "->"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("Await's answer = %q, missing %q", got, want)
+		}
+	}
+
+	if len(m.entries) != 1 {
+		t.Fatalf("want 1 transcript entry for the stack event, got %d", len(m.entries))
+	}
+	body := m.entries[0].body
+	for _, want := range []string{"acy/t1-base", "acy/t2-child", "->"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("transcript entry = %q, missing %q", body, want)
+		}
+	}
+}
+
+// A successful sync renders and Awaits as a short, unremarkable line.
+func TestAwaitReturnsStackSyncEvent(t *testing.T) {
+	fake := newFakeFleetManager()
+	fake.active = 1
+	m := &Model{phase: PhaseAutoRun, fleet: fake}
+	p, reply := fleetPending(mcp.ToolAwait, `{}`)
+	m.startAwait(p)
+
+	m.ingestFleet(fleet.Event{
+		Kind:  fleet.KindStack,
+		Stack: &fleet.StackEvent{Op: "sync"},
+	})
+
+	got := answer(t, reply)
+	if !strings.Contains(got, "sync") {
+		t.Errorf("Await's answer = %q, want it to mention the sync", got)
+	}
+	if len(m.entries) != 1 {
+		t.Fatalf("want 1 transcript entry for the stack event, got %d", len(m.entries))
+	}
+	if !strings.Contains(m.entries[0].body, "sync") {
+		t.Errorf("transcript entry = %q, want it to mention the sync", m.entries[0].body)
+	}
+}
+
+// A conflict must name the branch and tell the architect plainly this needs a
+// human and will not be retried automatically — the one case where Await's
+// text has to stop the model from just trying again.
+func TestAwaitReturnsStackConflictEvent(t *testing.T) {
+	fake := newFakeFleetManager()
+	fake.active = 1
+	m := &Model{phase: PhaseAutoRun, fleet: fake}
+	p, reply := fleetPending(mcp.ToolAwait, `{}`)
+	m.startAwait(p)
+
+	conflictErr := fmt.Errorf("gh-stack: %w", gitops.ErrStackConflict)
+	m.ingestFleet(fleet.Event{
+		Kind:  fleet.KindStack,
+		Stack: &fleet.StackEvent{Op: "sync", Branch: "acy/t2-child", Err: conflictErr},
+	})
+
+	got := answer(t, reply)
+	for _, want := range []string{"acy/t2-child", "human"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("Await's answer = %q, missing %q", got, want)
+		}
+	}
+	if !strings.Contains(strings.ToLower(got), "not retry") && !strings.Contains(strings.ToLower(got), "will not auto-resolve") {
+		t.Errorf("Await's answer = %q, want it to say this will not be retried automatically", got)
+	}
+
+	if len(m.entries) != 1 {
+		t.Fatalf("want 1 transcript entry for the stack event, got %d", len(m.entries))
+	}
+	ent := m.entries[0]
+	if ent.kind != eWarn {
+		t.Errorf("transcript entry kind = %v, want eWarn for a conflict", ent.kind)
+	}
+	if !strings.Contains(ent.body, "acy/t2-child") {
+		t.Errorf("transcript entry = %q, want it to name the conflicting branch", ent.body)
 	}
 }
 

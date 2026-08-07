@@ -159,7 +159,12 @@ func runArch(ctx context.Context, f supervisor.Flags, changed func(string) bool)
 	watcher := fleet.NewPRWatcher(cwd, gitops.DefaultRunner, 0, nil)
 	go watcher.Run(ctx)
 
-	manager := fleet.NewManager(*fleetCfg, fleet.ForHost, fleet.WithPRWatcher(watcher, prCap))
+	opts := []fleet.Option{fleet.WithPRWatcher(watcher, prCap)}
+	if fleetCfg.StackMode != "off" {
+		keeper := fleet.NewStackKeeper(cwd, gitops.DefaultRunner, fleetCfg.BaseBranch)
+		opts = append(opts, fleet.WithStackKeeper(keeper))
+	}
+	manager := fleet.NewManager(*fleetCfg, fleet.ForHost, opts...)
 	f.ArchMode = true
 	f.Fleet = manager
 	f.Tickets = tickets.New(cwd, fleetCfg.TicketCommit, gitops.DefaultRunner)
