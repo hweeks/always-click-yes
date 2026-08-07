@@ -437,6 +437,58 @@ real probing to learn, so a future agent doesn't have to relearn it by breaking 
   ```
   Never background a live e2e run and consider it handled — poll it, don't fire-and-forget
   it; it's a paid Claude session part-way to a real PR, not a fire-and-forget shell job.
+- **`gh-stack`'s real contract with this package is its exit code, never its stderr text.**
+  `classify` (`internal/gitops/stack.go`) branches only on `ExitCode(err)` against the
+  fixed table above it — 2/3/4/6/7/8/9 each map to a sentinel, everything else wraps
+  verbatim — and the doc comment above that table says outright why: stderr wording is
+  for humans and can change across gh-stack releases, while the exit code is the one thing
+  a preview CLI has committed to keeping stable.
+- **`gh stack view` without `--json` pages through `less -R` and hangs a non-TTY process
+  forever.** `StackView` (`internal/gitops/stack.go`) only ever calls it with `--json`, and
+  the package doc comment at the top of the file names this explicitly as the mistake a
+  future caller is likely to make.
+- **`gh stack modify`, `gh stack switch`, and bare `gh stack submit` (no `--auto`) are
+  interactive full-screen TUIs and this package never calls any of them.** Same doc comment
+  in `internal/gitops/stack.go` lists all three; every exported function in the file only
+  ever shells out to `link`, `view --json`, `rebase`, `push`, `sync`, and `init` for exactly
+  this reason.
+- **`gh stack link` needs no local tracking — it only reads/writes GitHub's own view of a
+  PR's base branch — which is what lets `StackKeeper.Link` run it synchronously on the hot
+  path.** `Link`'s own comment (`internal/fleet/stackkeeper.go`) is explicit that this is
+  the *only* stack operation safe to run directly in `k.dir`, the operator's own working
+  tree: it is called from inside `forwardPRWatcher`'s own goroutine (`internal/fleet/manager.go`)
+  on every PR open, and a caller on that path owns no checkout of its own to run anything
+  else in.
+- **The PR cap counts stack roots, not every open `acy/*` PR, and it is recomputed fresh on
+  every poll rather than tracked as state.** `prSnapshot.isRoot` (`internal/fleet/prwatch.go`)
+  derives "root" from `baseRefName` reported live by `gh pr list`, and `OpenCount` /
+  `StackedCount` both read through it rather than through anything `Manager` maintains
+  itself. `isRoot`'s own comment explains why that matters beyond correctness: a resumed
+  `Manager` has no memory of which PRs a since-vanished engineer stacked, but GitHub's own
+  base-branch report is still authoritative, so a resume needs zero extra bookkeeping to get
+  the cap right again.
+- **Nothing that needs a checkout may ever run in the operator's own working tree — except
+  `StackKeeper.Link` (see above), which needs none.** `AssembleStack`'s `assembleWorktree`
+  (`internal/ui/assemble.go`) mints a disposable `git worktree add --detach` scratch dir per
+  call, and `StackKeeper.Sync` (`internal/fleet/stackkeeper.go`) keeps one long-lived
+  deterministic worktree for repeated background syncs — deliberately two different
+  worktrees, per `assembleWorktree`'s own comment, so Assemble's one-shot
+  init/rebase/push/link sequence can never race a background `Sync` sharing the same
+  checkout.
+- **Force-pushing an engineer's branch during assembly is safe because the engineer is
+  already finished, and `--force-with-lease` is only the backstop.** `StackPush`
+  (`internal/gitops/stack.go`) pushes every branch in the stack with a per-branch
+  `--force-with-lease`; `looksLikeLeaseRejection` in `internal/ui/assemble.go` exists
+  specifically to catch the case that backstop is for — a human's own local commits landing
+  on an `acy/*` branch after this run last observed it — and escalates rather than retrying,
+  because retrying blind would force-push over whatever they just added.
+- **A stack rebase conflict is always escalated to a human, never auto-resolved, and `gh
+  stack init` enabling `git rerere` is what makes resolving the same conflict twice cheap.**
+  `StackAssemble`'s doc comment (`internal/gitops/stack.go`) says so directly: `ErrStackConflict`
+  (exit code 3) means stop and put a human in the loop, and because `init` turns on rerere,
+  a conflict a human resolves once here auto-resolves itself the next time the identical
+  rebase runs — the second `gh stack rebase` pass replays the recorded resolution instead of
+  asking again.
 
 ## Hard-won facts about `claude` stream-json (verified live, v2.1.207–2.1.220)
 
