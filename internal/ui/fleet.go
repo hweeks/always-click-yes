@@ -452,6 +452,23 @@ func fleetEntry(ev fleet.Event) entry {
 			return entry{kind: eMeta, body: "PR event: unrecognized"}
 		}
 		return entry{kind: eMeta, body: fmt.Sprintf("PR %s: %s (%s)", prVerb(ev.PR.State), ev.PR.URL, ev.PR.Head)}
+
+	case fleet.KindStack:
+		if ev.Stack == nil {
+			return entry{kind: eMeta, body: "stack event: unrecognized"}
+		}
+		if ev.Stack.Err != nil {
+			if ev.Stack.Branch != "" {
+				return entry{kind: eWarn, body: fmt.Sprintf(
+					"stack %s conflict on %s — needs a human, will not auto-resolve: %v",
+					ev.Stack.Op, ev.Stack.Branch, ev.Stack.Err)}
+			}
+			return entry{kind: eToolErr, body: fmt.Sprintf("stack %s failed: %v", ev.Stack.Op, ev.Stack.Err)}
+		}
+		if ev.Stack.Op == "link" {
+			return entry{kind: eMeta, body: "stack linked: " + strings.Join(ev.Stack.Branches, " -> ")}
+		}
+		return entry{kind: eMeta, body: "stack synced against trunk"}
 	}
 	return entry{kind: eMeta, body: fmt.Sprintf("engineer %s: unrecognized event", ev.EngineerID)}
 }
@@ -535,6 +552,23 @@ func fleetEventText(ev fleet.Event) string {
 			return "a PR event could not be read"
 		}
 		return fmt.Sprintf("pr %s: %s (head %s)", prVerb(ev.PR.State), ev.PR.URL, ev.PR.Head)
+
+	case fleet.KindStack:
+		if ev.Stack == nil {
+			return "a stack event could not be read"
+		}
+		if ev.Stack.Err != nil {
+			if ev.Stack.Branch != "" {
+				return fmt.Sprintf(
+					"stack %s conflict on branch %s — this needs a human to rebase by hand; do not retry automatically",
+					ev.Stack.Op, ev.Stack.Branch)
+			}
+			return fmt.Sprintf("stack %s failed: %v", ev.Stack.Op, ev.Stack.Err)
+		}
+		if ev.Stack.Op == "link" {
+			return "stack linked: " + strings.Join(ev.Stack.Branches, " -> ")
+		}
+		return "stack synced against trunk"
 	}
 	return fmt.Sprintf("engineer_id %s: unrecognized event", ev.EngineerID)
 }
