@@ -80,6 +80,7 @@ type launchEngineerArgs struct {
 	Success   string  `json:"success"`
 	Host      string  `json:"host"`
 	BudgetUSD float64 `json:"budget_usd"`
+	StackOn   string  `json:"stack_on"`
 }
 
 // parseLaunchEngineer decodes a LaunchEngineer call, strictly: a missing
@@ -98,6 +99,7 @@ func parseLaunchEngineer(raw json.RawMessage) (launchEngineerArgs, error) {
 	a.Brief = strings.TrimSpace(a.Brief)
 	a.Success = strings.TrimSpace(a.Success)
 	a.Host = strings.TrimSpace(a.Host)
+	a.StackOn = strings.TrimSpace(a.StackOn)
 
 	var missing []string
 	if a.Ticket == "" {
@@ -145,7 +147,7 @@ func (m *Model) startLaunchEngineer(p *mcp.Pending) {
 
 	st, launchErr := m.fleet.Launch(m.ctx, fleet.LaunchReq{
 		Ticket: args.Ticket, Title: args.Title, Brief: args.Brief, Success: args.Success,
-		Host: args.Host, BudgetUSD: args.BudgetUSD,
+		Host: args.Host, BudgetUSD: args.BudgetUSD, StackOn: args.StackOn,
 	})
 	m.syncFleet()
 	used, total := m.fleetCapUsed, m.fleetCapTotal
@@ -153,17 +155,26 @@ func (m *Model) startLaunchEngineer(p *mcp.Pending) {
 	// A full fleet (or an unknown/full pinned host) is a normal answer, not a
 	// failure: the architect just tried to launch beyond capacity, and the
 	// per-host usage below is what tells it to Await instead of retrying blind.
+	// A stacking refusal is a different shape of normal answer — capacity is
+	// irrelevant to it — so it gets its own trailing suggestion instead.
 	if launchErr != nil {
+		suggestion := "Await for a slot to free up, or pick a different host."
+		if args.StackOn != "" {
+			suggestion = "Fix or drop stack_on, then try again."
+		}
 		p.Resolve(mcp.Answer{Text: fmt.Sprintf(
-			"LaunchEngineer did not start: %s (fleet capacity %d/%d in use). Await for a slot to free up, or pick a different host.",
-			launchErr.Error(), used, total)})
+			"LaunchEngineer did not start: %s (fleet capacity %d/%d in use). %s",
+			launchErr.Error(), used, total, suggestion)})
 		m.appendEntry(entry{kind: eWarn, body: "✗ launch declined: " + launchErr.Error()})
 		return
 	}
 
-	p.Resolve(mcp.Answer{Text: fmt.Sprintf(
-		"launched %s on host %s, branch %s (fleet capacity %d/%d in use)",
-		st.EngineerID, st.Host, st.Branch, used, total)})
+	answerText := fmt.Sprintf("launched %s on host %s, branch %s (fleet capacity %d/%d in use)",
+		st.EngineerID, st.Host, st.Branch, used, total)
+	if st.StackBase != "" {
+		answerText += fmt.Sprintf(" (stacked on %s)", st.StackBase)
+	}
+	p.Resolve(mcp.Answer{Text: answerText})
 	m.appendEntry(entry{kind: eTool, title: "launch " + st.EngineerID, body: launchBody(st)})
 	// Without this, a crash between here and the next turn-end/arm persist
 	// (dispatch.go's startDispatch does the local-child equivalent) would
@@ -174,7 +185,11 @@ func (m *Model) startLaunchEngineer(p *mcp.Pending) {
 }
 
 func launchBody(st fleet.EngineerStatus) string {
-	return fmt.Sprintf("ticket %s · host %s · branch %s", st.Ticket, st.Host, st.Branch)
+	body := fmt.Sprintf("ticket %s · host %s · branch %s", st.Ticket, st.Host, st.Branch)
+	if st.StackBase != "" {
+		body += " · stacked on " + st.StackBase
+	}
+	return body
 }
 
 // --- Await ---
@@ -636,6 +651,9 @@ func fleetStatusTable(engineers []fleet.EngineerStatus, used, total int) string 
 		row(e.EngineerID, truncate(e.Ticket, engineerTicketWidth-1), e.Host, e.State, outcome, fmt.Sprintf("$%.4f", e.CostUSD))
 		if e.PRURL != "" {
 			fmt.Fprintf(&b, "       %s\n", e.PRURL)
+		}
+		if e.StackBase != "" {
+			fmt.Fprintf(&b, "       stacked on %s (chain %s)\n", e.StackBase, e.StackID)
 		}
 	}
 	return strings.TrimRight(b.String(), "\n")

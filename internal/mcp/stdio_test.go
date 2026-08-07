@@ -249,6 +249,31 @@ func TestNewSchemasRoundTripThroughJSON(t *testing.T) {
 	}
 }
 
+// launchEngineerSchema must advertise stack_on as an optional property, so
+// the architect knows it can stack a child onto a parent's still-open PR
+// without stack_on ever being required.
+func TestLaunchEngineerSchemaAdvertisesOptionalStackOn(t *testing.T) {
+	var v map[string]any
+	if err := json.Unmarshal([]byte(launchEngineerSchema), &v); err != nil {
+		t.Fatalf("launchEngineerSchema failed to unmarshal: %v", err)
+	}
+
+	props, ok := v["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("launchEngineerSchema.properties = %T, want an object", v["properties"])
+	}
+	if _, ok := props["stack_on"]; !ok {
+		t.Fatal("launchEngineerSchema.properties has no stack_on entry")
+	}
+
+	required, _ := v["required"].([]any)
+	for _, r := range required {
+		if r == "stack_on" {
+			t.Fatal("stack_on must not be in launchEngineerSchema.required")
+		}
+	}
+}
+
 // The refusal constants exist and are non-empty; their exact text is the model's
 // education at the moment of refusal, so a blank string here would be a silent
 // regression to "the tool just doesn't work."
