@@ -498,7 +498,7 @@ func (m *Manager) checkPRCap(ctx context.Context) error {
 		alog.Printf("fleet: pr cap refresh failed: %v", err)
 	}
 	if open := m.prWatcher.OpenCount(); open >= m.prCap {
-		return prCapError(m.prCap, open, m.prWatcher.OpenURLs())
+		return prCapError(m.prCap, open, m.prWatcher.StackedCount(), m.prWatcher.OpenURLs())
 	}
 	return nil
 }
@@ -507,7 +507,14 @@ func (m *Manager) checkPRCap(ctx context.Context) error {
 // (through startLaunchEngineer's wrapper): it names the cap, the count, and
 // every open URL, and tells the model what to do next rather than just what
 // it cannot do — the same shape as the mcp package's own refusal constants.
-func prCapError(prCap, open int, urls []string) error {
+// stacked is how many further open acy/* PRs are mid-stack and therefore
+// already excluded from open/prCap; it's surfaced as a parenthetical so the
+// architect doesn't mistake the cap for lower headroom than it actually has.
+func prCapError(prCap, open, stacked int, urls []string) error {
+	if stacked > 0 {
+		return fmt.Errorf("fleet: %d/%d acy PRs are open (%d more are mid-stack and uncapped) (%s) — Await merges before launching more",
+			open, prCap, stacked, strings.Join(urls, ", "))
+	}
 	return fmt.Errorf("fleet: %d/%d acy PRs are open (%s) — Await merges before launching more",
 		open, prCap, strings.Join(urls, ", "))
 }

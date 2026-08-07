@@ -33,6 +33,7 @@ const prHeadPrefix = "acy/"
 type PREvent struct {
 	URL    string
 	Head   string
+	Base   string
 	Number int
 	State  string // open | merged | closed
 }
@@ -40,8 +41,31 @@ type PREvent struct {
 // prSnapshot is one head branch's PR as of the last successful poll.
 type prSnapshot struct {
 	URL    string
+	Base   string
 	Number int
 	State  string
+}
+
+// isRoot reports whether s is an open PR that is not stacked on another
+// acy/* branch — i.e. the PR that would actually merge to trunk (or to some
+// non-acy base) first in its chain.
+//
+// This is derived live from s.Base on every call rather than tracked as its
+// own field on Manager or set when a stack is built, for two reasons. First,
+// it needs no new snapshot state: everything required to answer "is this a
+// root" — the base branch — is already something pollLocked records for
+// every PR, so there is nothing extra to keep in sync. Second, and more
+// importantly, it is automatically correct after a resume: a stack is built
+// by whichever engineer process created the second and third PRs in the
+// chain, and that process may be long gone (crashed, or simply finished) by
+// the time Manager itself restarts and re-attaches. If "root" were bookkeeping
+// Manager maintained itself, a resumed Manager would have no record of which
+// PRs were stacked and would have to either recompute it anyway or guess.
+// Instead, GitHub's own baseRefName — reported fresh on every `gh pr list`
+// poll — is the one authoritative source of what's stacked on what, and it
+// stays authoritative even when nothing that built the stack still exists.
+func (s prSnapshot) isRoot() bool {
+	return s.State == "open" && !strings.HasPrefix(s.Base, prHeadPrefix)
 }
 
 // PRWatcher polls `gh pr list` in a repo directory and diffs successive
@@ -93,27 +117,32 @@ func NewPRWatcher(dir string, run gitops.Runner, interval time.Duration, clock f
 // never closed (Run simply stops sending when ctx ends).
 func (w *PRWatcher) Events() <-chan PREvent { return w.events }
 
-// OpenCount is how many acy/* PRs were open as of the last poll.
+// OpenCount is how many open acy/* PRs count against the PR cap as of the
+// last poll: root PRs only. A PR stacked on another acy/* branch is part of
+// the same line of work as its root and does not add its own slot against
+// the cap — see isRoot.
 func (w *PRWatcher) OpenCount() int {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	n := 0
 	for _, s := range w.last {
-		if s.State == "open" {
+		if s.isRoot() {
 			n++
 		}
 	}
 	return n
 }
 
-// OpenURLs is the URLs of every acy/* PR open as of the last poll, sorted
-// for a deterministic refusal message.
+// OpenURLs is the URLs of every open root acy/* PR as of the last poll,
+// sorted for a deterministic refusal message. Mid-stack PRs are omitted —
+// see isRoot — since the root is the one PR in the chain a human actually
+// needs to act on to unblock the cap.
 func (w *PRWatcher) OpenURLs() []string {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	urls := make([]string, 0, len(w.last))
 	for _, s := range w.last {
-		if s.State == "open" {
+		if s.isRoot() {
 			urls = append(urls, s.URL)
 		}
 	}
@@ -121,11 +150,28 @@ func (w *PRWatcher) OpenURLs() []string {
 	return urls
 }
 
-// ghPR is one entry of `gh pr list --json url,state,headRefName,number`.
+// StackedCount is how many open acy/* PRs are mid-stack — based on another
+// acy/* branch rather than trunk — as of the last poll. These PRs are open
+// but uncapped: see isRoot for why they don't count against OpenCount.
+func (w *PRWatcher) StackedCount() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	n := 0
+	for _, s := range w.last {
+		if s.State == "open" && !s.isRoot() {
+			n++
+		}
+	}
+	return n
+}
+
+// ghPR is one entry of
+// `gh pr list --json url,state,headRefName,baseRefName,number`.
 type ghPR struct {
 	URL         string `json:"url"`
 	State       string `json:"state"`
 	HeadRefName string `json:"headRefName"`
+	BaseRefName string `json:"baseRefName"`
 	Number      int    `json:"number"`
 }
 
@@ -181,7 +227,7 @@ func (w *PRWatcher) Run(ctx context.Context) {
 // pollLocked does the actual work; callers must hold pollMu.
 func (w *PRWatcher) pollLocked(ctx context.Context) error {
 	out, err := w.run(ctx, w.dir, "gh", "pr", "list", "--state", "all",
-		"--json", "url,state,headRefName,number", "--limit", "100")
+		"--json", "url,state,headRefName,baseRefName,number", "--limit", "100")
 
 	w.mu.Lock()
 	w.lastPoll = w.clock()
@@ -202,7 +248,7 @@ func (w *PRWatcher) pollLocked(ctx context.Context) error {
 		if !strings.HasPrefix(pr.HeadRefName, prHeadPrefix) {
 			continue
 		}
-		next[pr.HeadRefName] = prSnapshot{URL: pr.URL, Number: pr.Number, State: strings.ToLower(pr.State)}
+		next[pr.HeadRefName] = prSnapshot{URL: pr.URL, Base: pr.BaseRefName, Number: pr.Number, State: strings.ToLower(pr.State)}
 	}
 
 	w.mu.Lock()
@@ -224,10 +270,10 @@ func (w *PRWatcher) pollLocked(ctx context.Context) error {
 		switch {
 		case !existed:
 			if snap.State == "open" {
-				w.emit(PREvent{URL: snap.URL, Head: head, Number: snap.Number, State: snap.State})
+				w.emit(PREvent{URL: snap.URL, Head: head, Base: snap.Base, Number: snap.Number, State: snap.State})
 			}
 		case old.State != snap.State:
-			w.emit(PREvent{URL: snap.URL, Head: head, Number: snap.Number, State: snap.State})
+			w.emit(PREvent{URL: snap.URL, Head: head, Base: snap.Base, Number: snap.Number, State: snap.State})
 		}
 	}
 	return nil
