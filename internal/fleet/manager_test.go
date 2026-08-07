@@ -840,7 +840,7 @@ func TestBuildSpecCarriesVerifyConfig(t *testing.T) {
 	cfg.VerifyCommands = []string{"go build ./...", "go test ./..."}
 	cfg.VerifyTimeoutSeconds = new(120)
 
-	spec := buildSpec(cfg, LaunchReq{Ticket: "T1"}, "T1", "eng/t1", 1.0)
+	spec := buildSpec(cfg, LaunchReq{Ticket: "T1"}, "T1", "eng/t1", cfg.BaseBranch, "", 1.0)
 
 	if got, want := spec.VerifyCommands, cfg.VerifyCommands; len(got) != len(want) {
 		t.Fatalf("VerifyCommands = %v, want %v", got, want)
@@ -863,7 +863,7 @@ func TestBuildSpecVerifyTimeoutNilDefaultsToZero(t *testing.T) {
 	cfg := testFleetConfig(testHost("a", 1))
 	cfg.VerifyTimeoutSeconds = nil
 
-	spec := buildSpec(cfg, LaunchReq{Ticket: "T1"}, "T1", "eng/t1", 1.0)
+	spec := buildSpec(cfg, LaunchReq{Ticket: "T1"}, "T1", "eng/t1", cfg.BaseBranch, "", 1.0)
 
 	if spec.VerifyTimeoutSeconds != 0 {
 		t.Errorf("VerifyTimeoutSeconds = %d, want 0", spec.VerifyTimeoutSeconds)

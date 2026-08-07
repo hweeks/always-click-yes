@@ -51,6 +51,10 @@ type LaunchReq struct {
 
 	Host      string  // optional: pin to this host by name, error if unknown or full
 	BudgetUSD float64 // 0 = fleet default
+
+	// StackOn is the ticket id of the PR this engineer's branch should stack
+	// on top of. Empty launches against trunk exactly as today.
+	StackOn string
 }
 
 // EngineerStatus is the ledger entry for one engineer.
@@ -78,6 +82,13 @@ type EngineerStatus struct {
 	// version skew across a fleet.
 	ProtocolVersion int
 	ACYVersion      string
+
+	// StackID and StackBase identify this engineer's place in a stack, if
+	// any: StackID is the chain it belongs to, StackBase the parent branch
+	// its own Branch is stacked on top of. Both empty for an unstacked
+	// engineer launched against trunk.
+	StackID   string
+	StackBase string
 }
 
 // EventKind distinguishes what an Event is carrying, so a consumer never has
@@ -144,6 +155,15 @@ type engineer struct {
 
 	protocolVersion int
 	acyVersion      string
+
+	// stackID is the chain this engineer belongs to, if any — the key into
+	// Manager.chains. Empty for an unstacked engineer.
+	stackID string
+	// stackBase is the parent's branch this engineer's own branch is
+	// stacked on top of, populated only when it was launched with StackOn
+	// (or restored by resumeOne from an entry that was). Empty otherwise.
+	stackBase string
+
 	// resumedMidJournal is true when this engineer was restored by Resume
 	// from a LastSeq >= 1: its Follow re-attaches from LastSeq+1 > 1, and a
 	// real journal never replays seq 1 (Hello) to a follower starting past
@@ -170,6 +190,8 @@ func (e *engineer) toStatus() EngineerStatus {
 		Ended:           e.ended,
 		ProtocolVersion: e.protocolVersion,
 		ACYVersion:      e.acyVersion,
+		StackID:         e.stackID,
+		StackBase:       e.stackBase,
 	}
 }
 
@@ -198,6 +220,13 @@ type Manager struct {
 	ledger   []*engineer // oldest first
 	hostLoad map[string]int
 	closed   bool
+	// chains maps a stack id to that chain's engineers, root first, newest
+	// tip last — an ordering invariant maintained at every append (see
+	// resolveStackOnLocked and resumeOne), never re-sorted.
+	chains map[string][]*engineer
+	// stackSeq mints stack ids ("s1", "s2", ...), the stack-chain
+	// counterpart to seq. Protected by mu.
+	stackSeq int
 	// spentBefore is a resumed run's already-recorded engineer spend, seeded
 	// via SeedSpent before this process's own ledger has caught up. See
 	// spentLocked for why it is combined with the ledger sum by taking the
@@ -269,6 +298,7 @@ func NewManager(cfg config.FleetConfig, transports func(config.FleetHost) Transp
 		baseCancel:  cancel,
 		byID:        map[string]*engineer{},
 		hostLoad:    map[string]int{},
+		chains:      map[string][]*engineer{},
 		events:      make(chan Event, defaultEventsBuffer),
 	}
 	for _, opt := range opts {
@@ -362,7 +392,11 @@ func (m *Manager) pickHostLocked(pin string) (config.FleetHost, error) {
 // value. budget is the already-resolved figure from effectiveBudgetLocked —
 // buildSpec itself applies no ceiling logic, so a launch cannot bypass the
 // run ceiling by asking for a larger budget than Launch already clamped.
-func buildSpec(cfg config.FleetConfig, req LaunchReq, ticket, branch string, budget float64) engineerwire.Spec {
+// base and trunk are Launch's already-resolved BaseBranch/StackTrunk — the
+// parent's branch and the fleet's real trunk when req is stacked, or
+// cfg.BaseBranch and "" when it is not — so buildSpec itself makes no
+// decision about stacking.
+func buildSpec(cfg config.FleetConfig, req LaunchReq, ticket, branch, base, trunk string, budget float64) engineerwire.Spec {
 	var deadman float64
 	if cfg.DeadmanHours != nil {
 		deadman = *cfg.DeadmanHours
@@ -377,7 +411,8 @@ func buildSpec(cfg config.FleetConfig, req LaunchReq, ticket, branch string, bud
 		Brief:   req.Brief,
 		Success: req.Success,
 
-		BaseBranch: cfg.BaseBranch,
+		BaseBranch: base,
+		StackTrunk: trunk,
 		Branch:     branch,
 
 		Model:       cfg.EngineerModel,
@@ -422,6 +457,19 @@ func (m *Manager) Launch(ctx context.Context, req LaunchReq) (EngineerStatus, er
 				ceiling, spent)
 		}
 	}
+	var parent *engineer
+	var stackID string
+	base, trunk := m.cfg.BaseBranch, ""
+	if stackOn := strings.TrimSpace(req.StackOn); stackOn != "" {
+		var err error
+		parent, stackID, err = m.resolveStackOnLocked(stackOn)
+		if err != nil {
+			m.mu.Unlock()
+			return EngineerStatus{}, err
+		}
+		base, trunk = parent.branch, m.cfg.BaseBranch
+	}
+
 	m.launched = true
 	host, err := m.pickHostLocked(req.Host)
 	if err != nil {
@@ -440,6 +488,11 @@ func (m *Manager) Launch(ctx context.Context, req LaunchReq) (EngineerStatus, er
 		started:  m.now(),
 		answers:  make(chan any, answerBuffer),
 	}
+	if parent != nil {
+		eng.stackID = stackID
+		eng.stackBase = parent.branch
+		m.chains[stackID] = append(m.chains[stackID], eng)
+	}
 	engCtx, cancel := context.WithCancel(m.baseCtx)
 	eng.cancel = cancel
 	m.hostLoad[host.Name]++
@@ -448,7 +501,7 @@ func (m *Manager) Launch(ctx context.Context, req LaunchReq) (EngineerStatus, er
 	m.ledger = append(m.ledger, eng)
 	m.mu.Unlock()
 
-	spec := buildSpec(m.cfg, req, ticket, eng.branch, budget)
+	spec := buildSpec(m.cfg, req, ticket, eng.branch, base, trunk, budget)
 	transport := m.transports(host)
 	ack, startErr := transport.Start(ctx, spec)
 
@@ -517,6 +570,84 @@ func prCapError(prCap, open, stacked int, urls []string) error {
 	}
 	return fmt.Errorf("fleet: %d/%d acy PRs are open (%s) — Await merges before launching more",
 		open, prCap, strings.Join(urls, ", "))
+}
+
+// resolveStackOnLocked resolves req.StackOn — a ticket id — against the
+// manager's own ledger into the engineer to stack on top of, and the stack
+// id the new engineer will join (freshly minted if parent is not yet part
+// of a chain). Callers hold m.mu.
+func (m *Manager) resolveStackOnLocked(stackOn string) (*engineer, string, error) {
+	if m.cfg.StackMode == "off" {
+		return nil, "", fmt.Errorf(
+			"fleet: stacking is disabled for this fleet (fleet.stackMode is %q) — "+
+				"set fleet.stackMode to \"chain\" or \"ask\" to stack engineers, or drop stackOn to launch against trunk",
+			m.cfg.StackMode)
+	}
+	parent := m.findByTicketLocked(stackOn)
+	if parent == nil {
+		return nil, "", fmt.Errorf(
+			"fleet: no engineer has been launched for ticket %q yet — launch it first, or drop stackOn to launch against trunk",
+			stackOn)
+	}
+	// A parent's PR is the branch a child's own PR will target once a later
+	// ticket registers the stack with GitHub (stack registration requires
+	// every base in the chain to already exist as an open PR) — so a parent
+	// that hasn't finished, or finished without opening one, has nothing yet
+	// for a child to sit on top of.
+	if !isTerminal(parent.state) || parent.prURL == "" {
+		return nil, "", fmt.Errorf(
+			"fleet: %s (ticket %q) has no open PR yet — a child can only stack once its parent has one; Await its result first",
+			parent.id, stackOn)
+	}
+	// One child per parent: a stack is a linear chain that has to merge in
+	// order, base branch first. A second child stacked on the same parent
+	// branch would be a fork, not a stack — GitHub has no way to merge two
+	// PRs targeting the same still-open PR's branch in sequence, and
+	// whichever merges second would need a manual rebase anyway.
+	if child := m.childOfLocked(parent); child != nil {
+		return nil, "", fmt.Errorf(
+			"fleet: %s (ticket %q) already stacks on %s's branch — a fork is not a stack and cannot merge linearly",
+			child.id, child.ticket, parent.id)
+	}
+
+	stackID := parent.stackID
+	if stackID == "" {
+		m.stackSeq++
+		stackID = fmt.Sprintf("s%d", m.stackSeq)
+		parent.stackID = stackID
+		m.chains[stackID] = append(m.chains[stackID], parent)
+	}
+	return parent, stackID, nil
+}
+
+// findByTicketLocked returns the most recently launched ledger entry for
+// ticket, or nil. Callers hold m.mu.
+func (m *Manager) findByTicketLocked(ticket string) *engineer {
+	for i := len(m.ledger) - 1; i >= 0; i-- {
+		if m.ledger[i].ticket == ticket {
+			return m.ledger[i]
+		}
+	}
+	return nil
+}
+
+// childOfLocked returns parent's child in its chain, if it has one. A
+// parent not yet part of any chain (stackID == "") cannot have a child.
+// Callers hold m.mu.
+func (m *Manager) childOfLocked(parent *engineer) *engineer {
+	if parent.stackID == "" {
+		return nil
+	}
+	chain := m.chains[parent.stackID]
+	for i, eng := range chain {
+		if eng == parent {
+			if i+1 < len(chain) {
+				return chain[i+1]
+			}
+			return nil
+		}
+	}
+	return nil
 }
 
 // runBudgetLocked is the fleet-wide ceiling on engineer spend, 0 meaning
@@ -832,6 +963,21 @@ func (m *Manager) Statuses() []EngineerStatus {
 	return out
 }
 
+// Chain returns stackID's engineers' branches in bottom-to-top order — the
+// branch closest to trunk first, the newest tip last — what a later ticket
+// needs to register the stack with GitHub in the right order. Empty for an
+// unknown or empty stackID.
+func (m *Manager) Chain(stackID string) []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	chain := m.chains[stackID]
+	out := make([]string, len(chain))
+	for i, eng := range chain {
+		out[i] = eng.branch
+	}
+	return out
+}
+
 // Ledger is the run's engineers in the form the snapshot stores — the fleet's
 // counterpart to orchestrator.Ledger. An engineer still running has a
 // non-terminal State and no EndedAt, which is what Resume reads to tell a
@@ -848,6 +994,8 @@ func (m *Manager) Ledger() []state.Engineer {
 			Title:      eng.title,
 			Host:       eng.hostName,
 			Branch:     eng.branch,
+			StackID:    eng.stackID,
+			StackBase:  eng.stackBase,
 			State:      eng.state,
 			Outcome:    eng.outcome,
 			PRURL:      eng.prURL,
@@ -866,12 +1014,19 @@ func (m *Manager) Ledger() []state.Engineer {
 // non-terminal gets its Follow loop re-attached from LastSeq+1 on its
 // recorded host — the journal replays anything missed, including a Result
 // that landed while the architect was dead, so a finished engineer resolves
-// itself without any further action here.
+// itself without any further action here. It also rebuilds m.chains from
+// those same entries, since a resumed architect must be able to launch a
+// child onto a chain built by a process that is now gone.
 //
 // It must run before any engineer is launched: a launch assigns its own
 // "e1", "e2" ids starting from the manager's own counter, and admitting one
 // before the prior ledger is restored would risk a fresh engineer's id
-// colliding with — or simply outrunning — the ids being restored.
+// colliding with — or simply outrunning — the ids being restored. Chain
+// rebuilding shares that same constraint, for the same reason: entries are
+// restored — and hence chains rebuilt — in ledger order (oldest first),
+// which is guaranteed to be bottom-to-top order because a parent's launch
+// always chronologically precedes any child stacked on it (a child cannot
+// be launched until the parent has an open PR).
 func (m *Manager) Resume(ctx context.Context, entries []state.Engineer) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -885,6 +1040,9 @@ func (m *Manager) Resume(ctx context.Context, entries []state.Engineer) error {
 	for _, e := range entries {
 		if n, ok := parseEngineerSeq(e.EngineerID); ok && n > m.seq {
 			m.seq = n
+		}
+		if n, ok := parseStackSeq(e.StackID); ok && n > m.stackSeq {
+			m.stackSeq = n
 		}
 	}
 	m.mu.Unlock()
@@ -910,26 +1068,41 @@ func parseEngineerSeq(id string) (int, bool) {
 	return n, true
 }
 
+// parseStackSeq extracts n from an "sN"-shaped stack id, the stackSeq
+// counterpart to parseEngineerSeq.
+func parseStackSeq(id string) (int, bool) {
+	if !strings.HasPrefix(id, "s") {
+		return 0, false
+	}
+	n, err := strconv.Atoi(id[1:])
+	if err != nil {
+		return 0, false
+	}
+	return n, true
+}
+
 // resumeOne restores one ledger entry. A terminal entry is simply
 // re-recorded, so Statuses/frame show it in history; a non-terminal one also
 // gets a Follow loop re-attached in the background.
 func (m *Manager) resumeOne(e state.Engineer) {
 	eng := &engineer{
-		id:       e.EngineerID,
-		wireID:   e.WireID,
-		ticket:   e.Ticket,
-		title:    e.Title,
-		hostName: e.Host,
-		branch:   e.Branch,
-		state:    e.State,
-		outcome:  e.Outcome,
-		prURL:    e.PRURL,
-		cost:     e.CostUSD,
-		tokens:   e.Tokens,
-		lastSeq:  e.LastSeq,
-		started:  e.StartedAt,
-		ended:    e.EndedAt,
-		answers:  make(chan any, answerBuffer),
+		id:        e.EngineerID,
+		wireID:    e.WireID,
+		ticket:    e.Ticket,
+		title:     e.Title,
+		hostName:  e.Host,
+		branch:    e.Branch,
+		stackID:   e.StackID,
+		stackBase: e.StackBase,
+		state:     e.State,
+		outcome:   e.Outcome,
+		prURL:     e.PRURL,
+		cost:      e.CostUSD,
+		tokens:    e.Tokens,
+		lastSeq:   e.LastSeq,
+		started:   e.StartedAt,
+		ended:     e.EndedAt,
+		answers:   make(chan any, answerBuffer),
 		// e.LastSeq >= 1 means the re-follow starts past seq 1 (Hello) —
 		// see handleMsg's Hello case for why that skips the handshake check.
 		resumedMidJournal: e.LastSeq >= 1,
@@ -938,6 +1111,9 @@ func (m *Manager) resumeOne(e state.Engineer) {
 	m.mu.Lock()
 	m.byID[eng.id] = eng
 	m.ledger = append(m.ledger, eng)
+	if e.StackID != "" {
+		m.chains[e.StackID] = append(m.chains[e.StackID], eng)
+	}
 	if !e.Unfinished() {
 		m.mu.Unlock()
 		return
