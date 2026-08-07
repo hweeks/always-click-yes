@@ -16,7 +16,7 @@ import (
 // Unlike the fleet tools, there is no event stream here: ReadTickets and
 // UpdateTicket are a plain request/response pair over the same ask socket,
 // answered immediately from the store on disk. The board itself is the run's
-// memory — see phase.go's ArchSystemPrompt — so keeping it current is the
+// memory — see phase.go's ArchSystemPromptFor — so keeping it current is the
 // architect's job, not something acy infers on its behalf.
 
 // TicketStore is the subset of *tickets.Store the model uses. Named here

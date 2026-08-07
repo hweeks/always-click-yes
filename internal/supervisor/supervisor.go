@@ -82,7 +82,7 @@ type Flags struct {
 	Tickets ui.TicketStore
 
 	// ArchMode runs the parent session as the architect (mcp.RoleArchitect,
-	// ui.ArchSystemPrompt) instead of the default parent (mcp.RoleParent,
+	// ui.ArchSystemPromptFor) instead of the default parent (mcp.RoleParent,
 	// ui.ParentSystemPrompt). False in every existing caller, so run/serve are
 	// unchanged.
 	ArchMode bool
@@ -98,6 +98,14 @@ type Flags struct {
 	// because gh-stack wasn't available — the run must not be blocked over
 	// that, but a human should still be told why stacking isn't on offer.
 	StartupNote string
+
+	// StackMode is the run's already-resolved effective fleet.stackMode ("off",
+	// "ask", or "chain") — never the raw configured value, which
+	// cli/arch.go's resolveStackMode may have downgraded. Not a flag: `acy
+	// arch` is the only caller that sets it, alongside StartupNote, so the
+	// architect's system prompt can say the right thing about whether
+	// stacking is on offer.
+	StackMode string
 
 	// RenderHTML asks each transcript entry to carry a server-rendered HTML
 	// fragment (ui.Frame.Entries[].HTML). Not a flag either: `acy serve` stamps
@@ -200,10 +208,12 @@ func childModel(f Flags) string {
 // roleAndPrompt picks the parent session's MCP role and appended system
 // prompt. archMode is the only fork: everything else about the parent —
 // tools, hooks, the gate — stays identical between the two, which is what
-// lets a child never see the difference (it is always RoleChild).
-func roleAndPrompt(archMode bool) (mcp.Role, string) {
+// lets a child never see the difference (it is always RoleChild). stackMode
+// is only consulted in the arch case, where it is the run's already-resolved
+// effective fleet.stackMode.
+func roleAndPrompt(archMode bool, stackMode string) (mcp.Role, string) {
 	if archMode {
-		return mcp.RoleArchitect, ui.ArchSystemPrompt
+		return mcp.RoleArchitect, ui.ArchSystemPromptFor(stackMode)
 	}
 	return mcp.RoleParent, ui.ParentSystemPrompt
 }
@@ -395,7 +405,7 @@ func NewSupervisor(ctx context.Context, f Flags) (*Supervisor, error) {
 	// of unsupervised processes. The parent's own role varies with ArchMode —
 	// RoleArchitect gains the fleet tools, RoleChild never does — but a child is
 	// always RoleChild regardless, so it never sees them either.
-	parentRole, parentPrompt := roleAndPrompt(f.ArchMode)
+	parentRole, parentPrompt := roleAndPrompt(f.ArchMode, f.StackMode)
 	mcpConfigPath, err := config.WriteMCPConfig(tmp, exe, bridge.SocketPath(), parentRole)
 	if err != nil {
 		return fail(fmt.Errorf("write mcp config: %w", err))

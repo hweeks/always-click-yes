@@ -151,6 +151,7 @@ func runArch(ctx context.Context, f supervisor.Flags, changed func(string) bool)
 	}
 	fleetCfg.StackMode = mode
 	f.StartupNote = note
+	f.StackMode = mode
 
 	prCap := 0
 	if fleetCfg.PRCap != nil {

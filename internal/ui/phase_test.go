@@ -300,3 +300,23 @@ func TestFinishIsIdempotent(t *testing.T) {
 		t.Error("a second Finish should be ignored, not re-announced")
 	}
 }
+
+// stackMode "ask" is the only case where the architect must be told to put
+// the choice to the human before committing to a shape for the tickets —
+// "chain" and "off" leave nothing to ask about.
+func TestArchSystemPromptForAsksOnlyWhenStackModeIsAsk(t *testing.T) {
+	askPrompt := ArchSystemPromptFor("ask")
+	if !strings.Contains(askPrompt, mcp.Qualified(mcp.ToolAsk)) {
+		t.Error(`ArchSystemPromptFor("ask") should mention mcp.Qualified(mcp.ToolAsk)`)
+	}
+	if !strings.Contains(askPrompt, "Before creating any tickets") {
+		t.Error(`ArchSystemPromptFor("ask") should instruct asking before ticket creation`)
+	}
+
+	for _, mode := range []string{"chain", "off"} {
+		prompt := ArchSystemPromptFor(mode)
+		if strings.Contains(prompt, "Before creating any tickets") {
+			t.Errorf("ArchSystemPromptFor(%q) should not contain the ask-before-tickets instruction", mode)
+		}
+	}
+}

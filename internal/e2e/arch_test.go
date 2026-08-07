@@ -28,7 +28,7 @@ const (
 // archPlanMessage hands the architect exactly two independent tickets and
 // spells out the one behavior this test exists to prove: both engineers must
 // be launched before either is awaited, so the fleet actually runs them in
-// parallel rather than one at a time. ArchSystemPrompt already tells the
+// parallel rather than one at a time. ArchSystemPromptFor already tells the
 // model to "launch up to capacity, then Await" — capacity here is exactly 2,
 // so the instruction and the fleet size agree — but the message restates it
 // explicitly rather than trusting the system prompt alone to carry a live run.
