@@ -639,3 +639,160 @@ func TestFrameEngineersEmptyWithoutFleet(t *testing.T) {
 		t.Errorf("want no engineers with no fleet wired, got %d", len(fr.Engineers))
 	}
 }
+
+// --- fleetEventText / fleetEntry: KindResult, with and without Verification ---
+
+func baseResultEvent(checks []engineerwire.VerifyCheck) fleet.Event {
+	return fleet.Event{
+		EngineerID: "e1",
+		Kind:       fleet.KindResult,
+		Result: &engineerwire.Result{
+			Outcome:      "completed",
+			Summary:      "done",
+			PRURL:        "https://example.com/pr/1",
+			CostUSD:      1.5,
+			Verification: checks,
+		},
+	}
+}
+
+func TestFleetEventTextResultVerification(t *testing.T) {
+	tests := []struct {
+		name   string
+		checks []engineerwire.VerifyCheck
+		want   string
+	}{
+		{
+			name:   "no verification is byte-identical to the pre-verification rendering",
+			checks: nil,
+			want:   "engineer_id e1 completed — done\npr_url https://example.com/pr/1\ncost_usd 1.5000",
+		},
+		{
+			name: "all passed",
+			checks: []engineerwire.VerifyCheck{
+				{Name: "go build ./...", Status: engineerwire.VerifyPassed},
+				{Name: "go test -race ./...", Status: engineerwire.VerifyPassed},
+			},
+			want: "engineer_id e1 completed — done\npr_url https://example.com/pr/1\ncost_usd 1.5000" +
+				"\nverification 2 passed",
+		},
+		{
+			name: "one failed",
+			checks: []engineerwire.VerifyCheck{
+				{Name: "go build ./...", Status: engineerwire.VerifyPassed},
+				{Name: "golangci-lint run ./...", Status: engineerwire.VerifyFailed, ExitCode: 1},
+			},
+			want: "engineer_id e1 completed — done\npr_url https://example.com/pr/1\ncost_usd 1.5000" +
+				"\nverification 1 passed, 1 failed" +
+				"\nverification FAILED: golangci-lint run ./... (exit 1) (see journal for output)",
+		},
+		{
+			name: "skipped and timeout counted and named, no failure line",
+			checks: []engineerwire.VerifyCheck{
+				{Name: "some-tool", Status: engineerwire.VerifySkipped},
+				{Name: "slow-tool", Status: engineerwire.VerifyTimeout},
+			},
+			want: "engineer_id e1 completed — done\npr_url https://example.com/pr/1\ncost_usd 1.5000" +
+				"\nverification 1 skipped, 1 timeout",
+		},
+		{
+			name: "more than 3 failures caps the named list and reports the rest",
+			checks: []engineerwire.VerifyCheck{
+				{Name: "c1", Status: engineerwire.VerifyFailed, ExitCode: 1},
+				{Name: "c2", Status: engineerwire.VerifyFailed, ExitCode: 2},
+				{Name: "c3", Status: engineerwire.VerifyFailed, ExitCode: 3},
+				{Name: "c4", Status: engineerwire.VerifyFailed, ExitCode: 4},
+				{Name: "c5", Status: engineerwire.VerifyFailed, ExitCode: 5},
+			},
+			want: "engineer_id e1 completed — done\npr_url https://example.com/pr/1\ncost_usd 1.5000" +
+				"\nverification 5 failed" +
+				"\nverification FAILED: c1 (exit 1)" +
+				"\nverification FAILED: c2 (exit 2)" +
+				"\nverification FAILED: c3 (exit 3)" +
+				"\nverification ...and 2 more (see journal for output)",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := fleetEventText(baseResultEvent(tt.checks))
+			if got != tt.want {
+				t.Errorf("fleetEventText =\n%q\nwant\n%q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFleetEntryResultVerification(t *testing.T) {
+	tests := []struct {
+		name     string
+		checks   []engineerwire.VerifyCheck
+		wantBody string
+		wantKind ekind
+	}{
+		{
+			name:     "no verification is byte-identical to the pre-verification rendering",
+			checks:   nil,
+			wantBody: "■ e1 finished — completed\ndone\nPR: https://example.com/pr/1\n$1.5000",
+			wantKind: eGood,
+		},
+		{
+			name: "all passed stays eGood",
+			checks: []engineerwire.VerifyCheck{
+				{Name: "go build ./...", Status: engineerwire.VerifyPassed},
+				{Name: "go test -race ./...", Status: engineerwire.VerifyPassed},
+			},
+			wantBody: "■ e1 finished — completed\ndone\nPR: https://example.com/pr/1\n$1.5000" +
+				"\nverification: 2 passed",
+			wantKind: eGood,
+		},
+		{
+			name: "one failed forces eWarn even though Outcome is completed",
+			checks: []engineerwire.VerifyCheck{
+				{Name: "go build ./...", Status: engineerwire.VerifyPassed},
+				{Name: "golangci-lint run ./...", Status: engineerwire.VerifyFailed, ExitCode: 1},
+			},
+			wantBody: "■ e1 finished — completed\ndone\nPR: https://example.com/pr/1\n$1.5000" +
+				"\nverification: 1 passed, 1 failed" +
+				"\n  FAILED: golangci-lint run ./... (exit 1) (see journal for output)",
+			wantKind: eWarn,
+		},
+		{
+			name: "skipped and timeout counted and named, stays eGood",
+			checks: []engineerwire.VerifyCheck{
+				{Name: "some-tool", Status: engineerwire.VerifySkipped},
+				{Name: "slow-tool", Status: engineerwire.VerifyTimeout},
+			},
+			wantBody: "■ e1 finished — completed\ndone\nPR: https://example.com/pr/1\n$1.5000" +
+				"\nverification: 1 skipped, 1 timeout",
+			wantKind: eGood,
+		},
+		{
+			name: "more than 3 failures caps the named list and reports the rest",
+			checks: []engineerwire.VerifyCheck{
+				{Name: "c1", Status: engineerwire.VerifyFailed, ExitCode: 1},
+				{Name: "c2", Status: engineerwire.VerifyFailed, ExitCode: 2},
+				{Name: "c3", Status: engineerwire.VerifyFailed, ExitCode: 3},
+				{Name: "c4", Status: engineerwire.VerifyFailed, ExitCode: 4},
+				{Name: "c5", Status: engineerwire.VerifyFailed, ExitCode: 5},
+			},
+			wantBody: "■ e1 finished — completed\ndone\nPR: https://example.com/pr/1\n$1.5000" +
+				"\nverification: 5 failed" +
+				"\n  FAILED: c1 (exit 1)" +
+				"\n  FAILED: c2 (exit 2)" +
+				"\n  FAILED: c3 (exit 3)" +
+				"\n  ...and 2 more (see journal for output)",
+			wantKind: eWarn,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := fleetEntry(baseResultEvent(tt.checks))
+			if got.body != tt.wantBody {
+				t.Errorf("fleetEntry body =\n%q\nwant\n%q", got.body, tt.wantBody)
+			}
+			if got.kind != tt.wantKind {
+				t.Errorf("fleetEntry kind = %v, want %v", got.kind, tt.wantKind)
+			}
+		})
+	}
+}
