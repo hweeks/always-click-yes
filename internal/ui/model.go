@@ -36,8 +36,13 @@ type Config struct {
 	Countdown  time.Duration        // auto-approve delay per gated tool, and per question in AUTO-RUN
 	LogPath    string               // debug log file path (shown in the UI), if any
 	ConfigPath string               // .acy.json the run's settings came from (shown in the UI), if any
-	MaxLines   int                  // per-block line cap in the transcript (default 10)
-	Cwd        string               // the project this run belongs to (snapshot key)
+	// StartupNote is a human-readable notice shown once at startup, "" if
+	// none — e.g. `acy arch` uses it to tell a human that fleet.stackMode
+	// "ask" got silently downgraded to "off" because gh-stack wasn't
+	// available. Empty for every caller but `acy arch`.
+	StartupNote string
+	MaxLines    int    // per-block line cap in the transcript (default 10)
+	Cwd         string // the project this run belongs to (snapshot key)
 
 	// RenderHTML asks for each entry to carry a server-rendered HTML fragment
 	// (Frame.Entries[].HTML). Off by default, and `acy run` leaves it off: the
@@ -345,6 +350,9 @@ func New(drv *driver.Driver, cfg Config) Model {
 	}
 	if m.logPath != "" {
 		m.appendEntry(entry{kind: eMeta, body: "logging to " + m.logPath})
+	}
+	if cfg.StartupNote != "" {
+		m.appendEntry(entry{kind: eMeta, body: cfg.StartupNote})
 	}
 	return m
 }

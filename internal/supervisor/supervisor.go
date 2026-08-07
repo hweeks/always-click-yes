@@ -92,6 +92,13 @@ type Flags struct {
 	// came from.
 	ConfigPath string
 
+	// StartupNote is a human-readable notice the UI shows once at startup, ""
+	// if none. Not a flag: `acy arch` is the only caller that sets it today,
+	// e.g. when fleet.stackMode "ask" got silently downgraded to "off"
+	// because gh-stack wasn't available — the run must not be blocked over
+	// that, but a human should still be told why stacking isn't on offer.
+	StartupNote string
+
 	// RenderHTML asks each transcript entry to carry a server-rendered HTML
 	// fragment (ui.Frame.Entries[].HTML). Not a flag either: `acy serve` stamps
 	// it because its client is a webview that cannot render markdown itself,
@@ -554,25 +561,26 @@ func NewSupervisor(ctx context.Context, f Flags) (*Supervisor, error) {
 	}
 
 	model := ui.New(nil, ui.Config{
-		Ctx:        ctx,
-		Launcher:   launcher,
-		GateReqs:   srv.Requests(),
-		AskReqs:    askReqs,
-		Countdown:  f.Countdown,
-		LogPath:    logPath,
-		ConfigPath: f.ConfigPath,
-		MaxLines:   f.MaxLines,
-		Cwd:        cwd,
-		RenderHTML: f.RenderHTML,
-		AltScreen:  f.AltScreen,
-		Resume:     resumeID,
-		Dispatcher: orch,
-		Fleet:      f.Fleet,
-		Tickets:    f.Tickets,
-		LoadState:  state.Load,
-		SaveState:  state.Save,
-		Replay:     func(id string) ([]driver.Event, error) { return session.Replay(cwd, id) },
-		Sessions:   sessions,
+		Ctx:         ctx,
+		Launcher:    launcher,
+		GateReqs:    srv.Requests(),
+		AskReqs:     askReqs,
+		Countdown:   f.Countdown,
+		LogPath:     logPath,
+		ConfigPath:  f.ConfigPath,
+		StartupNote: f.StartupNote,
+		MaxLines:    f.MaxLines,
+		Cwd:         cwd,
+		RenderHTML:  f.RenderHTML,
+		AltScreen:   f.AltScreen,
+		Resume:      resumeID,
+		Dispatcher:  orch,
+		Fleet:       f.Fleet,
+		Tickets:     f.Tickets,
+		LoadState:   state.Load,
+		SaveState:   state.Save,
+		Replay:      func(id string) ([]driver.Event, error) { return session.Replay(cwd, id) },
+		Sessions:    sessions,
 	})
 
 	return &Supervisor{
