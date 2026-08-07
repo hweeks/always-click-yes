@@ -96,6 +96,27 @@ func TestReadTicketsRendersBoard(t *testing.T) {
 	}
 }
 
+func TestReadTicketsRendersStackChain(t *testing.T) {
+	fake := &fakeTicketStore{list: []tickets.Ticket{
+		{ID: "a", Title: "base", Status: tickets.StatusTodo},
+		{ID: "b", Title: "middle", Status: tickets.StatusTodo, StackOn: "a"},
+		{ID: "c", Title: "leaf", Status: tickets.StatusTodo, StackOn: "b"},
+	}}
+	m := &Model{tickets: fake}
+	p, reply := ticketPending(mcp.ToolReadTickets, `{}`)
+	m.startReadTickets(p)
+
+	got := answer(t, reply)
+	if !strings.Contains(got, "a -> b -> c") {
+		t.Errorf("board = %q, want the chain order a -> b -> c", got)
+	}
+	for _, want := range []string{"stack_on: a", "stack_on: b"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("board = %q, missing per-ticket %q", got, want)
+		}
+	}
+}
+
 func TestReadTicketsEmptyBoard(t *testing.T) {
 	fake := &fakeTicketStore{}
 	m := &Model{tickets: fake}
@@ -350,6 +371,38 @@ func TestCreateTicketPushFailureStillSucceeds(t *testing.T) {
 	}
 	if len(m.entries) != 1 {
 		t.Fatalf("want 1 transcript entry even though the push failed, got %d", len(m.entries))
+	}
+}
+
+func TestCreateTicketPassesStackOn(t *testing.T) {
+	fake := &fakeTicketStore{}
+	m := &Model{tickets: fake, ctx: context.Background()}
+	p, reply := ticketPending(mcp.ToolCreateTicket,
+		`{"id":"t2","title":"add y","brief":"do the other thing","stack_on":"t1"}`)
+	m.startCreateTicket(p)
+
+	if len(fake.puts) != 1 {
+		t.Fatalf("want 1 ticket put, got %d", len(fake.puts))
+	}
+	if got := fake.puts[0].StackOn; got != "t1" {
+		t.Errorf("ticket put StackOn = %q, want %q", got, "t1")
+	}
+	if reply2 := answer(t, reply); !strings.Contains(reply2, "t2") {
+		t.Errorf("answer = %q, missing the ticket id", reply2)
+	}
+}
+
+func TestCreateTicketSurfacesStackOnPutError(t *testing.T) {
+	fake := &fakeTicketStore{putErr: errors.New(`tickets: ticket "t2" would create a stack_on cycle`)}
+	m := &Model{tickets: fake, ctx: context.Background()}
+	p, reply := ticketPending(mcp.ToolCreateTicket,
+		`{"id":"t2","title":"add y","brief":"do the other thing","stack_on":"t1"}`)
+	m.startCreateTicket(p)
+	if got := answer(t, reply); !strings.Contains(got, "stack_on cycle") {
+		t.Errorf("answer = %q, want the store's stack_on error surfaced", got)
+	}
+	if len(fake.commitMsgs) != 0 {
+		t.Error("a failed put must not still commit")
 	}
 }
 

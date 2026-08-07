@@ -310,7 +310,9 @@ system prompt in place of the parent's. The flow:
    one `CreateTicket` call per PR-sized unit of work — *before* launching anything.
    Each ticket's brief has to stand completely alone, the same way a `Dispatch`
    instruction does: the engineer that eventually runs it starts with no memory of
-   this conversation.
+   this conversation. A ticket can optionally name a `depends_on` (must merge first)
+   or a `stack_on` (its branch may sit on that ticket's still-open PR instead of
+   waiting for a merge) — at most one ticket may claim a given `stack_on` parent.
 3. **Arm (`Ctrl+G`).** Flips the session into AUTO-RUN, same keystroke as a plain run.
    The architect gets one kickoff prompt: launch engineers for the first tickets up
    to capacity, then `Await`.

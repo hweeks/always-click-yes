@@ -82,15 +82,28 @@ func (s *Store) Get(id string) (Ticket, error) {
 	return Ticket{}, fmt.Errorf("tickets: %q: %w", id, ErrNotFound)
 }
 
+// danglingRef reports whether name is a reference Put should reject: a
+// non-empty field value naming a ticket id that isn't in exists. It is
+// shared by depends_on (checked once per entry) and stack_on (checked once,
+// since it is a single scalar) so the two fields' "does this id exist"
+// semantics can't drift apart.
+func danglingRef(exists map[string]bool, ticketID, field, name string) error {
+	if name == "" || exists[name] {
+		return nil
+	}
+	return fmt.Errorf("tickets: %s: %s references unknown ticket %q", ticketID, field, name)
+}
+
 // Put validates t, stamps Updated, and writes it atomically. A brand new
 // ticket gets a fresh <id>-<slug>.md; updating an existing one reuses
 // whatever file it already lives at, so renaming a ticket's title never
 // orphans a second file under the old slug.
 //
-// depends_on entries must each name a ticket that already exists in the
-// store, except t's own id — which may not exist yet (t could be new) and
-// is allowed regardless. That degenerate self-reference is still a
-// dependency cycle; Validate is what catches it.
+// depends_on and stack_on entries must each name a ticket that already
+// exists in the store, except t's own id — which may not exist yet (t could
+// be new) and is allowed regardless. A self-referencing depends_on is still
+// a dependency cycle; Validate is what catches it. A self-referencing
+// stack_on is rejected earlier, by validateShape, since it is never legal.
 func (s *Store) Put(t Ticket) error {
 	if err := validateShape(t); err != nil {
 		return fmt.Errorf("tickets: %w", err)
@@ -110,9 +123,12 @@ func (s *Store) Put(t Ticket) error {
 		}
 	}
 	for _, dep := range t.DependsOn {
-		if !exists[dep] {
-			return fmt.Errorf("tickets: %s: depends_on references unknown ticket %q", t.ID, dep)
+		if err := danglingRef(exists, t.ID, "depends_on", dep); err != nil {
+			return err
 		}
+	}
+	if err := danglingRef(exists, t.ID, "stack_on", t.StackOn); err != nil {
+		return err
 	}
 
 	t.Updated = s.clock().UTC()

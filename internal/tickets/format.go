@@ -16,6 +16,7 @@ var allowedKeys = map[string]bool{
 	"branch":     true,
 	"pr":         true,
 	"depends_on": true,
+	"stack_on":   true,
 	"updated":    true,
 }
 
@@ -82,6 +83,7 @@ func parse(b []byte) (Ticket, error) {
 		Branch:    scalars["branch"],
 		PR:        scalars["pr"],
 		DependsOn: lists["depends_on"],
+		StackOn:   scalars["stack_on"],
 		Updated:   updated,
 	}
 	if err := validateShape(t); err != nil {
@@ -171,6 +173,9 @@ func render(t Ticket) []byte {
 		for _, dep := range t.DependsOn {
 			b.WriteString("  - " + dep + "\n")
 		}
+	}
+	if t.StackOn != "" {
+		b.WriteString("stack_on: " + t.StackOn + "\n")
 	}
 	b.WriteString("updated: " + t.Updated.UTC().Format(time.RFC3339) + "\n")
 	b.WriteString("---\n")

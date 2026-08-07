@@ -140,6 +140,7 @@ type createTicketArgs struct {
 	Title     string   `json:"title"`
 	Brief     string   `json:"brief"`
 	DependsOn []string `json:"depends_on"`
+	StackOn   string   `json:"stack_on"`
 }
 
 // parseCreateTicket decodes a CreateTicket call, strictly: a missing required
@@ -156,6 +157,7 @@ func parseCreateTicket(raw json.RawMessage) (createTicketArgs, error) {
 	a.ID = strings.TrimSpace(a.ID)
 	a.Title = strings.TrimSpace(a.Title)
 	a.Brief = strings.TrimSpace(a.Brief)
+	a.StackOn = strings.TrimSpace(a.StackOn)
 
 	var missing []string
 	if a.ID == "" {
@@ -210,6 +212,7 @@ func (m *Model) startCreateTicket(p *mcp.Pending) {
 		Status:    tickets.StatusTodo,
 		Body:      args.Brief,
 		DependsOn: args.DependsOn,
+		StackOn:   args.StackOn,
 	})
 	if err != nil {
 		p.Resolve(mcp.Answer{Text: "CreateTicket failed: " + err.Error()})
@@ -274,6 +277,12 @@ func renderTicketBoard(ts []tickets.Ticket) string {
 		return "no tickets yet — .acy/tickets is empty"
 	}
 	var b strings.Builder
+	if chains := stackChains(ts); len(chains) > 0 {
+		for _, chain := range chains {
+			fmt.Fprintf(&b, "stack: %s\n", strings.Join(chain, " -> "))
+		}
+		b.WriteString("\n")
+	}
 	for i, t := range ts {
 		if i > 0 {
 			b.WriteString("\n\n---\n\n")
@@ -289,12 +298,49 @@ func renderTicketBoard(ts []tickets.Ticket) string {
 		if len(t.DependsOn) > 0 {
 			fmt.Fprintf(&b, " · depends_on: %s", strings.Join(t.DependsOn, ", "))
 		}
+		if t.StackOn != "" {
+			fmt.Fprintf(&b, " · stack_on: %s", t.StackOn)
+		}
 		b.WriteString("\n")
 		if body := strings.TrimSpace(t.Body); body != "" {
 			b.WriteString("\n" + body + "\n")
 		}
 	}
 	return b.String()
+}
+
+// stackChains walks the stack_on relation across the whole board and returns
+// one ordered id slice per chain of length >= 2, root first. At most one
+// ticket may claim a given stack_on parent — tickets.Store enforces that on
+// Put — so this relation can only ever branch into disjoint chains, never a
+// tree, and a simple parent-to-single-child map is enough to walk it.
+func stackChains(ts []tickets.Ticket) [][]string {
+	childOf := make(map[string]string, len(ts))
+	for _, t := range ts {
+		if t.StackOn != "" {
+			childOf[t.StackOn] = t.ID
+		}
+	}
+
+	var chains [][]string
+	for _, t := range ts {
+		if t.StackOn != "" {
+			continue // not a root
+		}
+		chain := []string{t.ID}
+		for cur := t.ID; ; {
+			next, ok := childOf[cur]
+			if !ok {
+				break
+			}
+			chain = append(chain, next)
+			cur = next
+		}
+		if len(chain) >= 2 {
+			chains = append(chains, chain)
+		}
+	}
+	return chains
 }
 
 // ticketsReport is /tickets's body: the same board ReadTickets hands the

@@ -147,6 +147,63 @@ func TestPutAllowsSelfDependsOn(t *testing.T) {
 	}
 }
 
+func TestPutGetRoundTripsStackOn(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.Put(Ticket{ID: "base", Title: "Base", Status: StatusTodo}); err != nil {
+		t.Fatalf("Put(base): %v", err)
+	}
+	if err := s.Put(Ticket{ID: "child", Title: "Child", Status: StatusTodo, StackOn: "base"}); err != nil {
+		t.Fatalf("Put(child): %v", err)
+	}
+
+	got, err := s.Get("child")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.StackOn != "base" {
+		t.Fatalf("Get.StackOn = %q, want %q", got.StackOn, "base")
+	}
+}
+
+func TestPutGetRoundTripsNoStackOn(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.Put(Ticket{ID: "solo", Title: "Solo", Status: StatusTodo}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	got, err := s.Get("solo")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.StackOn != "" {
+		t.Fatalf("Get.StackOn = %q, want empty", got.StackOn)
+	}
+}
+
+func TestPutRejectsDanglingStackOn(t *testing.T) {
+	s := newTestStore(t)
+	err := s.Put(Ticket{ID: "t1", Title: "T1", Status: StatusTodo, StackOn: "nope"})
+	if err == nil {
+		t.Fatal("Put stacking on a ticket that doesn't exist: want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "t1") || !strings.Contains(err.Error(), "nope") {
+		t.Fatalf("error %q does not name both tickets", err)
+	}
+}
+
+func TestPutRejectsSelfStackOn(t *testing.T) {
+	// Unlike depends_on, stack_on rejects a self-reference immediately —
+	// there is no legal single-ticket state it could settle into later.
+	s := newTestStore(t)
+	err := s.Put(Ticket{ID: "t1", Title: "T1", Status: StatusTodo, StackOn: "t1"})
+	if err == nil {
+		t.Fatal("Put with a self-referencing stack_on: want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "t1") {
+		t.Fatalf("error %q does not name the ticket", err)
+	}
+}
+
 func TestPutReusesExistingFileAcrossTitleChange(t *testing.T) {
 	s := newTestStore(t)
 	if err := s.Put(Ticket{ID: "t1", Title: "Original title", Status: StatusTodo}); err != nil {
