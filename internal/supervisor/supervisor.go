@@ -82,6 +82,12 @@ type Flags struct {
 	// arch is the only caller that sets this, alongside Fleet.
 	Tickets ui.TicketStore
 
+	// Jira wires the project's optional Jira MCP server into the run (nil in
+	// every existing caller). Only `acy arch` sets it, and only the
+	// ARCHITECT's own --mcp-config ever merges it in — never the dispatched
+	// child's, which stays exactly as it always has.
+	Jira *config.JiraConfig
+
 	// ArchMode runs the parent session as the architect (mcp.RoleArchitect,
 	// ui.ArchSystemPromptFor) instead of the default parent (mcp.RoleParent,
 	// ui.ParentSystemPrompt). False in every existing caller, so run/serve are
@@ -220,13 +226,25 @@ func childModel(f Flags) string {
 // prompt. archMode is the only fork: everything else about the parent —
 // tools, hooks, the gate — stays identical between the two, which is what
 // lets a child never see the difference (it is always RoleChild). stackMode
-// is only consulted in the arch case, where it is the run's already-resolved
-// effective fleet.stackMode.
-func roleAndPrompt(archMode bool, stackMode string) (mcp.Role, string) {
+// and jiraServer are only consulted in the arch case, where stackMode is the
+// run's already-resolved effective fleet.stackMode and jiraServer is the
+// configured Jira MCP server's name, or "" when none is configured.
+func roleAndPrompt(archMode bool, stackMode, jiraServer string) (mcp.Role, string) {
 	if archMode {
-		return mcp.RoleArchitect, ui.ArchSystemPromptFor(stackMode)
+		return mcp.RoleArchitect, ui.ArchSystemPromptFor(stackMode, jiraServer)
 	}
 	return mcp.RoleParent, ui.ParentSystemPrompt
+}
+
+// jiraExtraServers returns the extra MCP servers the ARCHITECT's own
+// --mcp-config should merge in. Nil outside arch mode or when no jira
+// section is configured, so a plain run and a dispatched child never see
+// a difference at all.
+func jiraExtraServers(f Flags) []config.ExtraMCPServer {
+	if !f.ArchMode || f.Jira == nil {
+		return nil
+	}
+	return []config.ExtraMCPServer{f.Jira.ExtraServer()}
 }
 
 // resumeTarget resolves the session the run should restore, or "" for a cold start.
@@ -416,8 +434,12 @@ func NewSupervisor(ctx context.Context, f Flags) (*Supervisor, error) {
 	// of unsupervised processes. The parent's own role varies with ArchMode —
 	// RoleArchitect gains the fleet tools, RoleChild never does — but a child is
 	// always RoleChild regardless, so it never sees them either.
-	parentRole, parentPrompt := roleAndPrompt(f.ArchMode, f.StackMode)
-	mcpConfigPath, err := config.WriteMCPConfig(tmp, exe, bridge.SocketPath(), parentRole)
+	jiraServer := ""
+	if f.ArchMode && f.Jira != nil {
+		jiraServer = f.Jira.Server
+	}
+	parentRole, parentPrompt := roleAndPrompt(f.ArchMode, f.StackMode, jiraServer)
+	mcpConfigPath, err := config.WriteMCPConfig(tmp, exe, bridge.SocketPath(), parentRole, jiraExtraServers(f)...)
 	if err != nil {
 		return fail(fmt.Errorf("write mcp config: %w", err))
 	}

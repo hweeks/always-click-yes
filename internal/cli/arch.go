@@ -81,6 +81,7 @@ func resolveArchFlags(f *supervisor.Flags, changed func(string) bool) (*config.F
 	if f.Model == "" {
 		f.Model = defaultArchModel
 	}
+	f.Jira = file.Jira
 	return file.Fleet, nil
 }
 
