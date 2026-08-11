@@ -418,6 +418,20 @@ real probing to learn, so a future agent doesn't have to relearn it by breaking 
   an engineer's own branch, deterministically, in Go, never through a model — and
   because a remote engineer runs this same `ui.Model` via `internal/supervisor`, it
   inherits all three for free, with no second copy to keep in sync.
+- **A third-party MCP server merged into `--mcp-config` doesn't weaken
+  `--strict-mcp-config`, because acy is still the sole author of that one file.**
+  `internal/config.WriteMCPConfig`'s new variadic `extra ...ExtraMCPServer` parameter
+  lets `internal/supervisor.jiraExtraServers` fold a project's configured Jira server
+  in alongside acy's own `mcpServers` entry, but only into the **architect's** own
+  config (`f.ArchMode && f.Jira != nil`, gated in `supervisor.go`) — never a plain
+  run's, and never a dispatched engineer's, which is built from its own flags and
+  never sees `jiraExtraServers` at all. `driver.Options.StrictMCP` stays `true` for
+  this session regardless, and correctly so: what `--strict-mcp-config` actually
+  guarantees is "no server the model's own user configured on this machine sneaks
+  into the registry," not "no server besides acy's own." That guarantee still holds
+  with Jira merged in, because acy itself chose to write it into the one
+  `--mcp-config` file being pointed at — the model never gets a config of its own to
+  smuggle a server through.
 - **A fleet host must be authenticated for *non-interactive* ssh, which is not the same
   as being authenticated for you.** The real check is `ssh -o BatchMode=yes <host> --
   '<wrapper>; claude -p "reply with exactly: PROBE_OK"'` and `gh api user` over that same

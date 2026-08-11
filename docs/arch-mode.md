@@ -293,6 +293,66 @@ repo root to get every key name right on a fresh clone.
     the derivation — a Linux host whose rc is sourced through `bash` needs no `shell` key at
     all, since `.bashrc` already derives it.
 
+## Jira
+
+Arch mode can optionally mirror ticket transitions onto a real Jira project, through a
+third-party MCP server rather than any Go client of Jira's REST API. Add a top-level
+`"jira"` section to `.acy.json` — a sibling of `"fleet"`, not nested inside it; see
+`.acy.json.example` for the exact shape:
+
+```json
+{
+  "jira": {
+    "server": "jira",
+    "mcp": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "https://mcp.atlassian.com/v1/sse"],
+      "env": { "JIRA_API_TOKEN": "$JIRA_API_TOKEN" }
+    },
+    "projectKey": "ENG",
+    "site": "https://acme.atlassian.net"
+  }
+}
+```
+
+- **`server`** (default `"jira"`) — the name this server is registered under, and
+  what its tools appear to the model as (`mcp__<server>__*`, whatever the actual Jira
+  MCP server exposes). Must not collide with acy's own MCP server name (`"acy"`).
+- **`mcp.command`** — required whenever a `"jira"` section is present at all; there's
+  no default for it. `mcp.args` and `mcp.env` are passed straight through to the
+  server acy launches.
+- **`mcp.env`** values of the form `"$NAME"` are substituted from acy's own
+  environment when `.acy.json` is loaded — this is how a Jira API token reaches the
+  server without being committed to the repo. If `NAME` isn't actually set in acy's
+  own environment, loading `.acy.json` fails outright rather than starting the server
+  with an empty credential.
+- **`projectKey`** / **`site`** — passed through for the model's own use (which
+  project to file issues under, which site to link), not validated or otherwise
+  interpreted by acy itself.
+
+This is merged into the **architect's own** `--mcp-config` only. A plain `acy
+run`/`acy serve` has no `"jira"` section to merge in the first place, and a
+dispatched engineer — even though it's a full, unattended `acy run` of its own —
+builds its own config from its own flags, so it never inherits the architect's Jira
+wiring either.
+
+It's prompt-driven bookkeeping, not a Go client for Jira's REST API: the ticket
+board under `.acy/tickets` stays the single source of truth, and the architect's
+system prompt tells it to mirror ticket transitions onto the corresponding Jira
+issue using whatever tools the Jira MCP server exposes, then record the resulting
+issue key back on the ticket itself via `CreateTicket`/`UpdateTicket`'s now-optional
+`jira` argument — a `Ticket` field that round-trips through the frontmatter the same
+as everything else on the board.
+
+Jira is best-effort. A failed Jira call is reported plainly by the architect and the
+run carries on — never blocked waiting on it, and never retried in a loop chasing a
+transient Jira outage.
+
+`acy fleet doctor` does not check the Jira server at all — that's a known gap, not
+implied coverage. Don't assume doctor having passed means your Jira MCP command
+actually works; the first time you'll find that out is when the architect tries to
+call it for real.
+
 ## Running `acy arch`
 
 ```sh
