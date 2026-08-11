@@ -42,9 +42,20 @@ func WriteHookSettings(dir, exePath, socketPath string) (string, error) {
 	return path, nil
 }
 
+// ExtraMCPServer is one additional MCP server to merge into the --mcp-config
+// alongside acy's own — e.g. a project's configured Jira server. Exec'd
+// directly like acy's own entry, so Command must not be shell-quoted.
+type ExtraMCPServer struct {
+	Name    string
+	Command string
+	Args    []string
+	Env     map[string]string
+}
+
 // WriteMCPConfig writes the --mcp-config JSON registering acy's own binary as an
 // MCP server, so claude gains the mcp__acy__* tools (AskUserQuestion, PresentPlan)
-// that `claude -p` otherwise has no equivalent of. It returns the config path.
+// that `claude -p` otherwise has no equivalent of, plus any extra servers a
+// project has configured (e.g. Jira). It returns the config path.
 //
 // Unlike the hook, whose command claude runs through a shell, an MCP server is
 // exec'd directly from a command + args array — so the path must NOT be
@@ -53,14 +64,27 @@ func WriteHookSettings(dir, exePath, socketPath string) (string, error) {
 // One config is written per role, and they differ only in that flag. A child
 // inherits nothing: it is launched with the child config, so it never sees
 // Dispatch and cannot spawn children of its own.
-func WriteMCPConfig(dir, exePath, socketPath string, role mcp.Role) (string, error) {
-	cfg := map[string]any{
-		"mcpServers": map[string]any{
-			mcp.ServerName: map[string]any{
-				"command": exePath,
-				"args":    []string{"mcp", "--socket", socketPath, "--role", string(role)},
-			},
+func WriteMCPConfig(dir, exePath, socketPath string, role mcp.Role, extra ...ExtraMCPServer) (string, error) {
+	mcpServers := map[string]any{
+		mcp.ServerName: map[string]any{
+			"command": exePath,
+			"args":    []string{"mcp", "--socket", socketPath, "--role", string(role)},
 		},
+	}
+	for _, e := range extra {
+		server := map[string]any{
+			"command": e.Command,
+		}
+		if len(e.Args) > 0 {
+			server["args"] = e.Args
+		}
+		if len(e.Env) > 0 {
+			server["env"] = e.Env
+		}
+		mcpServers[e.Name] = server
+	}
+	cfg := map[string]any{
+		"mcpServers": mcpServers,
 	}
 	b, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {

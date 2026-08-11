@@ -45,6 +45,10 @@ type File struct {
 	// they can run on. Nil means the project has no "fleet" key at all.
 	Fleet *FleetConfig `json:"fleet,omitempty"`
 
+	// Jira is the optional config for a project's Jira MCP server. Nil means
+	// the project has no "jira" key at all.
+	Jira *JiraConfig `json:"jira,omitempty"`
+
 	// Path is where the file was read from, for the "loaded config" line.
 	Path string `json:"-"`
 }
@@ -105,6 +109,11 @@ func LoadFile(dir string) (File, bool, error) {
 	}
 	if f.Fleet != nil {
 		if err := f.Fleet.resolve(dir, path); err != nil {
+			return File{}, false, err
+		}
+	}
+	if f.Jira != nil {
+		if err := f.Jira.resolve(path); err != nil {
 			return File{}, false, err
 		}
 	}
