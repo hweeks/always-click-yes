@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/hweeks/always-click-yes/internal/alog"
 )
@@ -14,6 +15,24 @@ import (
 // exactly this failure — the commit itself already landed locally — without
 // swallowing an unrelated error from the same call.
 var ErrPushFailed = errors.New("tickets: push failed")
+
+// ErrPushSkipped is returned by Commit instead of pushing when the checked
+// out branch is a protected one ("main", "master", or the Store's
+// BaseBranch). Like ErrPushFailed, it is distinguishable via errors.Is: the
+// commit itself already landed locally, so a caller can treat this as
+// success-with-a-note rather than a failure.
+var ErrPushSkipped = errors.New("tickets: push skipped")
+
+// pushSkippedError carries which branch triggered the skip, for a message
+// that names it, while still unwrapping to the sentinel callers check with
+// errors.Is.
+type pushSkippedError struct{ Branch string }
+
+func (e *pushSkippedError) Error() string {
+	return fmt.Sprintf("tickets: push skipped: %s is the default branch and needs a human's review", e.Branch)
+}
+
+func (e *pushSkippedError) Unwrap() error { return ErrPushSkipped }
 
 // Commit stages .acy/tickets, commits it with msg if (and only if) that
 // staged something, then best-effort pushes the current branch to origin.
@@ -43,6 +62,16 @@ func (s *Store) Commit(ctx context.Context, msg string) error {
 		return fmt.Errorf("tickets: git commit: %w", err)
 	}
 	alog.Printf("tickets: committed %q", msg)
+
+	branchOut, err := s.Run(ctx, s.Root, "git", "rev-parse", "--abbrev-ref", "HEAD")
+	if err != nil {
+		return fmt.Errorf("%w: resolving current branch: %w", ErrPushFailed, err)
+	}
+	branch := strings.TrimSpace(branchOut)
+	if branch == "main" || branch == "master" || (s.BaseBranch != "" && branch == s.BaseBranch) {
+		alog.Printf("tickets: push skipped: %s is the default branch and needs a human's review", branch)
+		return &pushSkippedError{Branch: branch}
+	}
 
 	if _, err := s.Run(ctx, s.Root, "git", "push", "origin", "HEAD"); err != nil {
 		alog.Printf("tickets: push to origin failed: %v", err)

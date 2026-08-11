@@ -125,6 +125,9 @@ func (m *Model) startUpdateTicket(p *mcp.Pending) {
 		p.Resolve(mcp.Answer{Text: fmt.Sprintf(
 			"ticket %s updated to %s and committed locally, but the push failed — the human should push "+
 				"(a protected main branch rejecting a direct push is normal here, not an error)", args.ID, args.Status)})
+	case errors.Is(commitErr, tickets.ErrPushSkipped):
+		p.Resolve(mcp.Answer{Text: fmt.Sprintf(
+			"ticket %s updated to %s and committed locally, but not pushed: %s", args.ID, args.Status, commitErr.Error())})
 	default:
 		p.Resolve(mcp.Answer{Text: fmt.Sprintf(
 			"ticket %s updated to %s, but committing it failed: %s", args.ID, args.Status, commitErr.Error())})
@@ -228,6 +231,9 @@ func (m *Model) startCreateTicket(p *mcp.Pending) {
 		p.Resolve(mcp.Answer{Text: fmt.Sprintf(
 			"ticket %s created at %s and committed locally, but the push failed — the human should push "+
 				"(a protected main branch rejecting a direct push is normal here, not an error)", args.ID, path)})
+	case errors.Is(commitErr, tickets.ErrPushSkipped):
+		p.Resolve(mcp.Answer{Text: fmt.Sprintf(
+			"ticket %s created at %s and committed locally, but not pushed: %s", args.ID, path, commitErr.Error())})
 	default:
 		p.Resolve(mcp.Answer{Text: fmt.Sprintf(
 			"ticket %s created at %s, but committing it failed: %s", args.ID, path, commitErr.Error())})

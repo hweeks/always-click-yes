@@ -80,6 +80,13 @@ type Store struct {
 	Mode string // "direct" commits and best-effort pushes; "none" makes Commit a no-op.
 	Run  gitops.Runner
 
+	// BaseBranch is the fleet's configured base branch (fleet.baseBranch); ""
+	// if unset. Protected alongside "main" and "master": Commit will not push
+	// to it. This is set by the caller that constructs the Store for arch
+	// mode (internal/cli's arch command), not by New() — New has no fleet
+	// config to draw it from.
+	BaseBranch string
+
 	// now is overridable by tests in this package; New defaults it to
 	// time.Now so production callers never see it.
 	now func() time.Time
