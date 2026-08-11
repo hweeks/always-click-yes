@@ -288,7 +288,7 @@ func renderTicketBoard(ts []tickets.Ticket) string {
 		return "no tickets yet — .acy/tickets is empty"
 	}
 	var b strings.Builder
-	if chains := stackChains(ts); len(chains) > 0 {
+	if chains := tickets.StackChains(ts); len(chains) > 0 {
 		for _, chain := range chains {
 			fmt.Fprintf(&b, "stack: %s\n", strings.Join(chain, " -> "))
 		}
@@ -321,40 +321,6 @@ func renderTicketBoard(ts []tickets.Ticket) string {
 		}
 	}
 	return b.String()
-}
-
-// stackChains walks the stack_on relation across the whole board and returns
-// one ordered id slice per chain of length >= 2, root first. At most one
-// ticket may claim a given stack_on parent — tickets.Store enforces that on
-// Put — so this relation can only ever branch into disjoint chains, never a
-// tree, and a simple parent-to-single-child map is enough to walk it.
-func stackChains(ts []tickets.Ticket) [][]string {
-	childOf := make(map[string]string, len(ts))
-	for _, t := range ts {
-		if t.StackOn != "" {
-			childOf[t.StackOn] = t.ID
-		}
-	}
-
-	var chains [][]string
-	for _, t := range ts {
-		if t.StackOn != "" {
-			continue // not a root
-		}
-		chain := []string{t.ID}
-		for cur := t.ID; ; {
-			next, ok := childOf[cur]
-			if !ok {
-				break
-			}
-			chain = append(chain, next)
-			cur = next
-		}
-		if len(chain) >= 2 {
-			chains = append(chains, chain)
-		}
-	}
-	return chains
 }
 
 // ticketsReport is /tickets's body: the same board ReadTickets hands the
