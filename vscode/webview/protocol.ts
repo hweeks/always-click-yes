@@ -109,6 +109,11 @@ export interface SessionRow {
   selected: boolean;
 }
 
+export interface QueueItem {
+  id: number;
+  text: string;
+}
+
 export interface Frame {
   phase: string;
   status: string;
@@ -129,7 +134,7 @@ export interface Frame {
   tokens: Ledger;
   dispatches: number;
   entries: Entry[];
-  queue: string[];
+  queue: QueueItem[];
   gates: Gate[];
   ask: Ask | null;
   tasks: Task[];
@@ -155,6 +160,8 @@ export type ActionKind =
   | 'clear'
   | 'done'
   | 'queueClear'
+  | 'queueEdit'
+  | 'queueRemove'
   | 'quit';
 
 /**
@@ -171,6 +178,7 @@ export interface Action {
   sessionId?: string;
   name?: string;
   summary?: string;
+  queueId?: number;
 }
 
 /**

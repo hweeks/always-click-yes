@@ -233,7 +233,7 @@ had the token, which was printed to the process that launched acy.
 | `tokens` | `Ledger` | the token ledger, split by spender |
 | `dispatches` | int | tasks delegated this run — can exceed `tasks.length`, which is trimmed |
 | `entries` | `Entry[]` | the transcript, in display order |
-| `queue` | string[] | messages held until the session next falls idle |
+| `queue` | `QueueItem[]` | messages held until the session next falls idle |
 | `gates` | `Gate[]` | permission requests counting down; `[0]` is the one on screen |
 | `ask` | `Ask` or null | the question claude is blocked on |
 | `tasks` | `Task[]` | the delegated-task ledger, oldest first |
@@ -383,6 +383,18 @@ So a payload survives as *text* — you can still read what the command printed 
 and never as an element or an attribute. A client can insert `html` directly.
 That is the point of it being rendered here.
 
+### `QueueItem`
+
+| field | type | meaning |
+|---|---|---|
+| `id` | int | the identity; `queueEdit`/`queueRemove` name this, never a position |
+| `text` | string | the held message's text |
+
+`id` matters for the same reason a gate's `toolUseId` does: the queue flushes
+out from under a client the moment the session falls idle, so a client cannot
+target "the message at position 2" and expect it to still be that message by
+the time its action arrives.
+
 ### `Gate`
 
 | field | type | meaning |
@@ -523,7 +535,16 @@ not have to model Go's type system to do it.
 | `clear` | — | `/clear`: empty the transcript view (not the conversation) |
 | `done` | `summary` | `/done`: end the run by hand |
 | `queueClear` | — | `/queue clear`: drop every held message, unsent |
+| `queueEdit` | `queueId`, `text` | replace the text of the queued message carrying `queueId` |
+| `queueRemove` | `queueId` | drop the queued message carrying `queueId`, unsent |
 | `quit` | — | stop the driver and exit |
+
+**`queueEdit` with blank text removes instead of refusing.** Editing a message
+down to blank or whitespace-only text drops it the same as `queueRemove`
+would, rather than being rejected as an empty edit — the two `text` fields
+already mean the same "nothing to send", and the accepted `reason` says which
+one happened (`"empty edit removed the queued message"` vs. `"queued message
+updated"`).
 
 ### `ActionResult`
 
@@ -566,6 +587,7 @@ there is one implementation, so there is one wording.
 | `pickerClose` | the picker is not open |
 | `setModel` | `name` is empty |
 | `done` | the run is already `COMPLETE` |
+| `queueEdit` / `queueRemove` | no queued message carries that `queueId` — already flushed to claude, or never existed (`"that message has already gone out"`) |
 | `clear`, `queueClear`, `quit` | never |
 | anything else | the `kind` is not one of the above |
 

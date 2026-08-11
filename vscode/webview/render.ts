@@ -297,9 +297,9 @@ export class Renderer {
   private paintQueue(frame: Frame): void {
     this.els.queue.hidden = frame.queue.length === 0;
     this.els.queueList.replaceChildren(
-      ...frame.queue.map((text) => {
+      ...frame.queue.map((item) => {
         const li = this.root.ownerDocument.createElement('li');
-        li.textContent = text;
+        li.textContent = item.text;
         return li;
       }),
     );
