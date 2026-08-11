@@ -117,6 +117,10 @@ func ArchSystemPromptFor(stackMode string) string {
 		"A stack buys one review surface and one linear landing on trunk, and lets a child start as soon as its",
 		"parent's PR opens instead of waiting for it to merge. stack_on (on " + mcp.Qualified(mcp.ToolLaunchEngineer) + ")",
 		"names the parent ticket; a branch may have at most one child.",
+		"",
+		"acy never merges anything. A human reviews and merges every PR, including the top of a stack, once",
+		"it is ready. Never ask an engineer to merge its own PR, and never read an unmerged PR as a failure —",
+		"it is waiting on a human, not on you.",
 	}
 
 	if stackMode != "off" {
