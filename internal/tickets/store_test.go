@@ -357,7 +357,7 @@ func TestUpdateFieldsSetsBranchAndPR(t *testing.T) {
 	if err := s.Put(Ticket{ID: "t1", Title: "T1", Status: StatusTodo}); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
-	if err := s.UpdateFields("t1", StatusInProgress, "", "agent/t1", ""); err != nil {
+	if err := s.UpdateFields("t1", StatusInProgress, "", "agent/t1", "", ""); err != nil {
 		t.Fatalf("UpdateFields: %v", err)
 	}
 
@@ -377,10 +377,10 @@ func TestUpdateFieldsPreservesBranchAndPROnLaterUpdate(t *testing.T) {
 	if err := s.Put(Ticket{ID: "t1", Title: "T1", Status: StatusTodo}); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
-	if err := s.UpdateFields("t1", StatusInProgress, "", "agent/t1", ""); err != nil {
+	if err := s.UpdateFields("t1", StatusInProgress, "", "agent/t1", "", ""); err != nil {
 		t.Fatalf("UpdateFields(branch): %v", err)
 	}
-	if err := s.UpdateFields("t1", StatusInReview, "", "", "https://example.com/pr/1"); err != nil {
+	if err := s.UpdateFields("t1", StatusInReview, "", "", "https://example.com/pr/1", ""); err != nil {
 		t.Fatalf("UpdateFields(pr): %v", err)
 	}
 
@@ -398,7 +398,7 @@ func TestUpdateFieldsPreservesBranchAndPROnLaterUpdate(t *testing.T) {
 		t.Fatalf("PR = %q, want it set by this update", got.PR)
 	}
 
-	if err := s.UpdateFields("t1", StatusMerged, "", "", ""); err != nil {
+	if err := s.UpdateFields("t1", StatusMerged, "", "", "", ""); err != nil {
 		t.Fatalf("UpdateFields(merged): %v", err)
 	}
 	got, err = s.Get("t1")
@@ -407,6 +407,55 @@ func TestUpdateFieldsPreservesBranchAndPROnLaterUpdate(t *testing.T) {
 	}
 	if got.Branch != "agent/t1" || got.PR != "https://example.com/pr/1" {
 		t.Fatalf("Get = %+v, want branch and pr both preserved through a status-only update", got)
+	}
+}
+
+func TestPutGetRoundTripsJira(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.Put(Ticket{ID: "t1", Title: "T1", Status: StatusTodo, Jira: "ENG-42"}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	got, err := s.Get("t1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Jira != "ENG-42" {
+		t.Fatalf("Get.Jira = %q, want %q", got.Jira, "ENG-42")
+	}
+
+	list, err := s.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(list) != 1 || list[0].Jira != "ENG-42" {
+		t.Fatalf("List = %+v, want one ticket with Jira ENG-42", list)
+	}
+}
+
+// A later call that omits jira must not clobber what an earlier call already
+// recorded — mirrors TestUpdateFieldsPreservesBranchAndPROnLaterUpdate.
+func TestUpdateFieldsPreservesJiraOnLaterUpdate(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.Put(Ticket{ID: "t1", Title: "T1", Status: StatusTodo}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if err := s.UpdateFields("t1", StatusInProgress, "", "", "", "ENG-42"); err != nil {
+		t.Fatalf("UpdateFields(jira): %v", err)
+	}
+	if err := s.UpdateFields("t1", StatusInReview, "", "", "", ""); err != nil {
+		t.Fatalf("UpdateFields(status only): %v", err)
+	}
+
+	got, err := s.Get("t1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status != StatusInReview {
+		t.Fatalf("Status = %q, want %q", got.Status, StatusInReview)
+	}
+	if got.Jira != "ENG-42" {
+		t.Fatalf("Jira = %q, want it preserved from the earlier update", got.Jira)
 	}
 }
 

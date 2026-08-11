@@ -51,11 +51,15 @@ var idPattern = regexp.MustCompile(`^[a-z0-9-]+$`)
 // UpdateStatus has appended to it at least once, ends with a "## Log"
 // section of timestamped notes.
 type Ticket struct {
-	ID        string
-	Title     string
-	Status    string
-	Branch    string
-	PR        string
+	ID     string
+	Title  string
+	Status string
+	Branch string
+	PR     string
+	// Jira is the Jira issue key mirroring this ticket (e.g. "ENG-42"), if this
+	// repo's Jira integration is configured and the architect has recorded one.
+	// "" means untracked in Jira.
+	Jira      string
 	DependsOn []string
 	// StackOn names the ticket this one's branch is stacked on, as part of a
 	// larger stacked-PR effort landing elsewhere in the codebase. This is

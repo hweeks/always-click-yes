@@ -154,16 +154,16 @@ func (s *Store) Put(t Ticket) error {
 // UpdateStatus transitions a ticket to status and, if note is non-empty,
 // appends it to the ticket's "## Log" section with an RFC3339 timestamp.
 func (s *Store) UpdateStatus(id, status, note string) error {
-	return s.UpdateFields(id, status, note, "", "")
+	return s.UpdateFields(id, status, note, "", "", "")
 }
 
 // UpdateFields transitions a ticket to status and, if note is non-empty,
 // appends it to the ticket's "## Log" section with an RFC3339 timestamp — the
-// same as UpdateStatus — and additionally records branch and/or pr when
-// given. An empty branch or pr leaves the ticket's existing value alone, so a
-// caller that only knows the status (or only the branch, or only the PR) never
-// clobbers what an earlier call already recorded.
-func (s *Store) UpdateFields(id, status, note, branch, pr string) error {
+// same as UpdateStatus — and additionally records branch, pr, and/or jira when
+// given. An empty branch, pr, or jira leaves the ticket's existing value alone,
+// so a caller that only knows the status (or only the branch, or only the PR,
+// or only the Jira key) never clobbers what an earlier call already recorded.
+func (s *Store) UpdateFields(id, status, note, branch, pr, jira string) error {
 	t, err := s.Get(id)
 	if err != nil {
 		return err
@@ -174,6 +174,9 @@ func (s *Store) UpdateFields(id, status, note, branch, pr string) error {
 	}
 	if pr != "" {
 		t.PR = pr
+	}
+	if jira != "" {
+		t.Jira = jira
 	}
 	if note != "" {
 		t.Body = appendLog(t.Body, note, s.clock().UTC().Format(time.RFC3339))

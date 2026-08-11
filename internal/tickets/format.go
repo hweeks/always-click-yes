@@ -15,6 +15,7 @@ var allowedKeys = map[string]bool{
 	"status":     true,
 	"branch":     true,
 	"pr":         true,
+	"jira":       true,
 	"depends_on": true,
 	"stack_on":   true,
 	"updated":    true,
@@ -82,6 +83,7 @@ func parse(b []byte) (Ticket, error) {
 		Status:    status,
 		Branch:    scalars["branch"],
 		PR:        scalars["pr"],
+		Jira:      scalars["jira"],
 		DependsOn: lists["depends_on"],
 		StackOn:   scalars["stack_on"],
 		Updated:   updated,
@@ -167,6 +169,9 @@ func render(t Ticket) []byte {
 	}
 	if t.PR != "" {
 		b.WriteString("pr: " + t.PR + "\n")
+	}
+	if t.Jira != "" {
+		b.WriteString("jira: " + t.Jira + "\n")
 	}
 	if len(t.DependsOn) > 0 {
 		b.WriteString("depends_on:\n")

@@ -568,6 +568,10 @@ const createTicketSchema = `{
     "stack_on": {
       "type": "string",
       "description": "The id of the single ticket this one's branch stacks on — not an array like depends_on, since only one ticket may claim a given parent. Use this when this ticket's branch can sit on top of that ticket's still-open PR and land together in the same stack; use depends_on instead when it must wait for that ticket to merge first. Optional."
+    },
+    "jira": {
+      "type": "string",
+      "description": "Optional. The Jira issue key already tracking this ticket, if one exists."
     }
   }
 }`
@@ -618,6 +622,10 @@ const updateTicketSchema = `{
       "type": "string",
       "maxLength": 300,
       "description": "Optional. The PR URL — record it when the PR opens. Omit to leave it unchanged."
+    },
+    "jira": {
+      "type": "string",
+      "description": "Optional. The Jira issue key to record once this ticket's transition has been mirrored onto it. Omit to leave it unchanged."
     }
   }
 }`

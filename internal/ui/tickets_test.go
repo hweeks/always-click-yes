@@ -32,7 +32,7 @@ type fakeTicketStore struct {
 	commitMsgs []string
 }
 
-type ticketUpdateCall struct{ id, status, note, branch, pr string }
+type ticketUpdateCall struct{ id, status, note, branch, pr, jira string }
 
 func (f *fakeTicketStore) List() ([]tickets.Ticket, error) {
 	f.mu.Lock()
@@ -47,10 +47,10 @@ func (f *fakeTicketStore) Put(t tickets.Ticket) error {
 	return f.putErr
 }
 
-func (f *fakeTicketStore) UpdateFields(id, status, note, branch, pr string) error {
+func (f *fakeTicketStore) UpdateFields(id, status, note, branch, pr, jira string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.updates = append(f.updates, ticketUpdateCall{id, status, note, branch, pr})
+	f.updates = append(f.updates, ticketUpdateCall{id, status, note, branch, pr, jira})
 	return f.updateErr
 }
 
@@ -93,6 +93,24 @@ func TestReadTicketsRendersBoard(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("board = %q, missing %q", got, want)
 		}
+	}
+}
+
+func TestRenderTicketBoardIncludesJiraWhenSet(t *testing.T) {
+	got := renderTicketBoard([]tickets.Ticket{
+		{ID: "t1", Title: "add x", Status: tickets.StatusTodo, Jira: "ENG-1"},
+	})
+	if !strings.Contains(got, "jira: ENG-1") {
+		t.Errorf("board = %q, want it to contain %q", got, "jira: ENG-1")
+	}
+}
+
+func TestRenderTicketBoardOmitsJiraWhenUnset(t *testing.T) {
+	got := renderTicketBoard([]tickets.Ticket{
+		{ID: "t1", Title: "add x", Status: tickets.StatusTodo},
+	})
+	if strings.Contains(got, "jira:") {
+		t.Errorf("board = %q, want no \"jira:\" substring", got)
 	}
 }
 
@@ -187,7 +205,7 @@ func TestUpdateTicketUpdatesAndCommits(t *testing.T) {
 	p, reply := ticketPending(mcp.ToolUpdateTicket, `{"id":"t1","status":"in-review","note":"PR opened"}`)
 	m.startUpdateTicket(p)
 
-	if len(fake.updates) != 1 || fake.updates[0] != (ticketUpdateCall{"t1", "in-review", "PR opened", "", ""}) {
+	if len(fake.updates) != 1 || fake.updates[0] != (ticketUpdateCall{"t1", "in-review", "PR opened", "", "", ""}) {
 		t.Fatalf("update not applied: %+v", fake.updates)
 	}
 	if len(fake.commitMsgs) != 1 || !strings.Contains(fake.commitMsgs[0], "t1") || !strings.Contains(fake.commitMsgs[0], "in-review") {
@@ -215,8 +233,23 @@ func TestUpdateTicketPassesBranchAndPRWhenSet(t *testing.T) {
 	m.startUpdateTicket(p)
 	answer(t, reply)
 
-	if len(fake.updates) != 1 || fake.updates[0] != (ticketUpdateCall{"t1", "in-progress", "", "agent/t1", "https://example.com/pr/1"}) {
+	if len(fake.updates) != 1 || fake.updates[0] != (ticketUpdateCall{"t1", "in-progress", "", "agent/t1", "https://example.com/pr/1", ""}) {
 		t.Fatalf("update not applied with branch/pr: %+v", fake.updates)
+	}
+}
+
+// UpdateTicket accepts an optional jira and threads it through to the store
+// untouched, the same as branch and pr.
+func TestUpdateTicketPassesJiraWhenSet(t *testing.T) {
+	fake := &fakeTicketStore{}
+	m := &Model{tickets: fake, ctx: context.Background()}
+	p, reply := ticketPending(mcp.ToolUpdateTicket,
+		`{"id":"t1","status":"in-progress","jira":"ENG-2"}`)
+	m.startUpdateTicket(p)
+	answer(t, reply)
+
+	if len(fake.updates) != 1 || fake.updates[0].jira != "ENG-2" {
+		t.Fatalf("update not applied with jira: %+v", fake.updates)
 	}
 }
 
@@ -351,6 +384,21 @@ func TestCreateTicketCreatesAndCommits(t *testing.T) {
 	}
 	if len(m.entries) != 1 {
 		t.Fatalf("want 1 transcript entry, got %d", len(m.entries))
+	}
+}
+
+// CreateTicket accepts an optional jira and passes it through to the store's
+// Put untouched, the same as depends_on and stack_on.
+func TestCreateTicketPassesJira(t *testing.T) {
+	fake := &fakeTicketStore{}
+	m := &Model{tickets: fake, ctx: context.Background()}
+	p, reply := ticketPending(mcp.ToolCreateTicket,
+		`{"id":"t1","title":"add x","brief":"do the thing","jira":"ENG-1"}`)
+	m.startCreateTicket(p)
+	answer(t, reply)
+
+	if len(fake.puts) != 1 || fake.puts[0].Jira != "ENG-1" {
+		t.Fatalf("ticket put Jira = %+v, want ENG-1", fake.puts)
 	}
 }
 

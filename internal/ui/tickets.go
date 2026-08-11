@@ -25,7 +25,7 @@ import (
 type TicketStore interface {
 	List() ([]tickets.Ticket, error)
 	Put(t tickets.Ticket) error
-	UpdateFields(id, status, note, branch, pr string) error
+	UpdateFields(id, status, note, branch, pr, jira string) error
 	Commit(ctx context.Context, msg string) error
 }
 
@@ -62,6 +62,7 @@ type updateTicketArgs struct {
 	Note   string `json:"note"`
 	Branch string `json:"branch"`
 	PR     string `json:"pr"`
+	Jira   string `json:"jira"`
 }
 
 // parseUpdateTicket decodes an UpdateTicket call, strictly: a missing required
@@ -79,6 +80,7 @@ func parseUpdateTicket(raw json.RawMessage) (updateTicketArgs, error) {
 	a.Note = strings.TrimSpace(a.Note)
 	a.Branch = strings.TrimSpace(a.Branch)
 	a.PR = strings.TrimSpace(a.PR)
+	a.Jira = strings.TrimSpace(a.Jira)
 
 	var missing []string
 	if a.ID == "" {
@@ -112,7 +114,7 @@ func (m *Model) startUpdateTicket(p *mcp.Pending) {
 			". Nothing was changed. Fix the arguments and call it again."})
 		return
 	}
-	if err := m.tickets.UpdateFields(args.ID, args.Status, args.Note, args.Branch, args.PR); err != nil {
+	if err := m.tickets.UpdateFields(args.ID, args.Status, args.Note, args.Branch, args.PR, args.Jira); err != nil {
 		p.Resolve(mcp.Answer{Text: "UpdateTicket failed: " + err.Error()})
 		return
 	}
@@ -144,6 +146,7 @@ type createTicketArgs struct {
 	Brief     string   `json:"brief"`
 	DependsOn []string `json:"depends_on"`
 	StackOn   string   `json:"stack_on"`
+	Jira      string   `json:"jira"`
 }
 
 // parseCreateTicket decodes a CreateTicket call, strictly: a missing required
@@ -161,6 +164,7 @@ func parseCreateTicket(raw json.RawMessage) (createTicketArgs, error) {
 	a.Title = strings.TrimSpace(a.Title)
 	a.Brief = strings.TrimSpace(a.Brief)
 	a.StackOn = strings.TrimSpace(a.StackOn)
+	a.Jira = strings.TrimSpace(a.Jira)
 
 	var missing []string
 	if a.ID == "" {
@@ -216,6 +220,7 @@ func (m *Model) startCreateTicket(p *mcp.Pending) {
 		Body:      args.Brief,
 		DependsOn: args.DependsOn,
 		StackOn:   args.StackOn,
+		Jira:      args.Jira,
 	})
 	if err != nil {
 		p.Resolve(mcp.Answer{Text: "CreateTicket failed: " + err.Error()})
@@ -300,6 +305,9 @@ func renderTicketBoard(ts []tickets.Ticket) string {
 		}
 		if t.PR != "" {
 			fmt.Fprintf(&b, " · pr: %s", t.PR)
+		}
+		if t.Jira != "" {
+			fmt.Fprintf(&b, " · jira: %s", t.Jira)
 		}
 		if len(t.DependsOn) > 0 {
 			fmt.Fprintf(&b, " · depends_on: %s", strings.Join(t.DependsOn, ", "))
