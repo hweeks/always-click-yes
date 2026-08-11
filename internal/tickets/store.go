@@ -148,7 +148,34 @@ func (s *Store) Put(t Ticket) error {
 		return err
 	}
 	alog.Printf("tickets: wrote %s (status=%s)", t.ID, t.Status)
-	return nil
+
+	return s.writeFlow(entries, t)
+}
+
+// writeFlow rebuilds the board's flow.mmd from entries (the store's state
+// before this Put) with t's old copy, if any, replaced by t — the same
+// id-sorted order List() returns — and writes it to <dir>/flow.mmd. This runs
+// on every Put regardless of Store.Mode: it is a local file write, not a git
+// operation, so whether it later gets committed is Commit's concern, not
+// this one's.
+func (s *Store) writeFlow(entries []entry, t Ticket) error {
+	board := make([]Ticket, 0, len(entries)+1)
+	found := false
+	for _, e := range entries {
+		if e.ID == t.ID {
+			board = append(board, t)
+			found = true
+			continue
+		}
+		board = append(board, e.Ticket)
+	}
+	if !found {
+		board = append(board, t)
+	}
+	sort.Slice(board, func(i, j int) bool { return board[i].ID < board[j].ID })
+
+	flowPath := filepath.Join(s.dir(), "flow.mmd")
+	return writeAtomic(flowPath, []byte(Mermaid(board)))
 }
 
 // UpdateStatus transitions a ticket to status and, if note is non-empty,
