@@ -64,6 +64,13 @@ func goldenCases() []kindCase {
 		{name: "good", kind: "good", body: "✔ auto-approved · ⚙ Bash"},
 		{name: "warn", kind: "warn", body: "⚠ vetoed · ⚙ Bash"},
 		{name: "queued", kind: "queued", body: "also update the docs"},
+		{
+			// chroma has no mermaid lexer, so this falls back to preformatted
+			// escaped text — the point is showing the source, not the diagram.
+			name: "flow", kind: "flow",
+			raw:  "flowchart TD\n    t1[\"t1: add x [todo]\"]:::todo\n",
+			lang: "mermaid",
+		},
 	}
 }
 

@@ -159,6 +159,31 @@ func TestXSSHTMLInAToolCodeBlock(t *testing.T) {
 	}
 }
 
+// The mermaid source is a ticket title/id a model or Jira integration chose,
+// so it is untrusted the same way a tool's source is. chroma has no mermaid
+// lexer, so this exercises codeBlock's plain fallback rather than its
+// tokenised path — the other side of the tool coverage above, where a lexer
+// exists.
+func TestXSSInAFlowDiagram(t *testing.T) {
+	raw := "flowchart TD\n    t1[\"<script>alert(1)</script>\"]:::todo\n" +
+		"    t2[\"<img src=x onerror=alert(1)>\"]:::todo\n"
+	got := Entry("flow", "", "", raw, "mermaid")
+	mustBeInert(t, got)
+
+	if els := elements(t, got, "script"); len(els) != 0 {
+		t.Errorf("a <script> element was built:\n%s", got)
+	}
+	if els := elements(t, got, "img"); len(els) != 0 {
+		t.Errorf("an <img> element was built:\n%s", got)
+	}
+	text := textOf(t, got)
+	for _, want := range []string{"<script>alert(1)</script>", "<img src=x onerror=alert(1)>"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("the mermaid source %q is not shown as text:\n%s", want, got)
+		}
+	}
+}
+
 // The title is a tool name claude chose, so it is untrusted too — and it is the
 // one string this package writes into its own trusted chrome.
 func TestXSSInTheTitle(t *testing.T) {

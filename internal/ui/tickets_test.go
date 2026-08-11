@@ -705,3 +705,50 @@ func TestFrameTicketsEmptyWithoutStore(t *testing.T) {
 		t.Errorf("want no tickets with no store wired, got %d", len(fr.Tickets))
 	}
 }
+
+// The board redrawn as mermaid and ascii is a separate projection from the
+// ticket list, kept current the same way — a read of the store, not a mirror.
+func TestFrameCarriesFlow(t *testing.T) {
+	fake := &fakeTicketStore{list: []tickets.Ticket{
+		{ID: "t1", Title: "add x", Status: tickets.StatusInReview},
+	}}
+	m := &Model{tickets: fake}
+
+	fl := m.Frame().Flow
+	if fl.Mermaid == "" || !strings.Contains(fl.Mermaid, "t1") {
+		t.Errorf("flow.mermaid = %q, want the board's mermaid source", fl.Mermaid)
+	}
+	if fl.ASCII == "" || !strings.Contains(fl.ASCII, "t1") {
+		t.Errorf("flow.ascii = %q, want the board's ascii lanes", fl.ASCII)
+	}
+}
+
+// With no ticket store wired, flow is the zero value — both fields empty —
+// mirroring how Tickets projects as no tickets.
+func TestFrameFlowEmptyWithoutStore(t *testing.T) {
+	m := &Model{}
+	fl := m.Frame().Flow
+	if fl.Mermaid != "" || fl.ASCII != "" {
+		t.Errorf("flow = %+v, want the zero value with no store wired", fl)
+	}
+}
+
+// internal/hub relies on an idle run's frame marshalling to identical bytes
+// twice in a row, or it would never fall silent. Flow reads the board fresh
+// on every call — via List(), same as Tickets — so this pins that doing so
+// twice against an unchanged board produces byte-identical JSON, not just
+// equal-looking structs.
+func TestFrameFlowIsByteStableAcrossRepeatedCalls(t *testing.T) {
+	fake := &fakeTicketStore{list: []tickets.Ticket{
+		{ID: "t1", Title: "add x", Status: tickets.StatusInProgress},
+		{ID: "t2", Title: "add y", Status: tickets.StatusTodo, DependsOn: []string{"t1"}},
+	}}
+	m := New(nil, Config{Tickets: fake})
+	m.now = frameTime
+
+	first := mustMarshal(t, m.Frame())
+	second := mustMarshal(t, m.Frame())
+	if first != second {
+		t.Fatalf("two consecutive Frame() calls on an unchanged board diverged:\n1: %s\n2: %s", first, second)
+	}
+}

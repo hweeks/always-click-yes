@@ -46,6 +46,7 @@ const (
 	kindToolOK   = "toolOK"
 	kindToolErr  = "toolErr"
 	kindThinking = "thinking"
+	kindFlow     = "flow"
 )
 
 // Entry renders one transcript entry as a self-contained HTML fragment.
@@ -108,6 +109,13 @@ func entryBody(kind, body, raw, lang string) string {
 
 	case kindToolOK, kindToolErr, kindThinking:
 		return preText(body)
+
+	case kindFlow:
+		// raw is the mermaid source; chroma has no mermaid lexer, so codeBlock
+		// falls back to escaped preformatted text on its own. That is the right
+		// outcome here too — the point is showing the source, not rendering the
+		// diagram.
+		return codeBlock(raw, lang)
 	}
 
 	// meta, you, turn, good, warn, queued — one-liners and short messages, where

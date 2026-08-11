@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/hweeks/always-click-yes/internal/state"
+	"github.com/hweeks/always-click-yes/internal/tickets"
 )
 
 // Frame is the whole run, as a value.
@@ -75,6 +76,11 @@ type Frame struct {
 	// Tickets is the architect's ticket board, sorted by id; empty for a
 	// session with no ticket store wired.
 	Tickets []Ticket `json:"tickets"`
+
+	// Flow is the ticket board redrawn as mermaid and ascii — the *current*
+	// board, not a transcript entry — kept up to date the same way Tickets is.
+	// Both fields are "" for a session with no ticket store wired.
+	Flow Flow `json:"flow"`
 
 	// InterruptedTasks names the tasks a restart caught mid-flight, so a client
 	// can say what a resumed run may have left half-done.
@@ -259,6 +265,14 @@ type Ticket struct {
 	PRURL  string `json:"prUrl"`
 }
 
+// Flow is the ticket board redrawn as mermaid and ascii — the *current*
+// board, not a transcript entry — kept up to date the same way Tickets is.
+// Both fields are "" for a session with no ticket store wired.
+type Flow struct {
+	Mermaid string `json:"mermaid"`
+	ASCII   string `json:"ascii"`
+}
+
 // SessionRow is one line of the /resume picker.
 type SessionRow struct {
 	ID            string `json:"id"`
@@ -346,6 +360,7 @@ func (m Model) Frame() Frame {
 		Engineers: m.frameEngineers(),
 		Fleet:     m.frameFleet(),
 		Tickets:   m.frameTickets(),
+		Flow:      m.frameFlow(),
 
 		InterruptedTasks: strs(m.interruptedTasks),
 
@@ -500,6 +515,21 @@ func (m Model) frameTickets() []Ticket {
 		out = append(out, Ticket{ID: t.ID, Title: t.Title, Status: t.Status, PRURL: t.PR})
 	}
 	return out
+}
+
+// frameFlow reads the board directly, same as frameTickets and for the same
+// reason: there is no push side to tickets, so a read is the only way to know
+// its current state. A nil store or a read error both project as the zero
+// Flow{}, matching how they project as no tickets.
+func (m Model) frameFlow() Flow {
+	if m.tickets == nil {
+		return Flow{}
+	}
+	ts, err := m.tickets.List()
+	if err != nil {
+		return Flow{}
+	}
+	return Flow{Mermaid: tickets.Mermaid(ts), ASCII: tickets.ASCII(ts)}
 }
 
 func (m Model) framePicker() []SessionRow {
