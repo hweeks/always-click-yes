@@ -187,7 +187,11 @@ and let the interface enforce the rest.
   recorded. It runs no git beyond add/commit/push of its own directory and never talks to
   GitHub itself: detecting a merge is `internal/fleet`'s `PRWatcher`, and turning that
   detection into a ticket update is the architect's own `UpdateTicket` call — prompt-driven,
-  not code-driven.
+  not code-driven. `StackChains` (the walker over `stack_on`) lives here rather than in
+  `internal/ui` so `flow.go`'s `Mermaid`/`ASCII` and `internal/ui/tickets.go`'s board
+  rendering share one implementation instead of two that could disagree, and `Store.Put`
+  writes `.acy/tickets/flow.mmd` *inside* `.acy/tickets` deliberately, so it free-rides the
+  store's own git add/commit of that directory rather than needing separate handling.
 - `internal/supervisor` — the constructor (`NewSupervisor`) extracted out of `internal/cli`
   that wires the gate server, hook/MCP config files, the MCP bridge, the launcher/spawner
   closures and the orchestrator into one running supervisor: the shared foundation `acy run`,

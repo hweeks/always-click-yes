@@ -413,6 +413,70 @@ system prompt in place of the parent's. The flow:
 8. **Finish.** The architect calls `Finish` once every ticket is merged or otherwise
    accounted for (blocked with a note is accounted for; silently unmentioned isn't).
 
+### Ticket flow diagrams
+
+Alongside the markdown board, `internal/tickets/flow.go`'s `Mermaid` and `ASCII` redraw
+the same `[]tickets.Ticket` deterministically in Go, as a mermaid flowchart and a
+plain-text status-lane view — never hand-drawn by the model, so there is nothing here
+for a prompt to get wrong or embellish.
+
+The diagram gets redrawn in three places: automatically, into the transcript, right
+after every successful `CreateTicket`/`UpdateTicket` call — deduped against the last
+diagram emitted, so an update that doesn't change the board's shape (re-marking a
+ticket with the status it already had) doesn't reprint it; on demand via `/flow`, which
+always redraws regardless of dedup; and on disk at `.acy/tickets/flow.mmd`, rewritten by
+`Store.Put` on every board change. `flow.mmd` lives *inside* `.acy/tickets` on purpose,
+so it rides the same `git add .acy/tickets` the ticket board itself does — committed
+under `fleet.ticketCommit: "direct"`, left as an uncommitted local file under `"none"`,
+exactly like every other file in that directory.
+
+A three-ticket board —
+
+```
+t1 (todo):        "Design schema"
+t2 (in-progress):  "Build API", depends_on: [t1]
+t3 (in-review):    "Write docs", stack_on: t2
+```
+
+— renders as ASCII:
+
+```
+[todo] (1)
+  - t1
+[in-progress] (1)
+  - t2
+[in-review] (1)
+  - t3
+[merged] (0)
+  (none)
+[blocked] (0)
+  (none)
+
+stacks:
+  t2 -> t3
+```
+
+and as mermaid:
+
+```
+flowchart TD
+    t1["t1: Design schema [todo]"]:::todo
+    t2["t2: Build API [in-progress]"]:::in-progress
+    t3["t3: Write docs [in-review]"]:::in-review
+    t1 --> t2
+    t2 -.->|stacking| t3
+    classDef todo fill:#e0e0e0
+    classDef in-progress fill:#fff3b0
+    classDef in-review fill:#bde0fe
+    classDef merged fill:#b7e4c7
+    classDef blocked fill:#f8b4b4
+```
+
+A webview client sees the same two strings via `Frame.flow` (`{mermaid, ascii}` — see
+[`docs/webui-protocol.md`](webui-protocol.md)'s `### Flow` section) and renders them as
+source text, not as a rendered graph — the webview has no mermaid renderer, the same way
+it has no markdown renderer for the rest of the transcript.
+
 ## Stacked PRs
 
 A stack is an ordered chain of PRs, each based on the branch below it rather than on
