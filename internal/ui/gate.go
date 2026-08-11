@@ -67,6 +67,16 @@ func tickCmd() tea.Cmd {
 // duplicate execution of a tool the user had already answered.
 func (m *Model) enqueue(p *gate.Pending) {
 	tool := baseToolName(p.Input.ToolName)
+	// The merge guard is checked before anything else, including intercepted:
+	// a deny here must never become a countdown, and it must never be waved
+	// through as a pass-through allow either. See guard.go for what it does
+	// and does not guarantee.
+	if deny, reason := mergeGuardVerdict(tool, p.Input.ToolInput, m.protectedBranches()); deny {
+		p.Resolve(gate.Decision{Behavior: gate.Deny, Reason: reason})
+		alog.Printf("gate: deny tool=%s (merge guard: %s)", p.Input.ToolName, reason)
+		m.appendEntry(entry{kind: eWarn, title: p.Input.ToolName, body: "⛔ denied by merge guard · " + reason})
+		return
+	}
 	if intercepted[tool] {
 		p.Resolve(gate.Decision{Behavior: gate.Allow, Reason: "handled by acy"})
 		alog.Printf("gate: pass-through tool=%s (intercepted by acy)", p.Input.ToolName)
