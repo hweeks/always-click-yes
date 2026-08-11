@@ -57,8 +57,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	m.input.SetHeight(maxInputRows)
 
 	m, cmd := m.update(msg)
+	cmd = tea.Batch(cmd, m.syncComposerFocus())
 	m.layout()
 	return m, cmd
+}
+
+// syncComposerFocus reconciles the composer's focus with whatever surface
+// currently owns the keyboard. Blur needs no cmd of its own: it stops the
+// textarea's cursor from accepting the next blink tick, which is what ends
+// the blink chain (see textarea.Model.Update's `if !m.focus` branch) — no
+// timer of ours to cancel.
+func (m *Model) syncComposerFocus() tea.Cmd {
+	active := m.composerActive()
+	focused := m.input.Focused()
+	switch {
+	case active && !focused:
+		return m.input.Focus()
+	case !active && focused:
+		m.input.Blur()
+	}
+	return nil
 }
 
 // layout sizes the composer to its content and gives the transcript whatever is

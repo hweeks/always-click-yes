@@ -11,6 +11,10 @@ export interface Hint {
   kind: 'gate' | 'working' | 'busy' | 'planReady' | 'plan' | 'complete' | 'default' | string;
 }
 
+export interface Composer {
+  active: boolean;
+}
+
 export interface Tokens {
   input: number;
   output: number;
@@ -118,6 +122,7 @@ export interface Frame {
   phase: string;
   status: string;
   hint: Hint;
+  composer: Composer;
   sessionId: string;
   model: string;
   billing: string;

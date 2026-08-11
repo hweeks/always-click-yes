@@ -29,9 +29,10 @@ import (
 //
 // The documented contract is docs/webui-protocol.md. Change one, change both.
 type Frame struct {
-	Phase  string `json:"phase"`  // "PLAN" | "AUTO-RUN" | "COMPLETE"
-	Status string `json:"status"` // the one-line header state ("working…", "idle", …)
-	Hint   Hint   `json:"hint"`   // the composer hint: text plus the kind that styles it
+	Phase    string   `json:"phase"`  // "PLAN" | "AUTO-RUN" | "COMPLETE"
+	Status   string   `json:"status"` // the one-line header state ("working…", "idle", …)
+	Hint     Hint     `json:"hint"`   // the composer hint: text plus the kind that styles it
+	Composer Composer `json:"composer"`
 
 	SessionID string `json:"sessionId"` // claude's id, empty until its init event
 	Model     string `json:"model"`     // the model claude reported at init
@@ -89,6 +90,14 @@ type Frame struct {
 	// empty summary".
 	FinishOutcome string `json:"finishOutcome,omitempty"`
 	FinishSummary string `json:"finishSummary,omitempty"`
+}
+
+// Composer says whether the composer is the surface the keyboard is pointed
+// at, so a client can blink its own cursor only while it's true. A plain
+// boolean, unrelated to any clock — it does not change on its own between two
+// frames of an idle run.
+type Composer struct {
+	Active bool `json:"active"`
 }
 
 // Cost splits the bill by who spent it. Parent is every claude process this
@@ -284,9 +293,10 @@ var entryKinds = map[ekind]string{
 // here mutates, and nothing here consults the clock.
 func (m Model) Frame() Frame {
 	return Frame{
-		Phase:  m.phase.String(),
-		Status: m.status,
-		Hint:   m.hint(),
+		Phase:    m.phase.String(),
+		Status:   m.status,
+		Hint:     m.hint(),
+		Composer: Composer{Active: m.composerActive()},
 
 		SessionID: m.sessionID,
 		Model:     m.model,

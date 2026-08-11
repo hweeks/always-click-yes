@@ -218,6 +218,7 @@ had the token, which was printed to the process that launched acy.
 | `phase` | string | `"PLAN"`, `"AUTO-RUN"` or `"COMPLETE"` |
 | `status` | string | the one-line header state (`"working…"`, `"idle"`, …); prose, not an enum |
 | `hint` | `Hint` | the composer hint line: `{text, kind}` |
+| `composer` | `Composer` | `{active}` — whether the composer owns the keyboard right now |
 | `sessionId` | string | claude's session id; empty until its `init` event |
 | `model` | string | the model claude reported at init |
 | `billing` | string | `"subscription"`, `"API"`, or `""` when not yet known |
@@ -263,6 +264,19 @@ presence, not just its value.
 `kind` exists so a client can style the line without re-deriving the condition
 that chose it. The selection lives in one place — `composerHint` in
 `internal/ui/present.go` — and both front ends call it.
+
+### `Composer`
+
+| field | type | meaning |
+|---|---|---|
+| `active` | bool | the composer is the surface the keyboard is pointed at |
+
+`active` is `false` while `/help`, the `/resume` picker, an open `Ask`, or the
+`/queue` edit overlay owns the keyboard, and `true` otherwise — including while
+a gate is pending, since the gate panel stacks above the composer rather than
+replacing it. A client should blink its own cursor only while `active` is
+`true`; the field itself never changes on its own between two frames of an
+idle run.
 
 ### `Cost` and `Ledger`
 

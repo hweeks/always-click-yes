@@ -141,6 +141,21 @@ func (m Model) surface() Surface {
 	return activeSurface(m.showHelp, m.picking, m.ask != nil, m.queueOpen)
 }
 
+// composerActive says whether the composer is the surface the keyboard is
+// pointed at. It derives from activeSurface rather than re-testing the same
+// booleans, so there is exactly one decision about overlay precedence instead
+// of two that can drift: the composer is active exactly when no overlay owns
+// the keyboard. A pending gate does not blur it — the gate panel stacks above
+// the composer rather than replacing it, and typing must still work there.
+func composerActive(showHelp, picking, queueOpen, askOpen bool) bool {
+	return activeSurface(showHelp, picking, askOpen, queueOpen) == SurfaceNone
+}
+
+// composerActive reports composerActive for this model's current state.
+func (m Model) composerActive() bool {
+	return m.surface() == SurfaceNone
+}
+
 // --- overlay footer hints ---
 
 // The three overlays each replace the composer, so each owns the footer line for
