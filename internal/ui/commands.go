@@ -129,14 +129,21 @@ func (m *Model) runCommand(name, args string) tea.Cmd {
 			m.appendEntry(entry{kind: eMeta, body: m.queueReport()})
 		case "clear":
 			n := len(m.queued)
-			m.queued = nil
+			m.clearQueue()
 			body := "queue cleared — " + plural(n, "message") + " dropped, unsent"
 			if n == 0 {
 				body = "the queue was already empty"
 			}
 			m.appendEntry(entry{kind: eMeta, body: body})
+		case "edit":
+			if len(m.queued) == 0 {
+				m.appendEntry(entry{kind: eMeta, body: "nothing queued to edit"})
+				break
+			}
+			m.queueCursor = 0
+			m.queueOpen = true
 		default:
-			m.appendEntry(entry{kind: eWarn, body: "unknown argument " + args + " — /queue or /queue clear"})
+			m.appendEntry(entry{kind: eWarn, body: "unknown argument " + args + " — /queue, /queue edit or /queue clear"})
 		}
 	case "retry":
 		m.raise(RetryCooldown())
@@ -159,7 +166,7 @@ func (m Model) queueReport() string {
 	fmt.Fprintf(&b, "%s · goes out as one turn when the session next falls idle",
 		plural(len(m.queued), "queued message"))
 	for i, q := range m.queued {
-		fmt.Fprintf(&b, "\n%2d. %s", i+1, q)
+		fmt.Fprintf(&b, "\n%2d. %s", i+1, q.text)
 	}
 	return b.String()
 }

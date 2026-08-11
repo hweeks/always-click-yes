@@ -47,8 +47,8 @@ func TestEnterWhileProcessingQueues(t *testing.T) {
 
 	m = typeAndSend(t, m, "also update the README")
 
-	if len(m.queued) != 1 || m.queued[0] != "also update the README" {
-		t.Fatalf("queued = %q, want the message held", m.queued)
+	if len(m.queued) != 1 || m.queued[0].text != "also update the README" {
+		t.Fatalf("queued = %v, want the message held", m.queued)
 	}
 	if sent.String() != "" {
 		t.Errorf("the driver was written to while a turn was in flight:\n%s", sent.String())
@@ -83,7 +83,7 @@ func TestResultEventFlushesTheQueueAsOneTurn(t *testing.T) {
 		t.Errorf("messages should be joined by a blank line; stdin got:\n%s", out)
 	}
 	if len(m.queued) != 0 {
-		t.Errorf("queued = %q, want it emptied by the flush", m.queued)
+		t.Errorf("queued = %v, want it emptied by the flush", m.queued)
 	}
 	if !m.processing {
 		t.Error("a flush starts a turn")
@@ -105,7 +105,7 @@ func TestNoFlushWhileADispatchIsActive(t *testing.T) {
 		t.Errorf("flushed while a task was still running; stdin got:\n%s", sent.String())
 	}
 	if len(m.queued) != 1 {
-		t.Errorf("queued = %q, want the message still held", m.queued)
+		t.Errorf("queued = %v, want the message still held", m.queued)
 	}
 }
 
@@ -137,7 +137,7 @@ func TestChildCompletionFlushesTheQueueAfterTheParentWentIdle(t *testing.T) {
 		t.Fatalf("flushed while the task was still shutting down; stdin got:\n%s", sent.String())
 	}
 	if len(m.queued) != 1 {
-		t.Fatalf("queued = %q, want the message still held", m.queued)
+		t.Fatalf("queued = %v, want the message still held", m.queued)
 	}
 
 	// The orchestrator drops a task from `running` before it emits the terminal
@@ -152,7 +152,7 @@ func TestChildCompletionFlushesTheQueueAfterTheParentWentIdle(t *testing.T) {
 		t.Fatalf("the queue was stranded — no driver event follows the last child; stdin got:\n%s", sent.String())
 	}
 	if len(m.queued) != 0 {
-		t.Errorf("queued = %q, want it emptied by the flush", m.queued)
+		t.Errorf("queued = %v, want it emptied by the flush", m.queued)
 	}
 	if !m.processing {
 		t.Error("a flush starts a turn")
@@ -174,7 +174,7 @@ func TestNoFlushWhileAGateIsPending(t *testing.T) {
 		t.Errorf("flushed with a gate still pending; stdin got:\n%s", sent.String())
 	}
 	if len(m.queued) != 1 {
-		t.Errorf("queued = %q, want the message still held", m.queued)
+		t.Errorf("queued = %v, want the message still held", m.queued)
 	}
 }
 
@@ -202,7 +202,7 @@ func gatedBusyModel(t *testing.T, text string) (Model, *strings.Builder) {
 		t.Fatalf("setup: flushed with a gate still pending; stdin got:\n%s", sent.String())
 	}
 	if len(m.queued) != 1 {
-		t.Fatalf("setup: queued = %q, want the message still held", m.queued)
+		t.Fatalf("setup: queued = %v, want the message still held", m.queued)
 	}
 	return m, sent
 }
@@ -224,7 +224,7 @@ func TestGateExpiringOnItsCountdownFlushesTheQueue(t *testing.T) {
 		t.Fatalf("the queue was stranded by the expiring gate; stdin got:\n%s", sent.String())
 	}
 	if len(m.queued) != 0 {
-		t.Errorf("queued = %q, want it emptied by the flush", m.queued)
+		t.Errorf("queued = %v, want it emptied by the flush", m.queued)
 	}
 	if !strings.Contains(m.transcript(), "and add a test for it") {
 		t.Errorf("the flushed message never reached the transcript:\n%s", m.transcript())
@@ -255,7 +255,7 @@ func TestApprovingTheLastGateFlushesTheQueue(t *testing.T) {
 		t.Fatalf("the queue was stranded by the approved gate; stdin got:\n%s", sent.String())
 	}
 	if len(m.queued) != 0 {
-		t.Errorf("queued = %q, want it emptied by the flush", m.queued)
+		t.Errorf("queued = %v, want it emptied by the flush", m.queued)
 	}
 	if !m.processing {
 		t.Error("a flush starts a turn")
@@ -286,7 +286,7 @@ func TestQueueThenInterjectSendsOnTheAbortedTurn(t *testing.T) {
 		t.Fatalf("the queued redirect never went out; stdin got:\n%s", sent.String())
 	}
 	if len(m.queued) != 0 {
-		t.Errorf("queued = %q, want it emptied", m.queued)
+		t.Errorf("queued = %v, want it emptied", m.queued)
 	}
 }
 
@@ -299,7 +299,7 @@ func TestIdleSendIsStillImmediate(t *testing.T) {
 	m = typeAndSend(t, m, "go on then")
 
 	if len(m.queued) != 0 {
-		t.Errorf("queued = %q, want an idle send to go straight out", m.queued)
+		t.Errorf("queued = %v, want an idle send to go straight out", m.queued)
 	}
 	if !strings.Contains(sent.String(), "go on then") {
 		t.Errorf("nothing reached the driver; stdin got:\n%s", sent.String())
@@ -312,7 +312,7 @@ func TestNothingIsQueuedWithoutADriver(t *testing.T) {
 	m.processing = true
 	m = typeAndSend(t, m, "into the void")
 	if len(m.queued) != 0 {
-		t.Errorf("queued = %q, want nothing queued with no driver", m.queued)
+		t.Errorf("queued = %v, want nothing queued with no driver", m.queued)
 	}
 }
 
@@ -324,7 +324,7 @@ func TestQueueClearEmptiesIt(t *testing.T) {
 	m.runCommand("queue", "clear")
 
 	if len(m.queued) != 0 {
-		t.Fatalf("queued = %q, want it emptied by /queue clear", m.queued)
+		t.Fatalf("queued = %v, want it emptied by /queue clear", m.queued)
 	}
 	if !strings.Contains(lastBody(&m), "cleared") {
 		t.Errorf("clearing should be confirmed, got %q", lastBody(&m))
@@ -361,7 +361,7 @@ func TestClosingStreamReportsUnsentMessages(t *testing.T) {
 		t.Errorf("the unsent message was swallowed:\n%s", m.transcript())
 	}
 	if len(m.queued) != 0 {
-		t.Errorf("queued = %q, want it cleared once reported", m.queued)
+		t.Errorf("queued = %v, want it cleared once reported", m.queued)
 	}
 }
 
@@ -371,7 +371,7 @@ func TestSendAfterTheSessionEndedDoesNotQueue(t *testing.T) {
 	m.ended = true
 	m = typeAndSend(t, m, "hello?")
 	if len(m.queued) != 0 {
-		t.Errorf("queued = %q, want nothing queued after the session ended", m.queued)
+		t.Errorf("queued = %v, want nothing queued after the session ended", m.queued)
 	}
 }
 
@@ -438,7 +438,7 @@ func TestQueueIsNotPersisted(t *testing.T) {
 		},
 	})
 	m.sessionID = "sess-1"
-	m.queued = []string{"a secret plan"}
+	m.queued = []queuedMsg{{id: 1, text: "a secret plan"}}
 	m.persist()
 
 	if len(saved) != 1 {

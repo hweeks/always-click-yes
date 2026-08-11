@@ -215,6 +215,8 @@ type Model struct {
 	sessionList   []pickRow // rows shown in the picker, built by pickRows when it opens
 	pickIdx       int       // selected row in the picker
 	ask           *askState // a pending AskUserQuestion the user is answering
+	queueOpen     bool      // the /queue edit overlay is open
+	queueCursor   int       // selected row in the queue-edit overlay
 
 	// resume / persistence
 	cwd       string // the project this run belongs to
@@ -266,14 +268,17 @@ type Model struct {
 	attached []string
 
 	// queued holds messages typed while the session was busy, waiting to go out
-	// as one turn when it next falls idle. Plain strings, deliberately: Bubble Tea
-	// copies the Model on every Update, so anything with an internal self-pointer
-	// in here is the strings.Builder crash again.
+	// as one turn when it next falls idle. Plain queuedMsg values, deliberately:
+	// Bubble Tea copies the Model on every Update, so anything with an internal
+	// self-pointer in here is the strings.Builder crash again.
 	//
 	// It is never persisted. A queued message is transient intent, and one
 	// surviving a crash to be delivered into a different phase is worse than one
 	// that was lost.
-	queued []string
+	queued []queuedMsg
+	// queueSeq mints each queuedMsg's id: monotonic, never reused, the same rule
+	// entry.seq follows for the transcript.
+	queueSeq int
 
 	// phase machine
 	ctx           context.Context

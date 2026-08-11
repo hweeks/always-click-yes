@@ -358,15 +358,15 @@ func TestFrameQueue(t *testing.T) {
 	if q := m.Frame().Queue; len(q) != 0 {
 		t.Errorf("queue = %v, want empty", q)
 	}
-	m.queued = []string{"alpha", "beta"}
-	if got := m.Frame().Queue; len(got) != 2 || got[0] != "alpha" || got[1] != "beta" {
-		t.Errorf("queue = %v, want [alpha beta]", got)
+	m.queued = []queuedMsg{{id: 1, text: "alpha"}, {id: 2, text: "beta"}}
+	if got := m.Frame().Queue; len(got) != 2 || got[0] != (QueueItem{ID: 1, Text: "alpha"}) || got[1] != (QueueItem{ID: 2, Text: "beta"}) {
+		t.Errorf("queue = %v, want [{1 alpha} {2 beta}]", got)
 	}
 	// A copy, not the model's own slice: a projection a caller can append to is
 	// a projection that can corrupt the run it describes.
 	f := m.Frame()
-	f.Queue[0] = "mutated"
-	if m.queued[0] != "alpha" {
+	f.Queue[0].Text = "mutated"
+	if m.queued[0].text != "alpha" {
 		t.Error("Frame handed out the model's own queue slice")
 	}
 }

@@ -184,8 +184,8 @@ func pinScenes() []pinScene {
 			pinWorking(&m)
 			// Set directly rather than through sendInput: that path stamps
 			// turnStart from the wall clock.
-			for _, q := range []string{"alpha", "beta", "gamma", "delta", "epsilon"} {
-				m.queued = append(m.queued, q)
+			for i, q := range []string{"alpha", "beta", "gamma", "delta", "epsilon"} {
+				m.queued = append(m.queued, queuedMsg{id: i + 1, text: q})
 				m.appendEntry(entry{kind: eQueued, body: q})
 			}
 			m.rebuild()
@@ -297,7 +297,7 @@ func TestTUIStructure(t *testing.T) {
 	t.Run("header composition", func(t *testing.T) {
 		m := pinBase(t)
 		m.phase = PhaseAutoRun
-		m.queued = []string{"one", "two"}
+		m.queued = []queuedMsg{{id: 1, text: "one"}, {id: 2, text: "two"}}
 		// Wider than the 100-column default: the meta strip is truncated from
 		// the tail to fit one row, and at 100 columns the tail is exactly the
 		// part this test is about.
@@ -327,7 +327,7 @@ func TestTUIStructure(t *testing.T) {
 		m := pinBase(t)
 		pinWorking(&m)
 		pinGate(t, &m)
-		m.queued = []string{"and add a test"}
+		m.queued = []queuedMsg{{id: 1, text: "and add a test"}}
 
 		foot := stripAnsi(m.footerView())
 		gate := strings.Index(foot, "auto-approve in")

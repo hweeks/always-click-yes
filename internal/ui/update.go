@@ -166,6 +166,13 @@ func (m Model) update(msg tea.Msg) (Model, tea.Cmd) {
 			m.rebuild()
 			return m, cmd
 		}
+		// The /queue edit overlay captures navigation keys until closed, the same
+		// way the picker and the ask panel do.
+		if m.queueOpen {
+			cmd := m.handleQueueEditKey(msg)
+			m.rebuild()
+			return m, cmd
+		}
 		// When gates are pending, three chords drive the countdown — and nothing
 		// else does. Everything they don't claim falls through to the composer and
 		// the viewport below, because in an armed auto-run every child tool call

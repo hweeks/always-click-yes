@@ -59,7 +59,7 @@ type Frame struct {
 	Dispatches int `json:"dispatches"`
 
 	Entries []Entry      `json:"entries"`
-	Queue   []string     `json:"queue"` // messages held for the next idle moment
+	Queue   []QueueItem  `json:"queue"` // messages held for the next idle moment
 	Gates   []Gate       `json:"gates"` // head of the slice is the one on screen
 	Ask     *Ask         `json:"ask"`   // null when no question is open
 	Tasks   []Task       `json:"tasks"`
@@ -148,6 +148,14 @@ type Entry struct {
 	// client switch light/dark without re-rendering a transcript it already has —
 	// and it is required by the webview's CSP, which forbids inline styles.
 	HTML string `json:"html"`
+}
+
+// QueueItem is one message held for the next idle moment, as Frame projects
+// it. ID is what a QueueEdit/QueueRemove action names, never a position — the
+// same reason a Gate is identified by ToolUseID rather than by index.
+type QueueItem struct {
+	ID   int    `json:"id"`
+	Text string `json:"text"`
 }
 
 // Gate is a permission request counting down.
@@ -313,7 +321,7 @@ func (m Model) Frame() Frame {
 		// Copied, and copied into a non-nil slice: a caller must not be handed
 		// the model's own backing array, and every list field marshals as [] so
 		// a client never has to handle null and empty as two different things.
-		Queue:  strs(m.queued),
+		Queue:  m.frameQueue(),
 		Gates:  m.frameGates(),
 		Ask:    m.frameAsk(),
 		Tasks:  m.frameTasks(),
@@ -353,6 +361,14 @@ func (m Model) frameEntries() []Entry {
 			// for HTML — see stamp.
 			HTML: e.html,
 		})
+	}
+	return out
+}
+
+func (m Model) frameQueue() []QueueItem {
+	out := make([]QueueItem, 0, len(m.queued))
+	for _, q := range m.queued {
+		out = append(out, QueueItem{ID: q.id, Text: q.text})
 	}
 	return out
 }

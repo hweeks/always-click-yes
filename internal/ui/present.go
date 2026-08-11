@@ -88,8 +88,9 @@ func (m Model) hint() Hint {
 // the ask hint is the only one that varies, and it varies twice.
 
 const (
-	helpFooterHint   = "press any key to close"
-	pickerFooterHint = "↑/↓ move · Enter resume · Esc cancel"
+	helpFooterHint      = "press any key to close"
+	pickerFooterHint    = "↑/↓ move · Enter resume · Esc cancel"
+	queueEditFooterHint = "↑/↓ move · Enter edit · Ctrl+X drop · Esc close"
 )
 
 // askFooterHint is the key legend for an open question. Space only appears for a
@@ -182,6 +183,7 @@ func helpContent() []HelpSection {
 			{"/resume [id]", "restore a prior run — transcript, phase and cost (picker if no id)"},
 			{"/model <name>", "set the model for the next launched/resumed session"},
 			{"/queue", "list the messages waiting for the current turn to end"},
+			{"/queue edit", "open an overlay to edit or drop one of them"},
 			{"/queue clear", "drop them all, unsent"},
 			{"/clear", "clear the transcript view"},
 			{"/log", "show the debug-log path"},
@@ -227,6 +229,14 @@ func helpContent() []HelpSection {
 			{"Ctrl+R", "pause / resume every countdown"},
 			{"any other key", "types into the message box as usual"},
 			{"Esc", "does NOT interject — answer the gate first"},
+		},
+	}, {
+		Title: "while editing the queue",
+		Rows: []HelpRow{
+			{"↑/↓ j/k", "move between held messages"},
+			{"Enter", "pull the selected message into the composer to edit and resend"},
+			{"Ctrl+X", "drop the selected message, unsent"},
+			{"Esc", "close without changing anything"},
 		},
 	}, {
 		Title: "while Claude is asking a question",

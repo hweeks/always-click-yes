@@ -6,6 +6,7 @@
 [38;5;215m  /resume [id][m  [38;5;244mrestore a prior run — transcript, phase and cost (picker if no id)[m                  
 [38;5;215m  /model <name>[m  [38;5;244mset the model for the next launched/resumed session[m                                
 [38;5;215m  /queue[m  [38;5;244mlist the messages waiting for the current turn to end[m                                     
+[38;5;215m  /queue edit[m  [38;5;244mopen an overlay to edit or drop one of them[m                                          
 [38;5;215m  /queue clear[m  [38;5;244mdrop them all, unsent[m                                                               
 [38;5;215m  /clear[m  [38;5;244mclear the transcript view[m                                                                 
 [38;5;215m  /log[m  [38;5;244mshow the debug-log path[m                                                                     
@@ -45,6 +46,12 @@
 [38;5;215m  Ctrl+R[m  [38;5;244mpause / resume every countdown[m                                                            
 [38;5;215m  any other key[m  [38;5;244mtypes into the message box as usual[m                                                
 [38;5;215m  Esc[m  [38;5;244mdoes NOT interject — answer the gate first[m                                                   
+                                                                                                    
+[1;38;5;244mwhile editing the queue[m                                                                             
+[38;5;215m  ↑/↓ j/k[m  [38;5;244mmove between held messages[m                                                               
+[38;5;215m  Enter[m  [38;5;244mpull the selected message into the composer to edit and resend[m                             
+[38;5;215m  Ctrl+X[m  [38;5;244mdrop the selected message, unsent[m                                                         
+[38;5;215m  Esc[m  [38;5;244mclose without changing anything[m                                                              
                                                                                                     
 [1;38;5;244mwhile Claude is asking a question[m                                                                   
 [38;5;215m  ↑/↓ j/k[m  [38;5;244mmove between options[m                                                                     

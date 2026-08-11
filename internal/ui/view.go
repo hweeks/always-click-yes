@@ -28,6 +28,8 @@ func (m Model) View() tea.View {
 		body = m.overlay(m.helpView())
 	case m.picking:
 		body = m.overlay(m.pickerView())
+	case m.queueOpen:
+		body = m.overlay(m.queueEditView())
 	case m.ask != nil:
 		body = m.overlay(m.askView())
 	}
@@ -52,6 +54,8 @@ func (m Model) footerView() string {
 		return hint(helpFooterHint)
 	case m.picking:
 		return hint(pickerFooterHint)
+	case m.queueOpen:
+		return hint(queueEditFooterHint)
 	case m.ask != nil:
 		keys := askFooterHint(m.ask.questions[m.ask.qIdx].multiSelect)
 		if r := m.askRemaining(); !m.ask.deadline.IsZero() {
@@ -91,7 +95,7 @@ func (m Model) queueView() string {
 			lines = append(lines, dim.Faint(true).Render(queueMoreNote(len(m.queued)-queueMaxShown)))
 			break
 		}
-		lines = append(lines, dim.Render("   "+truncate(firstLine(q), max(m.width-6, 20))))
+		lines = append(lines, dim.Render("   "+truncate(firstLine(q.text), max(m.width-6, 20))))
 	}
 	return strings.Join(lines, "\n")
 }
@@ -150,6 +154,31 @@ func (m Model) pickerView() string {
 		line := fmt.Sprintf("%s  %s  %s", short(s.ID), s.modTime.Format("Jan 02 15:04"), summary)
 		line = truncate(line, max(m.vp.Width()-2, 20))
 		if i == m.pickIdx {
+			rows = append(rows, lipgloss.NewStyle().Bold(true).Foreground(colInk).Background(colPlan).Render("▸ "+line))
+		} else {
+			rows = append(rows, lipgloss.NewStyle().Foreground(colDim).Render("  "+line))
+		}
+	}
+	return title + "\n\n" + strings.Join(rows, "\n")
+}
+
+// queueEditView renders the /queue edit overlay: every held message with the
+// cursor row highlighted, windowed to fit the viewport height — the same shape
+// pickerView uses for the /resume list.
+func (m Model) queueEditView() string {
+	title := lipgloss.NewStyle().Bold(true).Foreground(colPlan).Render(
+		"✎ edit the queue · Enter pulls a message into the composer · Ctrl+X drops it")
+	maxVisible := max(m.vp.Height()-3, 3)
+	start := 0
+	if m.queueCursor >= maxVisible {
+		start = m.queueCursor - maxVisible + 1
+	}
+	end := min(start+maxVisible, len(m.queued))
+
+	rows := make([]string, 0, end-start)
+	for i := start; i < end; i++ {
+		line := truncate(firstLine(m.queued[i].text), max(m.vp.Width()-2, 20))
+		if i == m.queueCursor {
 			rows = append(rows, lipgloss.NewStyle().Bold(true).Foreground(colInk).Background(colPlan).Render("▸ "+line))
 		} else {
 			rows = append(rows, lipgloss.NewStyle().Foreground(colDim).Render("  "+line))
