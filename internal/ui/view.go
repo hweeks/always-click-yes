@@ -230,7 +230,15 @@ func (m Model) headerView() string {
 
 	chip := lipgloss.NewStyle().Bold(true).Foreground(col).Background(colInk).
 		Render(" " + m.phase.String() + " ")
-	left := chip + bar.Bold(true).Render(" always-click-yes ")
+	left := chip
+	// The branch badge sits beside the phase chip, on the left, where it can
+	// never be lost to truncation — unlike the right-hand meta strip, which is
+	// deliberately truncated from the tail on a narrow terminal.
+	if m.branch != "" {
+		left += lipgloss.NewStyle().Foreground(colInk).Background(colDim).
+			Render(" " + m.branch + " ")
+	}
+	left += bar.Bold(true).Render(" always-click-yes ")
 
 	meta := []string{m.status}
 	// Right after the status, because it *is* status: it says the next thing that

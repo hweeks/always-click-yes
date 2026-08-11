@@ -84,6 +84,11 @@ type Frame struct {
 	ConfigPath string `json:"configPath"`
 	Cwd        string `json:"cwd"`
 
+	// Branch is the current git branch/SHA badge, "" when disabled or
+	// unresolved. It only changes when a real branch switch resolves — see
+	// Config.Branch.
+	Branch string `json:"branch"`
+
 	// FinishOutcome and FinishSummary are set once the session calls Finish —
 	// "completed" or "abandoned", and the summary it gave. Both are omitted
 	// before then, so a client can tell "not finished" from "finished with an
@@ -346,6 +351,7 @@ func (m Model) Frame() Frame {
 		LogPath:    m.logPath,
 		ConfigPath: m.configPath,
 		Cwd:        m.cwd,
+		Branch:     m.branch,
 
 		FinishOutcome: m.finishOutcome,
 		FinishSummary: m.finishSummary,

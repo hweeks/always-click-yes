@@ -554,6 +554,20 @@ func TestFrameCarriesFinishOutcomeAfterFinish(t *testing.T) {
 	}
 }
 
+// The resolved branch/SHA badge travels on the frame for the webview, which
+// has no header of its own to read it off.
+func TestFrameCarriesBranch(t *testing.T) {
+	m := New(nil, Config{})
+	if got := m.Frame().Branch; got != "" {
+		t.Errorf("Branch = %q before any resolve, want empty", got)
+	}
+
+	m.branch = "detached @ abc1234"
+	if got := m.Frame().Branch; got != "detached @ abc1234" {
+		t.Errorf("Branch = %q, want %q", got, "detached @ abc1234")
+	}
+}
+
 // The frame is the wire format, so it has to survive a round trip through
 // encoding/json — no channels, no funcs, no pointers into the model.
 func TestFrameMarshalsCleanly(t *testing.T) {

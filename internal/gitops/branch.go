@@ -1,6 +1,29 @@
 package gitops
 
-import "strings"
+import (
+	"context"
+	"strings"
+)
+
+// CurrentBranch resolves the branch checked out in dir, for display rather
+// than for git plumbing. A detached HEAD (e.g. mid-rebase, or a worktree
+// checked out at a bare commit) has no branch name, so it falls back to the
+// short SHA prefixed with "detached @ ".
+func CurrentBranch(ctx context.Context, run Runner, dir string) (string, error) {
+	out, err := run(ctx, dir, "git", "rev-parse", "--abbrev-ref", "HEAD")
+	if err != nil {
+		return "", err
+	}
+	branch := strings.TrimSpace(out)
+	if branch != "HEAD" {
+		return branch, nil
+	}
+	sha, err := run(ctx, dir, "git", "rev-parse", "--short", "HEAD")
+	if err != nil {
+		return "", err
+	}
+	return "detached @ " + strings.TrimSpace(sha), nil
+}
 
 // maxRefLen keeps the whole branch name comfortably under git's ref-name
 // limits and any CI/PR-title display truncation.

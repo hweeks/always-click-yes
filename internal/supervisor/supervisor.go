@@ -605,6 +605,7 @@ func NewSupervisor(ctx context.Context, f Flags) (*Supervisor, error) {
 		SaveState:   state.Save,
 		Replay:      func(id string) ([]driver.Event, error) { return session.Replay(cwd, id) },
 		Sessions:    sessions,
+		Branch:      func() (string, error) { return gitops.CurrentBranch(ctx, gitops.DefaultRunner, cwd) },
 	})
 
 	return &Supervisor{

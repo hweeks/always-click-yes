@@ -375,6 +375,13 @@ func (m Model) update(msg tea.Msg) (Model, tea.Cmd) {
 		// no more questions will arrive; nothing to re-arm
 		return m, nil
 
+	case branchTickMsg:
+		return m, tea.Batch(branchTickCmd(), resolveBranchCmd(m.branchResolver))
+
+	case branchMsg:
+		m.branch = msg.branch
+		return m, nil
+
 	case tickMsg:
 		m.now = time.Time(msg)
 		m.spinFrame++ // animates the footer/header spinner; View() re-renders each tick

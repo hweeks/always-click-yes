@@ -246,6 +246,7 @@ had the token, which was printed to the process that launched acy.
 | `logPath` | string | the debug log, if one is open |
 | `configPath` | string | the `.acy.json` this run's settings came from |
 | `cwd` | string | the project this run belongs to |
+| `branch` | string | the current git branch/SHA badge; `""` when disabled or unresolved |
 | `finishOutcome` | string | `"completed"` or `"abandoned"`, once the session calls Finish; omitted before then |
 | `finishSummary` | string | the summary that came with `finishOutcome`; omitted before then |
 

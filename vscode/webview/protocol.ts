@@ -148,6 +148,7 @@ export interface Frame {
   logPath: string;
   configPath: string;
   cwd: string;
+  branch: string;
 }
 
 export type ActionKind =
