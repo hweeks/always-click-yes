@@ -136,6 +136,7 @@ func (m *Model) startUpdateTicket(p *mcp.Pending) {
 		return
 	}
 	m.appendEntry(entry{kind: eGood, body: fmt.Sprintf("ticket %s → %s", args.ID, args.Status)})
+	m.emitFlowDiagram()
 }
 
 // --- CreateTicket ---
@@ -245,6 +246,7 @@ func (m *Model) startCreateTicket(p *mcp.Pending) {
 		return
 	}
 	m.appendEntry(entry{kind: eGood, body: fmt.Sprintf("ticket %s created", args.ID)})
+	m.emitFlowDiagram()
 }
 
 // ticketFilePath names the file CreateTicket just wrote, mirroring
@@ -275,6 +277,42 @@ func ticketSlugify(title string) string {
 		slug = "ticket"
 	}
 	return slug
+}
+
+// --- flow diagram ---
+
+// flowBody renders the board as the ascii lanes followed by a fenced mermaid
+// block — the shared shape emitFlowDiagram and /flow both append as an eFlow
+// entry's body, so the two can never disagree about what a flow entry looks
+// like. mermaid is returned separately so a caller can dedupe or set raw
+// without re-deriving it from the fenced body.
+func flowBody(ts []tickets.Ticket) (body, mermaid string) {
+	mermaid = tickets.Mermaid(ts)
+	body = tickets.ASCII(ts) + "\n\n```mermaid\n" + mermaid + "\n```"
+	return body, mermaid
+}
+
+// emitFlowDiagram redraws the ticket flow into the transcript after a
+// CreateTicket/UpdateTicket milestone. It is best-effort UI decoration, not
+// the tool's answer — a nil store or a read error is silently skipped rather
+// than surfaced — and it dedupes against the last diagram emitted so a
+// milestone that leaves the board's shape unchanged (e.g. re-marking a
+// ticket with the status it already had) does not print the same diagram
+// twice.
+func (m *Model) emitFlowDiagram() {
+	if m.tickets == nil {
+		return
+	}
+	ts, err := m.tickets.List()
+	if err != nil {
+		return
+	}
+	body, mermaid := flowBody(ts)
+	if mermaid == m.lastFlowDiagram {
+		return
+	}
+	m.lastFlowDiagram = mermaid
+	m.appendEntry(entry{kind: eFlow, body: body, raw: mermaid, lang: "mermaid"})
 }
 
 // --- rendering ---
@@ -335,4 +373,22 @@ func (m *Model) ticketsReport() string {
 		return "could not read tickets: " + err.Error()
 	}
 	return renderTicketBoard(ts)
+}
+
+// runFlowCommand answers /flow: an explicit request to redraw the ticket
+// flow, so unlike emitFlowDiagram it always appends — it deliberately never
+// touches m.lastFlowDiagram, which exists only to dedupe the automatic
+// milestone emission.
+func (m *Model) runFlowCommand() {
+	if m.tickets == nil {
+		m.appendEntry(entry{kind: eMeta, body: "no ticket store configured in this session"})
+		return
+	}
+	ts, err := m.tickets.List()
+	if err != nil {
+		m.appendEntry(entry{kind: eMeta, body: "could not read tickets: " + err.Error()})
+		return
+	}
+	body, mermaid := flowBody(ts)
+	m.appendEntry(entry{kind: eFlow, body: body, raw: mermaid, lang: "mermaid"})
 }

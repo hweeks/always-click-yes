@@ -262,6 +262,11 @@ type Model struct {
 	// half-served.
 	tickets TicketStore
 
+	// lastFlowDiagram is the mermaid source emitFlowDiagram last appended, so a
+	// milestone that leaves the board unchanged (e.g. re-marking a ticket with
+	// the status it already had) does not print the same diagram twice.
+	lastFlowDiagram string
+
 	// gate / countdown state
 	gateReqs  <-chan *gate.Pending
 	askReqs   <-chan *mcp.Pending

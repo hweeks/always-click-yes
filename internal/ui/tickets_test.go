@@ -217,8 +217,12 @@ func TestUpdateTicketUpdatesAndCommits(t *testing.T) {
 			t.Errorf("answer = %q, missing %q", got, want)
 		}
 	}
-	if len(m.entries) != 1 {
-		t.Fatalf("want 1 transcript entry, got %d", len(m.entries))
+	// The eGood milestone notice, plus the flow diagram it triggers.
+	if len(m.entries) != 2 {
+		t.Fatalf("want 2 transcript entries, got %d", len(m.entries))
+	}
+	if m.entries[1].kind != eFlow {
+		t.Errorf("second entry kind = %v, want eFlow", m.entries[1].kind)
 	}
 }
 
@@ -280,8 +284,9 @@ func TestUpdateTicketPushFailureStillSucceeds(t *testing.T) {
 			t.Errorf("answer = %q, missing %q", got, want)
 		}
 	}
-	if len(m.entries) != 1 {
-		t.Fatalf("want 1 transcript entry even though the push failed, got %d", len(m.entries))
+	// The eGood milestone notice, plus the flow diagram it triggers.
+	if len(m.entries) != 2 {
+		t.Fatalf("want 2 transcript entries even though the push failed, got %d", len(m.entries))
 	}
 }
 
@@ -382,8 +387,12 @@ func TestCreateTicketCreatesAndCommits(t *testing.T) {
 	if reply2 := answer(t, reply); !strings.Contains(reply2, "t1") {
 		t.Errorf("answer = %q, missing the ticket id", reply2)
 	}
-	if len(m.entries) != 1 {
-		t.Fatalf("want 1 transcript entry, got %d", len(m.entries))
+	// The eGood milestone notice, plus the flow diagram it triggers.
+	if len(m.entries) != 2 {
+		t.Fatalf("want 2 transcript entries, got %d", len(m.entries))
+	}
+	if m.entries[1].kind != eFlow {
+		t.Errorf("second entry kind = %v, want eFlow", m.entries[1].kind)
 	}
 }
 
@@ -417,8 +426,9 @@ func TestCreateTicketPushFailureStillSucceeds(t *testing.T) {
 			t.Errorf("answer = %q, missing %q", got, want)
 		}
 	}
-	if len(m.entries) != 1 {
-		t.Fatalf("want 1 transcript entry even though the push failed, got %d", len(m.entries))
+	// The eGood milestone notice, plus the flow diagram it triggers.
+	if len(m.entries) != 2 {
+		t.Fatalf("want 2 transcript entries even though the push failed, got %d", len(m.entries))
 	}
 }
 
@@ -505,6 +515,104 @@ func TestTicketsSlashCommandWithoutStore(t *testing.T) {
 	got := m.entries[len(m.entries)-1].body
 	if !strings.Contains(got, "no ticket store") {
 		t.Errorf("tickets report = %q, want it to say no store is configured", got)
+	}
+}
+
+// --- flow diagram ---
+
+// countKind counts how many entries carry the given kind, so a dedupe test
+// can compare a before/after count rather than assuming a fixed index.
+func countKind(entries []entry, k ekind) int {
+	n := 0
+	for _, e := range entries {
+		if e.kind == k {
+			n++
+		}
+	}
+	return n
+}
+
+func TestUpdateTicketMilestoneEmitsFlowDiagram(t *testing.T) {
+	fake := &fakeTicketStore{list: []tickets.Ticket{{ID: "t1", Title: "add x", Status: tickets.StatusTodo}}}
+	m := &Model{tickets: fake, ctx: context.Background()}
+	p, reply := ticketPending(mcp.ToolUpdateTicket, `{"id":"t1","status":"in-progress"}`)
+	m.startUpdateTicket(p)
+	answer(t, reply)
+
+	if got := countKind(m.entries, eFlow); got != 1 {
+		t.Fatalf("eFlow entries = %d, want 1", got)
+	}
+}
+
+// A milestone that leaves the board's shape unchanged — here, a second
+// UpdateTicket call to the same status the fake store already reports — must
+// not print the same diagram again.
+func TestUpdateTicketMilestoneDedupesUnchangedBoard(t *testing.T) {
+	fake := &fakeTicketStore{list: []tickets.Ticket{{ID: "t1", Title: "add x", Status: tickets.StatusInProgress}}}
+	m := &Model{tickets: fake, ctx: context.Background()}
+
+	p1, reply1 := ticketPending(mcp.ToolUpdateTicket, `{"id":"t1","status":"in-progress"}`)
+	m.startUpdateTicket(p1)
+	answer(t, reply1)
+	if got := countKind(m.entries, eFlow); got != 1 {
+		t.Fatalf("eFlow entries after first update = %d, want 1", got)
+	}
+
+	p2, reply2 := ticketPending(mcp.ToolUpdateTicket, `{"id":"t1","status":"in-progress"}`)
+	m.startUpdateTicket(p2)
+	answer(t, reply2)
+	if got := countKind(m.entries, eFlow); got != 1 {
+		t.Fatalf("eFlow entries after an unchanged-board update = %d, want still 1", got)
+	}
+}
+
+// --- /flow ---
+
+func TestFlowSlashCommandWithoutStore(t *testing.T) {
+	m := New(nil, Config{})
+	if cmd := m.runCommand("flow", ""); cmd != nil {
+		t.Error("runCommand(flow) should not return a tea.Cmd")
+	}
+	got := m.entries[len(m.entries)-1].body
+	if !strings.Contains(got, "no ticket store") {
+		t.Errorf("flow report = %q, want it to say no store is configured", got)
+	}
+}
+
+func TestFlowSlashCommandRendersDiagram(t *testing.T) {
+	fake := &fakeTicketStore{list: []tickets.Ticket{{ID: "t1", Title: "add x", Status: tickets.StatusTodo}}}
+	m := New(nil, Config{Tickets: fake})
+	before := len(m.entries)
+
+	if cmd := m.runCommand("flow", ""); cmd != nil {
+		t.Error("runCommand(flow) should not return a tea.Cmd")
+	}
+	if len(m.entries) != before+1 {
+		t.Fatalf("entries = %d, want %d (one flow diagram appended)", len(m.entries), before+1)
+	}
+	got := m.entries[len(m.entries)-1]
+	if got.kind != eFlow {
+		t.Errorf("entry kind = %v, want eFlow", got.kind)
+	}
+	if got.raw == "" {
+		t.Error("raw should carry the mermaid source, not be empty")
+	}
+	if !strings.Contains(got.body, "```mermaid") {
+		t.Errorf("body = %q, want it to contain a fenced mermaid block", got.body)
+	}
+}
+
+// /flow is an explicit request, unlike the milestone emission — it must
+// print every time regardless of whether the board changed in between.
+func TestFlowSlashCommandAlwaysPrintsEvenWhenUnchanged(t *testing.T) {
+	fake := &fakeTicketStore{list: []tickets.Ticket{{ID: "t1", Title: "add x", Status: tickets.StatusTodo}}}
+	m := New(nil, Config{Tickets: fake})
+
+	m.runCommand("flow", "")
+	m.runCommand("flow", "")
+
+	if got := countKind(m.entries, eFlow); got != 2 {
+		t.Fatalf("eFlow entries after two /flow calls = %d, want 2", got)
 	}
 }
 

@@ -25,6 +25,7 @@ const (
 	eGood                  // a positive notice (approved, etc.)
 	eWarn                  // a warning/negative notice (vetoed, interrupted)
 	eQueued                // a message held back until the session goes idle
+	eFlow                  // the ticket flow, redrawn as ascii + mermaid
 )
 
 // entry is one item in the transcript. It stays structured so it can be
@@ -70,6 +71,7 @@ var (
 	colPlan   = lipgloss.Color("221")
 	colRun    = lipgloss.Color("208")
 	colInk    = lipgloss.Color("235")
+	colFlow   = lipgloss.Color("141")
 )
 
 // phaseColor is the accent the whole chrome takes in a given phase: the header
@@ -208,6 +210,18 @@ func renderEntry(e entry, width, maxLines int) string {
 		// scroll back and find the same text twice — once queued, once sent.
 		body := lipgloss.NewStyle().Foreground(colDim).Width(inner).Render(e.body)
 		return badge("⏳ queued", colDim) + "\n" + entryBox(body, colDim, width)
+
+	case eFlow:
+		// Plain/preformatted, not renderMarkdown: the body is ascii lanes followed
+		// by a fenced mermaid block, and running that through the markdown
+		// renderer would reflow the ascii art and syntax-highlight mermaid as a
+		// foreign language neither glamour nor chroma actually knows.
+		head := badge("⛓ flow", colFlow)
+		body := clampLines(e.body, inner, maxLines, lipgloss.NewStyle())
+		if body == "" {
+			return head
+		}
+		return head + "\n" + entryBox(body, colFlow, width)
 	}
 	return lipgloss.NewStyle().Width(width).Render(e.body)
 }

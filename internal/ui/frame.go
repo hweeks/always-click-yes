@@ -292,6 +292,7 @@ var entryKinds = map[ekind]string{
 	eGood:     "good",
 	eWarn:     "warn",
 	eQueued:   "queued",
+	eFlow:     "flow",
 }
 
 // Frame projects the model for a non-terminal front end. It is a read: nothing
