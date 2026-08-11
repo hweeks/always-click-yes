@@ -465,6 +465,48 @@ Neither has a default ceiling (both are unlimited unless you set them). Set
 plain `acy run` — it's the number that keeps a fleet that's misbehaving from being a
 number you only find out about later.
 
+## Nothing merges without a human
+
+Three independent things stand between an engineer — or the architect itself — and
+actually landing code on your default branch, worth knowing precisely before you point
+a fleet at a real repo:
+
+- **The ticket board's own commits never push to it.** `internal/tickets/commit.go`'s
+  `Store.Commit` commits `.acy/tickets` locally, then resolves the branch actually
+  checked out (`git rev-parse --abbrev-ref HEAD`) before pushing anywhere. If that's
+  `main`, `master`, or the `baseBranch` you configured, the push is skipped entirely —
+  `CreateTicket`/`UpdateTicket` report back "committed locally, but not pushed" rather
+  than either silently succeeding or looking like a failure.
+- **The permission gate denies merge and protected-push commands outright, before a
+  countdown ever starts.** `internal/ui/guard.go`'s `mergeGuardVerdict`, consulted by
+  `gate.go`'s `enqueue` on every tool call, refuses immediately — never queued for
+  auto-approval — any `gh pr merge`, any `gh api` call against a `/merges` endpoint, and
+  any `git push` whose refspec resolves to a protected branch (your `baseBranch`, plus
+  `main`/`master` always). Because an engineer runs this exact same `ui.Model`, it gets
+  this guard for free — there is no separate copy of it to fall out of sync.
+- **Both the architect and every engineer are told outright never to merge, push to the
+  default branch, or run `gh pr merge`.** That's plain prompt text (`ArchSystemPromptFor`,
+  `briefText`) — it costs nothing to include, but treat it as an assist for an
+  already-cooperative model, not a guarantee.
+
+Be honest with yourself about what the second one actually is: `mergeGuardVerdict` is
+pure string matching over a Bash command that has not executed yet. It is not a sandbox,
+and the doc comment at the top of `guard.go` says so in those words. A model that
+genuinely wanted around it — a base64-encoded script, a shell alias, a wrapper binary —
+could get around it. What you can actually rely on doesn't come from the guard at all:
+the supervising session's own tool registry has no `Bash` in it, full stop, so the
+architect (and a plain run's parent) can never reach the guard's blind spots because
+they can never reach a shell in the first place; and the only code path that ever
+pushes a branch or opens a PR is `internal/gitops`, invoked with a fixed argv the
+package itself chooses, deterministically, in Go, only after the model calls `Finish`
+— never handed to the model as an instruction to go carry out. If you're deciding how
+far to trust an unattended host, trust those two, not the prompt text or the string
+matcher.
+
+Given all three, landing anything on your default branch still requires a human
+clicking merge on GitHub — nothing here, working as designed or buggy, does that for
+you.
+
 ## The trust paragraph
 
 An engineer is an unattended agent with `Bash` on whatever machine it runs, auto-

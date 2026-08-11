@@ -397,6 +397,27 @@ real probing to learn, so a future agent doesn't have to relearn it by breaking 
   `pr-create` calls for 2 tickets** before the brief text (`core.go`) was fixed (`4c11c51`)
   to say outright: commit your work locally, but do not push the branch or open a PR
   yourself — that happens automatically once you call `Finish`.
+- **Merge and default-branch protection is three separate mechanisms, not one, and only
+  two of them are load-bearing.** `internal/tickets/commit.go`'s `Store.Commit` resolves
+  the checked-out branch (`git rev-parse --abbrev-ref HEAD`) after committing the ticket
+  board locally, and skips `git push origin HEAD` — returning `tickets.ErrPushSkipped`,
+  handled as success-with-a-note by `internal/ui/tickets.go` — whenever that branch is
+  `main`, `master`, or the store's `BaseBranch` (`fleet.baseBranch`, wired in
+  `internal/cli/arch.go`) (`37697a7`). `internal/ui/guard.go`'s `mergeGuardVerdict`,
+  consulted by `gate.go`'s `enqueue` before any countdown is even raised, denies outright
+  — never counts down — any `gh pr merge`, any `gh api` call against a `/merges`
+  endpoint, and any `git push` whose refspec resolves to a protected branch
+  (`Config.Trunk` union `main`/`master`) (`352172a`). And both system prompts
+  (`ArchSystemPromptFor` in `phase.go`, `briefText` in `internal/engineer/core.go`) now
+  say outright that acy and an engineer must never merge, never push to the default
+  branch, and never run `gh pr merge` (`4a4ed01`). Read `guard.go`'s own doc comment
+  before trusting the middle one too far: it is pure string matching over a Bash command
+  that has not run yet, not a sandbox — a base64-encoded or aliased command walks right
+  past it. What is actually load-bearing is structural: the supervising session's
+  `--tools` registry has no `Bash` in it at all, and `internal/gitops` only ever pushes
+  an engineer's own branch, deterministically, in Go, never through a model — and
+  because a remote engineer runs this same `ui.Model` via `internal/supervisor`, it
+  inherits all three for free, with no second copy to keep in sync.
 - **A fleet host must be authenticated for *non-interactive* ssh, which is not the same
   as being authenticated for you.** The real check is `ssh -o BatchMode=yes <host> --
   '<wrapper>; claude -p "reply with exactly: PROBE_OK"'` and `gh api user` over that same
