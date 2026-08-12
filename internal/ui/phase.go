@@ -9,6 +9,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/hweeks/always-click-yes/internal/alog"
+	"github.com/hweeks/always-click-yes/internal/config"
 	"github.com/hweeks/always-click-yes/internal/driver"
 	"github.com/hweeks/always-click-yes/internal/mcp"
 )
@@ -95,12 +96,16 @@ var ParentSystemPrompt = strings.Join([]string{
 // runtime, than handing over one prompt and trusting it to branch on a mode it
 // was never told.
 //
-// jiraServer is the configured Jira MCP server's name, or "" when this
-// project has no "jira" section in .acy.json. Non-empty, it appends a
-// paragraph telling the architect to mirror ticket transitions onto Jira
-// through that server's own mcp__<jiraServer>__ tools — a different prefix
-// from mcp.Qualified, which is hardcoded to acy's own server name.
-func ArchSystemPromptFor(stackMode, jiraServer string) string {
+// jira is the project's "jira" section from .acy.json, or nil when this
+// project has none. Non-nil, it appends a paragraph telling the architect to
+// mirror ticket transitions onto Jira through that server's own
+// mcp__<jira.Server>__ tools — a different prefix from mcp.Qualified, which
+// is hardcoded to acy's own server name. When jira.ProjectKey and/or
+// jira.Site are set, that same paragraph names them as the target every
+// issue belongs to, so an account with access to several projects or sites
+// is actually aimed instead of falling back to whatever the server
+// defaults to.
+func ArchSystemPromptFor(stackMode string, jira *config.JiraConfig) string {
 	lines := []string{
 		"You are the architect of a fleet run. You have Read, Grep and Glob: you can understand this",
 		"codebase, and you cannot change it.",
@@ -122,13 +127,22 @@ func ArchSystemPromptFor(stackMode, jiraServer string) string {
 		"",
 	}
 
-	if jiraServer != "" {
-		jiraPrefix := "mcp__" + jiraServer + "__"
+	if jira != nil {
+		jiraPrefix := "mcp__" + jira.Server + "__"
+		var target string
+		switch {
+		case jira.ProjectKey != "" && jira.Site != "":
+			target = " Every issue belongs to project " + jira.ProjectKey + " on " + jira.Site + " — never let a call fall back to whichever project or site the server defaults to."
+		case jira.ProjectKey != "":
+			target = " Every issue belongs to project " + jira.ProjectKey + " — never let a call fall back to whichever project the server defaults to."
+		case jira.Site != "":
+			target = " Every issue belongs to " + jira.Site + " — never let a call fall back to whichever site the server defaults to."
+		}
 		lines = append(lines,
 			"The ticket board remains the source of truth, not Jira. Mirror each ticket transition onto its Jira",
 			"issue too, using this project's own Jira MCP tools — they are namespaced "+jiraPrefix+"*, a different",
 			"server from acy's own. Record the issue key on the ticket itself via the jira argument on "+
-				mcp.Qualified(mcp.ToolUpdateTicket)+".",
+				mcp.Qualified(mcp.ToolUpdateTicket)+"."+target,
 			"Treat every Jira call as best-effort: if one fails, say so plainly in your own next message and carry",
 			"on with the ticket transition regardless — never block on it, and never retry it in a loop.",
 			"",

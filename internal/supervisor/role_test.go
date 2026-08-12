@@ -11,17 +11,17 @@ import (
 // roleAndPrompt is the only fork ArchMode makes in NewSupervisor: everything
 // else about the parent session — tools, hooks, the gate — stays identical.
 func TestRoleAndPromptArchMode(t *testing.T) {
-	role, prompt := roleAndPrompt(true, "ask", "")
+	role, prompt := roleAndPrompt(true, "ask", nil)
 	if role != mcp.RoleArchitect {
 		t.Errorf("role = %v, want RoleArchitect", role)
 	}
-	if prompt != ui.ArchSystemPromptFor("ask", "") {
-		t.Error("prompt should be ui.ArchSystemPromptFor(\"ask\", \"\")")
+	if prompt != ui.ArchSystemPromptFor("ask", nil) {
+		t.Error("prompt should be ui.ArchSystemPromptFor(\"ask\", nil)")
 	}
 }
 
 func TestRoleAndPromptDefault(t *testing.T) {
-	role, prompt := roleAndPrompt(false, "", "")
+	role, prompt := roleAndPrompt(false, "", nil)
 	if role != mcp.RoleParent {
 		t.Errorf("role = %v, want RoleParent", role)
 	}
@@ -34,6 +34,17 @@ func TestRoleAndPromptDefault(t *testing.T) {
 // own --mcp-config: nil unless both ArchMode is set and the project
 // configured a jira section, so a plain run and a dispatched child never see
 // a difference at all.
+// roleAndPrompt must thread the configured Jira target through to the
+// prompt unchanged — this is the only place a project's projectKey/site
+// ever reach the architect.
+func TestRoleAndPromptArchModeThreadsJiraConfig(t *testing.T) {
+	jiraCfg := &config.JiraConfig{Server: "jira", ProjectKey: "ENG", Site: "acme.atlassian.net"}
+	_, prompt := roleAndPrompt(true, "off", jiraCfg)
+	if prompt != ui.ArchSystemPromptFor("off", jiraCfg) {
+		t.Error("prompt should be ui.ArchSystemPromptFor(\"off\", jiraCfg)")
+	}
+}
+
 func TestJiraExtraServers(t *testing.T) {
 	jiraCfg := &config.JiraConfig{
 		Server: "jira",

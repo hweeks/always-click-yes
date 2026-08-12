@@ -226,12 +226,12 @@ func childModel(f Flags) string {
 // prompt. archMode is the only fork: everything else about the parent —
 // tools, hooks, the gate — stays identical between the two, which is what
 // lets a child never see the difference (it is always RoleChild). stackMode
-// and jiraServer are only consulted in the arch case, where stackMode is the
-// run's already-resolved effective fleet.stackMode and jiraServer is the
-// configured Jira MCP server's name, or "" when none is configured.
-func roleAndPrompt(archMode bool, stackMode, jiraServer string) (mcp.Role, string) {
+// and jira are only consulted in the arch case, where stackMode is the run's
+// already-resolved effective fleet.stackMode and jira is the project's
+// configured Jira section, or nil when none is configured.
+func roleAndPrompt(archMode bool, stackMode string, jira *config.JiraConfig) (mcp.Role, string) {
 	if archMode {
-		return mcp.RoleArchitect, ui.ArchSystemPromptFor(stackMode, jiraServer)
+		return mcp.RoleArchitect, ui.ArchSystemPromptFor(stackMode, jira)
 	}
 	return mcp.RoleParent, ui.ParentSystemPrompt
 }
@@ -434,11 +434,7 @@ func NewSupervisor(ctx context.Context, f Flags) (*Supervisor, error) {
 	// of unsupervised processes. The parent's own role varies with ArchMode —
 	// RoleArchitect gains the fleet tools, RoleChild never does — but a child is
 	// always RoleChild regardless, so it never sees them either.
-	jiraServer := ""
-	if f.ArchMode && f.Jira != nil {
-		jiraServer = f.Jira.Server
-	}
-	parentRole, parentPrompt := roleAndPrompt(f.ArchMode, f.StackMode, jiraServer)
+	parentRole, parentPrompt := roleAndPrompt(f.ArchMode, f.StackMode, f.Jira)
 	mcpConfigPath, err := config.WriteMCPConfig(tmp, exe, bridge.SocketPath(), parentRole, jiraExtraServers(f)...)
 	if err != nil {
 		return fail(fmt.Errorf("write mcp config: %w", err))
