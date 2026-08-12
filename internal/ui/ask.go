@@ -104,6 +104,12 @@ func (m *Model) openAsk(p *mcp.Pending) {
 		a.deadline = m.now.Add(m.countdown)
 	}
 	m.ask = a
+	// An Ask blocks a real claude turn and, in AUTO-RUN, is on its own
+	// auto-skip countdown — it outranks the queue editor (see activeSurface
+	// in present.go), and closing the editor outright rather than just
+	// letting it render underneath is what guarantees nothing is left for a
+	// keystroke to reach but the panel actually on screen.
+	m.queueOpen = false
 	m.appendEntry(entry{kind: eMeta, body: "❓ Claude is asking a question — answer below"})
 }
 

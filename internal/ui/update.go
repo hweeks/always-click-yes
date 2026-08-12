@@ -148,27 +148,28 @@ func (m Model) update(msg tea.Msg) (Model, tea.Cmd) {
 			}
 			return m, tea.Quit
 		}
-		// The help overlay is dismissed by any key.
-		if m.showHelp {
+		// One of the four overlays may own the keyboard; m.surface() is the same
+		// decision view.go's render switch reads, so routing can never drive a
+		// panel the screen isn't showing (or vice versa) — see present.go.
+		switch m.surface() {
+		case SurfaceHelp:
+			// The help overlay is dismissed by any key.
 			m.showHelp = false
 			m.rebuild()
 			return m, nil
-		}
-		// The resume picker captures navigation keys until dismissed.
-		if m.picking {
+		case SurfacePicker:
+			// The resume picker captures navigation keys until dismissed.
 			cmd := m.handlePickKey(msg)
 			m.rebuild()
 			return m, cmd
-		}
-		// A pending AskUserQuestion captures navigation keys until answered.
-		if m.ask != nil {
+		case SurfaceAsk:
+			// A pending AskUserQuestion captures navigation keys until answered.
 			cmd := m.handleAskKey(msg)
 			m.rebuild()
 			return m, cmd
-		}
-		// The /queue edit overlay captures navigation keys until closed, the same
-		// way the picker and the ask panel do.
-		if m.queueOpen {
+		case SurfaceQueue:
+			// The /queue edit overlay captures navigation keys until closed, the
+			// same way the picker and the ask panel do.
 			cmd := m.handleQueueEditKey(msg)
 			m.rebuild()
 			return m, cmd

@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -138,6 +139,71 @@ func TestQueueEditRefusesOnEmptyQueue(t *testing.T) {
 	}
 	if !strings.Contains(lastBody(&m), "nothing queued to edit") {
 		t.Errorf("no refusal reached the transcript: %q", lastBody(&m))
+	}
+}
+
+// An Ask arriving while the queue editor is open must not leave the screen
+// showing one panel while keys route to another. This is the PR #47 review
+// finding: view.go's render switch kept the queue overlay on screen while
+// update.go's key routing tested m.ask first, so Enter — apparently picking a
+// queued message — actually answered a question the user could not see.
+// openAsk now closes the queue editor outright, and both switches read
+// m.surface() (present.go), so there is exactly one decision instead of two
+// that can disagree.
+func TestAskArrivingWhileQueueEditorOpenClosesTheQueueEditor(t *testing.T) {
+	m, _ := busyModel(t)
+	m = typeAndSend(t, m, "hold this thought")
+	m.runCommand("queue", "edit")
+	if !m.queueOpen {
+		t.Fatalf("setup: /queue edit did not open the overlay")
+	}
+	queuedBefore := append([]queuedMsg(nil), m.queued...)
+
+	p, reply := pendingFor(`{"questions":[{"question":"proceed?","options":[{"label":"yes"},{"label":"no"}]}]}`)
+	m.openAsk(p)
+
+	if m.queueOpen {
+		t.Fatal("the queue editor stayed open once an Ask arrived — it must close, not sit underneath")
+	}
+	if m.ask == nil {
+		t.Fatal("openAsk did not open the ask panel")
+	}
+
+	// The rendered surface and the one routing keys must be the same surface.
+	if got := m.surface(); got != SurfaceAsk {
+		t.Fatalf("surface() = %q, want %q", got, SurfaceAsk)
+	}
+	rendered := stripAnsi(m.footerView())
+	if strings.Contains(rendered, queueEditFooterHint) {
+		t.Errorf("footer still shows the queue-edit hint while an Ask is open:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "Esc skip") {
+		t.Errorf("footer does not show the ask hint:\n%s", rendered)
+	}
+
+	// Enter must answer the visible Ask, not silently manipulate the queue
+	// that used to render underneath it.
+	tm, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m2 := tm.(Model)
+
+	if !reflect.DeepEqual(m2.queued, queuedBefore) {
+		t.Errorf("Enter changed the queue: got %v, want unchanged %v", m2.queued, queuedBefore)
+	}
+	if m2.ask != nil {
+		t.Error("Enter on a single-question ask should have submitted it")
+	}
+	if got := answer(t, reply); !strings.Contains(got, "yes") {
+		t.Errorf("answer = %q, want the option Enter actually selected, not a default/no-op answer", got)
+	}
+
+	// Closing the Ask must return control somewhere sane — the plain composer,
+	// not a queue editor resurrected from whatever the queue looked like
+	// before the question interrupted it.
+	if m2.queueOpen {
+		t.Error("closing the Ask reopened the queue editor")
+	}
+	if got := m2.surface(); got != SurfaceNone {
+		t.Errorf("surface() after the Ask closes = %q, want %q (composer)", got, SurfaceNone)
 	}
 }
 

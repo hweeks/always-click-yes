@@ -23,15 +23,15 @@ func (m Model) View() tea.View {
 	}
 
 	body := m.vp.View()
-	switch {
-	case m.showHelp:
+	switch m.surface() {
+	case SurfaceHelp:
 		body = m.overlay(m.helpView())
-	case m.picking:
+	case SurfacePicker:
 		body = m.overlay(m.pickerView())
-	case m.queueOpen:
-		body = m.overlay(m.queueEditView())
-	case m.ask != nil:
+	case SurfaceAsk:
 		body = m.overlay(m.askView())
+	case SurfaceQueue:
+		body = m.overlay(m.queueEditView())
 	}
 
 	v.SetContent(strings.Join([]string{
@@ -49,19 +49,19 @@ func (m Model) View() tea.View {
 // put the frame's height back out of sync with what's drawn.
 func (m Model) footerView() string {
 	hint := func(s string) string { return lipgloss.NewStyle().Foreground(colDim).Render(s) }
-	switch {
-	case m.showHelp:
+	switch m.surface() {
+	case SurfaceHelp:
 		return hint(helpFooterHint)
-	case m.picking:
+	case SurfacePicker:
 		return hint(pickerFooterHint)
-	case m.queueOpen:
-		return hint(queueEditFooterHint)
-	case m.ask != nil:
+	case SurfaceAsk:
 		keys := askFooterHint(m.ask.questions[m.ask.qIdx].multiSelect)
 		if r := m.askRemaining(); !m.ask.deadline.IsZero() {
 			keys += askAutoSkipNote(r)
 		}
 		return hint(keys)
+	case SurfaceQueue:
+		return hint(queueEditFooterHint)
 	}
 	// The gate stacks; it does not replace. In an armed run something is counting
 	// down nearly all the time, so a panel that stood in for the composer left the
