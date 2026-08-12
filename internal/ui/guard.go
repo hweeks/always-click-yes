@@ -85,41 +85,67 @@ func mergeGuardVerdict(tool string, rawInput json.RawMessage, protected map[stri
 		if ghAPIRE.MatchString(seg) && mergesPathRE.MatchString(seg) {
 			return true, "gh api against a /merges endpoint is not allowed"
 		}
-		if branch, ok := pushDestination(seg); ok && protected[branch] {
-			return true, "git push targets protected branch " + branch
+		if branches, bulk, ok := pushDestinations(seg); ok {
+			if bulk {
+				return true, "git push --all/--mirror pushes every branch, including protected ones"
+			}
+			for _, branch := range branches {
+				if protected[branch] {
+					return true, "git push targets protected branch " + branch
+				}
+			}
 		}
 	}
 	return false, ""
 }
 
-// pushDestination resolves the branch a `git push` invocation would push to,
-// purely from the command text. It reports ok=false whenever the string alone
-// does not resolve to a branch — a bare `git push`, or `git push -u origin
-// HEAD` where the refspec is literally HEAD — rather than guessing.
-func pushDestination(seg string) (branch string, ok bool) {
+// pushDestinations resolves every branch a `git push` invocation would push
+// to, purely from the command text — `git push` takes `[<refspec>...]`, so a
+// single invocation can target several branches at once and each one must be
+// checked, not just the first. It reports ok=false whenever the string alone
+// does not resolve to any destination — a bare `git push`, or `git push -u
+// origin HEAD` where the refspec is literally HEAD — rather than guessing.
+//
+// bulk=true means the invocation is `--all` or `--mirror`: per git-push(1)
+// both push every local branch (refs/heads/*) to the remote regardless of
+// any refspec, so they touch protected branches by definition and are always
+// denied.
+func pushDestinations(seg string) (branches []string, bulk bool, ok bool) {
 	fields := strings.Fields(seg)
 	if len(fields) < 2 || fields[0] != "git" || fields[1] != "push" {
-		return "", false
+		return nil, false, false
 	}
 	var positional []string
 	for _, f := range fields[2:] {
+		if f == "--all" || f == "--mirror" {
+			bulk = true
+			continue
+		}
 		if strings.HasPrefix(f, "-") {
 			continue
 		}
 		positional = append(positional, f)
 	}
+	if bulk {
+		return nil, true, true
+	}
 	if len(positional) < 2 {
-		return "", false
+		return nil, false, false
 	}
-	refspec := positional[1]
-	refspec = strings.TrimPrefix(refspec, "+")
-	dest := refspec
-	if i := strings.Index(refspec, ":"); i >= 0 {
-		dest = refspec[i+1:]
+	for _, refspec := range positional[1:] {
+		refspec = strings.TrimPrefix(refspec, "+")
+		dest := refspec
+		if i := strings.Index(refspec, ":"); i >= 0 {
+			dest = refspec[i+1:]
+		}
+		dest = strings.TrimPrefix(dest, "refs/heads/")
+		if dest == "" || dest == "HEAD" {
+			continue
+		}
+		branches = append(branches, dest)
 	}
-	dest = strings.TrimPrefix(dest, "refs/heads/")
-	if dest == "" || dest == "HEAD" {
-		return "", false
+	if len(branches) == 0 {
+		return nil, false, false
 	}
-	return dest, true
+	return branches, false, true
 }
