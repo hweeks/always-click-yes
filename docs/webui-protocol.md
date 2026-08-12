@@ -350,7 +350,7 @@ What each kind becomes:
 | `tool` with an empty `lang` | preformatted escaped text — an argument preview is not code | `raw` |
 | `toolOK`, `toolErr`, `thinking` | preformatted escaped text | `body` |
 | `meta`, `you`, `turn`, `good`, `warn`, `queued` | escaped text, line breaks kept as `<br>` | `body` |
-| `flow` | a chroma-highlighted `<pre class="chroma">` block, falling back to plain preformatted text — chroma has no mermaid lexer, so this is always the fallback | `raw` |
+| `flow` | preformatted escaped text — the ascii lanes followed by the fenced mermaid block, the same two halves the terminal shows | `body` |
 
 The shape is one wrapper `<div class="acy-entry acy-entry--<kind>">`, an optional
 `<div class="acy-entry__title">` when `title` is non-empty, and the content. The

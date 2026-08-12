@@ -165,9 +165,13 @@ func TestXSSHTMLInAToolCodeBlock(t *testing.T) {
 // tokenised path — the other side of the tool coverage above, where a lexer
 // exists.
 func TestXSSInAFlowDiagram(t *testing.T) {
-	raw := "flowchart TD\n    t1[\"<script>alert(1)</script>\"]:::todo\n" +
+	mermaid := "flowchart TD\n    t1[\"<script>alert(1)</script>\"]:::todo\n" +
 		"    t2[\"<img src=x onerror=alert(1)>\"]:::todo\n"
-	got := Entry("flow", "", "", raw, "mermaid")
+	// body is what flowBody in internal/ui/tickets.go actually produces —
+	// the ascii lanes followed by the fenced mermaid block — since that is
+	// the field the flow kind now renders.
+	body := "[todo] (2)\n  - t1\n  - t2\n\n```mermaid\n" + mermaid + "```"
+	got := Entry("flow", "", body, mermaid, "mermaid")
 	mustBeInert(t, got)
 
 	if els := elements(t, got, "script"); len(els) != 0 {
