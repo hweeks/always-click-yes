@@ -187,6 +187,32 @@ func TestHeaderResolverErrorLeavesBadgeAbsent(t *testing.T) {
 	}
 }
 
+// A long branch name on a narrow terminal used to push `left` past m.width,
+// which made the header soft-wrap to two lines and threw off layout()'s
+// footer-height math (see headerHeight in update.go). The badge must instead
+// truncate, and the phase chip — more important than the branch name — must
+// stay legible.
+func TestHeaderTruncatesLongBranchAtNarrowWidth(t *testing.T) {
+	m := sizedModel(t)
+	tm, _ := m.Update(tea.WindowSizeMsg{Width: 30, Height: 30})
+	m = tm.(Model)
+	m.branch = "this-is-a-very-long-feature-branch-name-that-will-not-fit"
+
+	h := m.headerView()
+	if got := lipgloss.Height(h); got != 1 {
+		t.Fatalf("header is %d lines, want 1:\n%s", got, stripAnsi(h))
+	}
+	if got := lipgloss.Width(h); got != m.width {
+		t.Errorf("header is %d cols, want the full %d:\n%s", got, m.width, stripAnsi(h))
+	}
+	if !strings.Contains(stripAnsi(h), m.phase.String()) {
+		t.Errorf("header does not name the phase once the branch badge is truncated:\n%s", stripAnsi(h))
+	}
+	if strings.Contains(stripAnsi(h), m.branch) {
+		t.Errorf("expected the long branch name to be truncated, got it verbatim:\n%s", stripAnsi(h))
+	}
+}
+
 // A resolved branch must survive a resize: it is model state, not something
 // layout() or a rebuild recomputes.
 func TestBranchSurvivesResize(t *testing.T) {

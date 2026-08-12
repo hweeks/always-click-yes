@@ -230,15 +230,27 @@ func (m Model) headerView() string {
 
 	chip := lipgloss.NewStyle().Bold(true).Foreground(col).Background(colInk).
 		Render(" " + m.phase.String() + " ")
+	brand := bar.Bold(true).Render(" always-click-yes ")
+
 	left := chip
-	// The branch badge sits beside the phase chip, on the left, where it can
-	// never be lost to truncation — unlike the right-hand meta strip, which is
-	// deliberately truncated from the tail on a narrow terminal.
+	// The branch badge sits beside the phase chip, on the left. It used to render
+	// at its full width unconditionally, which on a narrow terminal (or a long
+	// branch name) could push `left` past m.width — the header line would then
+	// soft-wrap to two rows, and layout() (see headerHeight in update.go) would
+	// size the transcript for a one-row header that no longer existed. So the
+	// badge is budgeted against whatever the chip and brand leave behind, and
+	// truncated from the tail; the chip itself is never shortened, because the
+	// phase matters more than the branch name.
 	if m.branch != "" {
-		left += lipgloss.NewStyle().Foreground(colInk).Background(colDim).
-			Render(" " + m.branch + " ")
+		// -2 for the right strip's own mandatory padding cells (it renders those
+		// even with nothing inside), -2 for the badge's own padding spaces, -1 for
+		// the "…" truncate may add on top of the budget it's given.
+		if budget := m.width - lipgloss.Width(chip) - lipgloss.Width(brand) - 5; budget > 0 {
+			left += lipgloss.NewStyle().Foreground(colInk).Background(colDim).
+				Render(" " + truncate(m.branch, budget) + " ")
+		}
 	}
-	left += bar.Bold(true).Render(" always-click-yes ")
+	left += brand
 
 	meta := []string{m.status}
 	// Right after the status, because it *is* status: it says the next thing that
@@ -261,7 +273,10 @@ func (m Model) headerView() string {
 		rightText = spinGlyph(m.spinFrame) + " " + rightText
 	}
 	// Everything must fit the single header row; shrink the meta before it wraps.
-	if avail := m.width - lipgloss.Width(left) - 2; avail >= 0 {
+	// avail == 0 must clear the text rather than truncate it: truncate("x", 0)
+	// still returns "…" (1 rune), which is exactly the sliver of overflow that
+	// made the branch badge's own budget have to reserve for it below.
+	if avail := m.width - lipgloss.Width(left) - 2; avail > 0 {
 		rightText = truncate(rightText, avail)
 	} else {
 		rightText = ""
