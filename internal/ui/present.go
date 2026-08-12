@@ -153,7 +153,7 @@ func composerActive(showHelp, picking, queueOpen, askOpen bool) bool {
 
 // composerActive reports composerActive for this model's current state.
 func (m Model) composerActive() bool {
-	return m.surface() == SurfaceNone
+	return composerActive(m.showHelp, m.picking, m.queueOpen, m.ask != nil)
 }
 
 // --- overlay footer hints ---
