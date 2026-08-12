@@ -267,6 +267,12 @@ type Model struct {
 	// the status it already had) does not print the same diagram twice.
 	lastFlowDiagram string
 
+	// cachedTickets and cachedFlow are the board-derived projections Frame
+	// reads — refreshed by refreshTicketCache, never by Frame itself. See
+	// refreshTicketCache for why the read lives there instead.
+	cachedTickets []Ticket
+	cachedFlow    Flow
+
 	// gate / countdown state
 	gateReqs  <-chan *gate.Pending
 	askReqs   <-chan *mcp.Pending
@@ -402,6 +408,13 @@ func New(drv *driver.Driver, cfg Config) Model {
 	}
 	if cfg.StartupNote != "" {
 		m.appendEntry(entry{kind: eMeta, body: cfg.StartupNote})
+	}
+	if m.tickets != nil {
+		// One read to seed the mirror with whatever the board already holds —
+		// a resumed run's tickets, or ones a human filed before launch — not a
+		// per-tick read: refreshTicketCache after this point only runs again
+		// when CreateTicket/UpdateTicket changes the board.
+		_, _, _, _ = m.refreshTicketCache()
 	}
 	return m
 }

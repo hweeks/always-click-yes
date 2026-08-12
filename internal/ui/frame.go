@@ -4,7 +4,6 @@ import (
 	"time"
 
 	"github.com/hweeks/always-click-yes/internal/state"
-	"github.com/hweeks/always-click-yes/internal/tickets"
 )
 
 // Frame is the whole run, as a value.
@@ -497,39 +496,23 @@ func (m Model) frameFleet() FleetSummary {
 	}
 }
 
-// frameTickets reads the board directly rather than through a mirror kept in
-// sync by an event stream — unlike the fleet, there is no push side to
-// tickets, so a read is the only way to know its current state. A nil store
-// or a read error both project as no tickets, matching how an unwired fleet
-// projects as no engineers.
+// frameTickets projects cachedTickets, the mirror refreshTicketCache keeps —
+// see refreshTicketCache — rather than reading the store itself, so Frame
+// stays a read of the model's own state even when a ticket store is wired.
+// A nil store leaves the cache at its zero value, which projects as no
+// tickets, matching how an unwired fleet projects as no engineers.
 func (m Model) frameTickets() []Ticket {
-	if m.tickets == nil {
-		return []Ticket{}
-	}
-	ts, err := m.tickets.List()
-	if err != nil {
-		return []Ticket{}
-	}
-	out := make([]Ticket, 0, len(ts))
-	for _, t := range ts {
-		out = append(out, Ticket{ID: t.ID, Title: t.Title, Status: t.Status, PRURL: t.PR})
-	}
-	return out
+	// Copied, and copied into a non-nil slice: a caller must not be handed the
+	// model's own backing array, and Tickets marshals as [] rather than null.
+	return append(make([]Ticket, 0, len(m.cachedTickets)), m.cachedTickets...)
 }
 
-// frameFlow reads the board directly, same as frameTickets and for the same
-// reason: there is no push side to tickets, so a read is the only way to know
-// its current state. A nil store or a read error both project as the zero
-// Flow{}, matching how they project as no tickets.
+// frameFlow projects cachedFlow, the same mirror frameTickets reads, for the
+// same reason: Frame must not touch disk on every tick. A nil store leaves
+// the cache at its zero value, the zero Flow{}, matching how it projects as
+// no tickets.
 func (m Model) frameFlow() Flow {
-	if m.tickets == nil {
-		return Flow{}
-	}
-	ts, err := m.tickets.List()
-	if err != nil {
-		return Flow{}
-	}
-	return Flow{Mermaid: tickets.Mermaid(ts), ASCII: tickets.ASCII(ts)}
+	return m.cachedFlow
 }
 
 func (m Model) framePicker() []SessionRow {

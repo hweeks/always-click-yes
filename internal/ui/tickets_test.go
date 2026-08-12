@@ -684,6 +684,7 @@ func TestFrameCarriesTickets(t *testing.T) {
 		{ID: "t1", Title: "add x", Status: tickets.StatusInReview, PR: "https://example.com/pr/1"},
 	}}
 	m := &Model{tickets: fake}
+	m.refreshTicketCache()
 
 	fr := m.Frame()
 	if len(fr.Tickets) != 1 {
@@ -713,6 +714,7 @@ func TestFrameCarriesFlow(t *testing.T) {
 		{ID: "t1", Title: "add x", Status: tickets.StatusInReview},
 	}}
 	m := &Model{tickets: fake}
+	m.refreshTicketCache()
 
 	fl := m.Frame().Flow
 	if fl.Mermaid == "" || !strings.Contains(fl.Mermaid, "t1") {
@@ -734,10 +736,10 @@ func TestFrameFlowEmptyWithoutStore(t *testing.T) {
 }
 
 // internal/hub relies on an idle run's frame marshalling to identical bytes
-// twice in a row, or it would never fall silent. Flow reads the board fresh
-// on every call — via List(), same as Tickets — so this pins that doing so
-// twice against an unchanged board produces byte-identical JSON, not just
-// equal-looking structs.
+// twice in a row, or it would never fall silent. Flow projects the cached
+// mirror refreshTicketCache keeps rather than reading the board on every
+// call, so this pins that two calls against an unchanged cache produce
+// byte-identical JSON, not just equal-looking structs.
 func TestFrameFlowIsByteStableAcrossRepeatedCalls(t *testing.T) {
 	fake := &fakeTicketStore{list: []tickets.Ticket{
 		{ID: "t1", Title: "add x", Status: tickets.StatusInProgress},
@@ -750,5 +752,48 @@ func TestFrameFlowIsByteStableAcrossRepeatedCalls(t *testing.T) {
 	second := mustMarshal(t, m.Frame())
 	if first != second {
 		t.Fatalf("two consecutive Frame() calls on an unchanged board diverged:\n1: %s\n2: %s", first, second)
+	}
+}
+
+// countingTicketStore wraps fakeTicketStore to count List() calls, so a test
+// can assert Frame() makes none of its own rather than just inferring it from
+// output shape.
+type countingTicketStore struct {
+	*fakeTicketStore
+	listCalls int
+}
+
+func (c *countingTicketStore) List() ([]tickets.Ticket, error) {
+	c.listCalls++
+	return c.fakeTicketStore.List()
+}
+
+// Frame() must not touch the ticket store at all: it used to call List()
+// twice a tick (once each for Tickets and Flow), so an idle run with a
+// webview subscriber attached re-read and re-parsed every ticket file on
+// disk twice every 120ms. The board only changes when CreateTicket or
+// UpdateTicket changes it — see refreshTicketCache — so Frame projects the
+// cached mirror instead. New()'s one-time seed read is allowed; nothing
+// after it is.
+func TestFrameDoesNotReadTicketStoreOnIdleTicks(t *testing.T) {
+	counting := &countingTicketStore{fakeTicketStore: &fakeTicketStore{list: []tickets.Ticket{
+		{ID: "t1", Title: "add x", Status: tickets.StatusInProgress},
+	}}}
+	m := New(nil, Config{Tickets: counting})
+	m.now = frameTime
+	seeded := counting.listCalls
+	if seeded == 0 {
+		t.Fatal("New() should have seeded the cache with one read")
+	}
+
+	for i := 1; i <= 5; i++ {
+		m.now = frameTime.Add(time.Duration(i) * tickInterval)
+		_ = m.Frame()
+		_ = m.Frame().Tickets
+		_ = m.Frame().Flow
+	}
+
+	if counting.listCalls != seeded {
+		t.Fatalf("ticket store List() called %d times across 5 idle ticks (each rendering Frame, Tickets and Flow), want still %d — Frame must not read the store", counting.listCalls, seeded)
 	}
 }

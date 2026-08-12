@@ -284,12 +284,52 @@ func ticketSlugify(title string) string {
 // flowBody renders the board as the ascii lanes followed by a fenced mermaid
 // block — the shared shape emitFlowDiagram and /flow both append as an eFlow
 // entry's body, so the two can never disagree about what a flow entry looks
-// like. mermaid is returned separately so a caller can dedupe or set raw
-// without re-deriving it from the fenced body.
-func flowBody(ts []tickets.Ticket) (body, mermaid string) {
+// like. mermaid and ascii are returned separately so a caller can dedupe, set
+// raw, or cache the projection without re-deriving either from the fenced
+// body.
+func flowBody(ts []tickets.Ticket) (body, mermaid, ascii string) {
 	mermaid = tickets.Mermaid(ts)
-	body = tickets.ASCII(ts) + "\n\n```mermaid\n" + mermaid + "\n```"
-	return body, mermaid
+	ascii = tickets.ASCII(ts)
+	body = ascii + "\n\n```mermaid\n" + mermaid + "\n```"
+	return body, mermaid, ascii
+}
+
+// projectTickets is Frame's Ticket projection of the board — the summary a
+// client lists, not the full brief ReadTickets/UpdateTicket hand the model.
+func projectTickets(ts []tickets.Ticket) []Ticket {
+	out := make([]Ticket, 0, len(ts))
+	for _, t := range ts {
+		out = append(out, Ticket{ID: t.ID, Title: t.Title, Status: t.Status, PRURL: t.PR})
+	}
+	return out
+}
+
+// refreshTicketCache is the ticket board's only read path: it re-lists the
+// store once and refreshes cachedTickets/cachedFlow, the mirror Frame
+// projects — mirroring how syncFleet keeps a mirror for the fleet, except
+// triggered by CreateTicket/UpdateTicket's own success rather than an event,
+// because there is no other way the board changes during a run. That keeps
+// Frame a genuine read of the model's own state: it runs once per tick
+// (120ms) with a webview attached, and hitting disk on every one of those
+// ticks — twice, once each for Tickets and Flow — was what made an idle run
+// with no board change still re-read and re-parse every ticket file twice a
+// tick and regenerate both diagrams from possibly-disagreeing reads.
+//
+// A nil store or a read error leaves the cache exactly as it was, matching
+// how the callers already treat both as "skip silently, not fatal".
+func (m *Model) refreshTicketCache() (ts []tickets.Ticket, body, mermaid string, err error) {
+	if m.tickets == nil {
+		return nil, "", "", nil
+	}
+	ts, err = m.tickets.List()
+	if err != nil {
+		return nil, "", "", err
+	}
+	var ascii string
+	body, mermaid, ascii = flowBody(ts)
+	m.cachedTickets = projectTickets(ts)
+	m.cachedFlow = Flow{Mermaid: mermaid, ASCII: ascii}
+	return ts, body, mermaid, nil
 }
 
 // emitFlowDiagram redraws the ticket flow into the transcript after a
@@ -298,16 +338,16 @@ func flowBody(ts []tickets.Ticket) (body, mermaid string) {
 // than surfaced — and it dedupes against the last diagram emitted so a
 // milestone that leaves the board's shape unchanged (e.g. re-marking a
 // ticket with the status it already had) does not print the same diagram
-// twice.
+// twice. The cache refreshes unconditionally, even when deduped: a field the
+// diagram does not draw (PR, branch, jira, note) can still have changed.
 func (m *Model) emitFlowDiagram() {
 	if m.tickets == nil {
 		return
 	}
-	ts, err := m.tickets.List()
+	_, body, mermaid, err := m.refreshTicketCache()
 	if err != nil {
 		return
 	}
-	body, mermaid := flowBody(ts)
 	if mermaid == m.lastFlowDiagram {
 		return
 	}
@@ -389,6 +429,6 @@ func (m *Model) runFlowCommand() {
 		m.appendEntry(entry{kind: eMeta, body: "could not read tickets: " + err.Error()})
 		return
 	}
-	body, mermaid := flowBody(ts)
+	body, mermaid, _ := flowBody(ts)
 	m.appendEntry(entry{kind: eFlow, body: body, raw: mermaid, lang: "mermaid"})
 }
