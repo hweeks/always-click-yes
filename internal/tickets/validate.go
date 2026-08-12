@@ -6,6 +6,20 @@ import (
 	"strings"
 )
 
+// noNewline rejects a value bound for a single frontmatter line ("key:
+// value\n" in render) that contains a newline or carriage return. Either
+// would split into extra lines the hand-rolled parser reads back as bogus or
+// duplicate frontmatter keys, so this is checked before the write ever
+// happens rather than left for a later List or Get to mis-parse. field names
+// the offending frontmatter key in the error so the caller — a model calling
+// CreateTicket or UpdateTicket — can see exactly what to fix and retry.
+func noNewline(field, value string) error {
+	if strings.ContainsAny(value, "\n\r") {
+		return fmt.Errorf("%s must not contain a newline or carriage return", field)
+	}
+	return nil
+}
+
 // Validate checks the whole store for problems no single Put can prevent
 // because they span files: a duplicate id (two files, or a file hand-edited
 // to claim an existing one), a depends_on or stack_on that names nothing, a

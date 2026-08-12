@@ -116,8 +116,16 @@ func (s *Store) dir() string {
 
 // validateShape checks the fields every ticket must have regardless of where
 // it came from: parsed off disk, or about to be written by Put. It does not
-// check depends_on — that needs the rest of the store, and is Put's and
-// Validate's job.
+// check that depends_on/stack_on reference real tickets — that needs the
+// rest of the store, and is Put's and Validate's job.
+//
+// Every field render.go writes as a single frontmatter line ("key: value\n")
+// is checked for an embedded newline or carriage return here too: either
+// would split into extra lines the hand-rolled parser reads back as bogus or
+// duplicate keys, corrupting the ticket board. id's own idPattern already
+// happens to exclude both, but the rest (title, status, branch, pr, jira,
+// stack_on, and each depends_on entry) have no such shape restriction and
+// need the check explicitly.
 func validateShape(t Ticket) error {
 	if !idPattern.MatchString(t.ID) {
 		return fmt.Errorf("invalid id %q: must match [a-z0-9-]+", t.ID)
@@ -136,5 +144,25 @@ func validateShape(t Ticket) error {
 	if t.StackOn == t.ID {
 		return fmt.Errorf("stack_on cannot reference its own ticket %q", t.ID)
 	}
+
+	for _, f := range []struct{ name, value string }{
+		{"id", t.ID},
+		{"title", t.Title},
+		{"status", t.Status},
+		{"branch", t.Branch},
+		{"pr", t.PR},
+		{"jira", t.Jira},
+		{"stack_on", t.StackOn},
+	} {
+		if err := noNewline(f.name, f.value); err != nil {
+			return err
+		}
+	}
+	for _, dep := range t.DependsOn {
+		if err := noNewline("depends_on", dep); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
