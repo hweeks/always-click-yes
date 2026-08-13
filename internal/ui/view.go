@@ -23,13 +23,15 @@ func (m Model) View() tea.View {
 	}
 
 	body := m.vp.View()
-	switch {
-	case m.showHelp:
+	switch m.surface() {
+	case SurfaceHelp:
 		body = m.overlay(m.helpView())
-	case m.picking:
+	case SurfacePicker:
 		body = m.overlay(m.pickerView())
-	case m.ask != nil:
+	case SurfaceAsk:
 		body = m.overlay(m.askView())
+	case SurfaceQueue:
+		body = m.overlay(m.queueEditView())
 	}
 
 	v.SetContent(strings.Join([]string{
@@ -47,17 +49,19 @@ func (m Model) View() tea.View {
 // put the frame's height back out of sync with what's drawn.
 func (m Model) footerView() string {
 	hint := func(s string) string { return lipgloss.NewStyle().Foreground(colDim).Render(s) }
-	switch {
-	case m.showHelp:
+	switch m.surface() {
+	case SurfaceHelp:
 		return hint(helpFooterHint)
-	case m.picking:
+	case SurfacePicker:
 		return hint(pickerFooterHint)
-	case m.ask != nil:
+	case SurfaceAsk:
 		keys := askFooterHint(m.ask.questions[m.ask.qIdx].multiSelect)
 		if r := m.askRemaining(); !m.ask.deadline.IsZero() {
 			keys += askAutoSkipNote(r)
 		}
 		return hint(keys)
+	case SurfaceQueue:
+		return hint(queueEditFooterHint)
 	}
 	// The gate stacks; it does not replace. In an armed run something is counting
 	// down nearly all the time, so a panel that stood in for the composer left the
@@ -91,7 +95,7 @@ func (m Model) queueView() string {
 			lines = append(lines, dim.Faint(true).Render(queueMoreNote(len(m.queued)-queueMaxShown)))
 			break
 		}
-		lines = append(lines, dim.Render("   "+truncate(firstLine(q), max(m.width-6, 20))))
+		lines = append(lines, dim.Render("   "+truncate(firstLine(q.text), max(m.width-6, 20))))
 	}
 	return strings.Join(lines, "\n")
 }
@@ -158,6 +162,31 @@ func (m Model) pickerView() string {
 	return title + "\n\n" + strings.Join(rows, "\n")
 }
 
+// queueEditView renders the /queue edit overlay: every held message with the
+// cursor row highlighted, windowed to fit the viewport height — the same shape
+// pickerView uses for the /resume list.
+func (m Model) queueEditView() string {
+	title := lipgloss.NewStyle().Bold(true).Foreground(colPlan).Render(
+		"✎ edit the queue · Enter pulls a message into the composer · Ctrl+X drops it")
+	maxVisible := max(m.vp.Height()-3, 3)
+	start := 0
+	if m.queueCursor >= maxVisible {
+		start = m.queueCursor - maxVisible + 1
+	}
+	end := min(start+maxVisible, len(m.queued))
+
+	rows := make([]string, 0, end-start)
+	for i := start; i < end; i++ {
+		line := truncate(firstLine(m.queued[i].text), max(m.vp.Width()-2, 20))
+		if i == m.queueCursor {
+			rows = append(rows, lipgloss.NewStyle().Bold(true).Foreground(colInk).Background(colPlan).Render("▸ "+line))
+		} else {
+			rows = append(rows, lipgloss.NewStyle().Foreground(colDim).Render("  "+line))
+		}
+	}
+	return title + "\n\n" + strings.Join(rows, "\n")
+}
+
 // askView renders the current AskUserQuestion: its prompt and options, with the
 // cursor row highlighted and selected rows marked.
 func (m Model) askView() string {
@@ -201,7 +230,27 @@ func (m Model) headerView() string {
 
 	chip := lipgloss.NewStyle().Bold(true).Foreground(col).Background(colInk).
 		Render(" " + m.phase.String() + " ")
-	left := chip + bar.Bold(true).Render(" always-click-yes ")
+	brand := bar.Bold(true).Render(" always-click-yes ")
+
+	left := chip
+	// The branch badge sits beside the phase chip, on the left. It used to render
+	// at its full width unconditionally, which on a narrow terminal (or a long
+	// branch name) could push `left` past m.width — the header line would then
+	// soft-wrap to two rows, and layout() (see headerHeight in update.go) would
+	// size the transcript for a one-row header that no longer existed. So the
+	// badge is budgeted against whatever the chip and brand leave behind, and
+	// truncated from the tail; the chip itself is never shortened, because the
+	// phase matters more than the branch name.
+	if m.branch != "" {
+		// -2 for the right strip's own mandatory padding cells (it renders those
+		// even with nothing inside), -2 for the badge's own padding spaces, -1 for
+		// the "…" truncate may add on top of the budget it's given.
+		if budget := m.width - lipgloss.Width(chip) - lipgloss.Width(brand) - 5; budget > 0 {
+			left += lipgloss.NewStyle().Foreground(colInk).Background(colDim).
+				Render(" " + truncate(m.branch, budget) + " ")
+		}
+	}
+	left += brand
 
 	meta := []string{m.status}
 	// Right after the status, because it *is* status: it says the next thing that
@@ -224,7 +273,10 @@ func (m Model) headerView() string {
 		rightText = spinGlyph(m.spinFrame) + " " + rightText
 	}
 	// Everything must fit the single header row; shrink the meta before it wraps.
-	if avail := m.width - lipgloss.Width(left) - 2; avail >= 0 {
+	// avail == 0 must clear the text rather than truncate it: truncate("x", 0)
+	// still returns "…" (1 rune), which is exactly the sliver of overflow that
+	// made the branch badge's own budget have to reserve for it below.
+	if avail := m.width - lipgloss.Width(left) - 2; avail > 0 {
 		rightText = truncate(rightText, avail)
 	} else {
 		rightText = ""

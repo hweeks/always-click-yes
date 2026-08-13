@@ -29,9 +29,10 @@ import (
 //
 // The documented contract is docs/webui-protocol.md. Change one, change both.
 type Frame struct {
-	Phase  string `json:"phase"`  // "PLAN" | "AUTO-RUN" | "COMPLETE"
-	Status string `json:"status"` // the one-line header state ("working…", "idle", …)
-	Hint   Hint   `json:"hint"`   // the composer hint: text plus the kind that styles it
+	Phase    string   `json:"phase"`  // "PLAN" | "AUTO-RUN" | "COMPLETE"
+	Status   string   `json:"status"` // the one-line header state ("working…", "idle", …)
+	Hint     Hint     `json:"hint"`   // the composer hint: text plus the kind that styles it
+	Composer Composer `json:"composer"`
 
 	SessionID string `json:"sessionId"` // claude's id, empty until its init event
 	Model     string `json:"model"`     // the model claude reported at init
@@ -59,7 +60,7 @@ type Frame struct {
 	Dispatches int `json:"dispatches"`
 
 	Entries []Entry      `json:"entries"`
-	Queue   []string     `json:"queue"` // messages held for the next idle moment
+	Queue   []QueueItem  `json:"queue"` // messages held for the next idle moment
 	Gates   []Gate       `json:"gates"` // head of the slice is the one on screen
 	Ask     *Ask         `json:"ask"`   // null when no question is open
 	Tasks   []Task       `json:"tasks"`
@@ -83,12 +84,25 @@ type Frame struct {
 	ConfigPath string `json:"configPath"`
 	Cwd        string `json:"cwd"`
 
+	// Branch is the current git branch/SHA badge, "" when disabled or
+	// unresolved. It only changes when a real branch switch resolves — see
+	// Config.Branch.
+	Branch string `json:"branch"`
+
 	// FinishOutcome and FinishSummary are set once the session calls Finish —
 	// "completed" or "abandoned", and the summary it gave. Both are omitted
 	// before then, so a client can tell "not finished" from "finished with an
 	// empty summary".
 	FinishOutcome string `json:"finishOutcome,omitempty"`
 	FinishSummary string `json:"finishSummary,omitempty"`
+}
+
+// Composer says whether the composer is the surface the keyboard is pointed
+// at, so a client can blink its own cursor only while it's true. A plain
+// boolean, unrelated to any clock — it does not change on its own between two
+// frames of an idle run.
+type Composer struct {
+	Active bool `json:"active"`
 }
 
 // Cost splits the bill by who spent it. Parent is every claude process this
@@ -148,6 +162,14 @@ type Entry struct {
 	// client switch light/dark without re-rendering a transcript it already has —
 	// and it is required by the webview's CSP, which forbids inline styles.
 	HTML string `json:"html"`
+}
+
+// QueueItem is one message held for the next idle moment, as Frame projects
+// it. ID is what a QueueEdit/QueueRemove action names, never a position — the
+// same reason a Gate is identified by ToolUseID rather than by index.
+type QueueItem struct {
+	ID   int    `json:"id"`
+	Text string `json:"text"`
 }
 
 // Gate is a permission request counting down.
@@ -276,9 +298,10 @@ var entryKinds = map[ekind]string{
 // here mutates, and nothing here consults the clock.
 func (m Model) Frame() Frame {
 	return Frame{
-		Phase:  m.phase.String(),
-		Status: m.status,
-		Hint:   m.hint(),
+		Phase:    m.phase.String(),
+		Status:   m.status,
+		Hint:     m.hint(),
+		Composer: Composer{Active: m.composerActive()},
 
 		SessionID: m.sessionID,
 		Model:     m.model,
@@ -313,7 +336,7 @@ func (m Model) Frame() Frame {
 		// Copied, and copied into a non-nil slice: a caller must not be handed
 		// the model's own backing array, and every list field marshals as [] so
 		// a client never has to handle null and empty as two different things.
-		Queue:  strs(m.queued),
+		Queue:  m.frameQueue(),
 		Gates:  m.frameGates(),
 		Ask:    m.frameAsk(),
 		Tasks:  m.frameTasks(),
@@ -328,6 +351,7 @@ func (m Model) Frame() Frame {
 		LogPath:    m.logPath,
 		ConfigPath: m.configPath,
 		Cwd:        m.cwd,
+		Branch:     m.branch,
 
 		FinishOutcome: m.finishOutcome,
 		FinishSummary: m.finishSummary,
@@ -353,6 +377,14 @@ func (m Model) frameEntries() []Entry {
 			// for HTML — see stamp.
 			HTML: e.html,
 		})
+	}
+	return out
+}
+
+func (m Model) frameQueue() []QueueItem {
+	out := make([]QueueItem, 0, len(m.queued))
+	for _, q := range m.queued {
+		out = append(out, QueueItem{ID: q.id, Text: q.text})
 	}
 	return out
 }

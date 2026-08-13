@@ -81,6 +81,81 @@ func (m Model) hint() Hint {
 	return composerHint(len(m.pending), m.processing, m.busy(), m.planReady, m.phase)
 }
 
+// --- which surface owns the keyboard ---
+
+// Surface names the one thing on screen that is currently reading keystrokes.
+// view.go's render switch and update.go's key-routing switch used to each
+// decide this on their own — two independent conditions on the same four
+// booleans — and they disagreed the moment a fifth state (an Ask arriving
+// while the queue editor was open) exercised an ordering neither switch had
+// been written to expect: the render switch kept the queue editor on screen
+// while key routing sent every keystroke to the invisible Ask panel, so
+// pressing Enter to pick a queued message actually answered a question the
+// user could not see. activeSurface is the single decision both switches
+// must now read instead of re-deriving.
+type Surface string
+
+const (
+	SurfaceHelp   Surface = "help"   // the /help overlay
+	SurfacePicker Surface = "picker" // the /resume session picker
+	SurfaceAsk    Surface = "ask"    // an open AskUserQuestion
+	SurfaceQueue  Surface = "queue"  // the /queue edit overlay
+	SurfaceNone   Surface = ""       // the composer and transcript
+)
+
+// activeSurface decides which of the four overlays is in charge, given the
+// flags that can each claim it. The order is the whole content of this
+// decision:
+//
+//   - help outranks everything: any key dismisses it, so nothing else may be
+//     showing underneath it.
+//   - the picker is next: /resume is itself a modal choice.
+//   - ask outranks the queue editor. An Ask blocks a real claude turn and, in
+//     AUTO-RUN, is on its own auto-skip countdown — a question on a clock has
+//     to win over an editor that is not going anywhere on its own. That is
+//     also why openAsk closes the queue editor outright rather than merely
+//     letting this ordering paper over it: closing it means there is nothing
+//     left underneath for a stray keystroke to reach, and it means dismissing
+//     the Ask returns control to the plain composer instead of snapping back
+//     into an editor built from whatever the queue looked like before the
+//     question interrupted it.
+//   - the queue editor is last of the four. With none of the above open, the
+//     composer and transcript own the keyboard (SurfaceNone).
+func activeSurface(showHelp, picking, asking, queueOpen bool) Surface {
+	switch {
+	case showHelp:
+		return SurfaceHelp
+	case picking:
+		return SurfacePicker
+	case asking:
+		return SurfaceAsk
+	case queueOpen:
+		return SurfaceQueue
+	default:
+		return SurfaceNone
+	}
+}
+
+// surface is the surface owning the keyboard for this model's current state.
+func (m Model) surface() Surface {
+	return activeSurface(m.showHelp, m.picking, m.ask != nil, m.queueOpen)
+}
+
+// composerActive says whether the composer is the surface the keyboard is
+// pointed at. It derives from activeSurface rather than re-testing the same
+// booleans, so there is exactly one decision about overlay precedence instead
+// of two that can drift: the composer is active exactly when no overlay owns
+// the keyboard. A pending gate does not blur it — the gate panel stacks above
+// the composer rather than replacing it, and typing must still work there.
+func composerActive(showHelp, picking, queueOpen, askOpen bool) bool {
+	return activeSurface(showHelp, picking, askOpen, queueOpen) == SurfaceNone
+}
+
+// composerActive reports composerActive for this model's current state.
+func (m Model) composerActive() bool {
+	return composerActive(m.showHelp, m.picking, m.queueOpen, m.ask != nil)
+}
+
 // --- overlay footer hints ---
 
 // The three overlays each replace the composer, so each owns the footer line for
@@ -88,8 +163,9 @@ func (m Model) hint() Hint {
 // the ask hint is the only one that varies, and it varies twice.
 
 const (
-	helpFooterHint   = "press any key to close"
-	pickerFooterHint = "↑/↓ move · Enter resume · Esc cancel"
+	helpFooterHint      = "press any key to close"
+	pickerFooterHint    = "↑/↓ move · Enter resume · Esc cancel"
+	queueEditFooterHint = "↑/↓ move · Enter edit · Ctrl+X drop · Esc close"
 )
 
 // askFooterHint is the key legend for an open question. Space only appears for a
@@ -182,6 +258,7 @@ func helpContent() []HelpSection {
 			{"/resume [id]", "restore a prior run — transcript, phase and cost (picker if no id)"},
 			{"/model <name>", "set the model for the next launched/resumed session"},
 			{"/queue", "list the messages waiting for the current turn to end"},
+			{"/queue edit", "open an overlay to edit or drop one of them"},
 			{"/queue clear", "drop them all, unsent"},
 			{"/clear", "clear the transcript view"},
 			{"/log", "show the debug-log path"},
@@ -227,6 +304,14 @@ func helpContent() []HelpSection {
 			{"Ctrl+R", "pause / resume every countdown"},
 			{"any other key", "types into the message box as usual"},
 			{"Esc", "does NOT interject — answer the gate first"},
+		},
+	}, {
+		Title: "while editing the queue",
+		Rows: []HelpRow{
+			{"↑/↓ j/k", "move between held messages"},
+			{"Enter", "pull the selected message into the composer to edit and resend"},
+			{"Ctrl+X", "drop the selected message, unsent"},
+			{"Esc", "close without changing anything"},
 		},
 	}, {
 		Title: "while Claude is asking a question",

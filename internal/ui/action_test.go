@@ -200,8 +200,8 @@ func TestActionHappyPaths(t *testing.T) {
 			setup: func(_ *testing.T, m *Model) { m.processing = true },
 			act:   Submit("and add a test"),
 			check: func(t *testing.T, m *Model, sent string, res ActionResult) {
-				if len(m.queued) != 1 || m.queued[0] != "and add a test" {
-					t.Errorf("queued = %q, want the message held", m.queued)
+				if len(m.queued) != 1 || m.queued[0].text != "and add a test" {
+					t.Errorf("queued = %v, want the message held", m.queued)
 				}
 				if sent != "" {
 					t.Errorf("the driver was written to mid-turn:\n%s", sent)
@@ -306,12 +306,12 @@ func TestActionHappyPaths(t *testing.T) {
 			name: "queue clear drops held messages",
 			setup: func(_ *testing.T, m *Model) {
 				m.processing = true
-				m.queued = []string{"one", "two"}
+				m.queued = []queuedMsg{{id: 1, text: "one"}, {id: 2, text: "two"}}
 			},
 			act: QueueClear(),
 			check: func(t *testing.T, m *Model, _ string, res ActionResult) {
 				if len(m.queued) != 0 {
-					t.Errorf("queued = %q, want it emptied", m.queued)
+					t.Errorf("queued = %v, want it emptied", m.queued)
 				}
 				if !strings.Contains(res.Reason, "2 queued messages") {
 					t.Errorf("reason = %q, want it to count what was dropped", res.Reason)
@@ -840,8 +840,8 @@ func TestChordsAndActionsLeaveIdenticalState(t *testing.T) {
 
 			// A held message, so the queue flush each path performs is part of what
 			// is being compared rather than a difference hiding behind an empty queue.
-			byKey.queued = []string{"then run the linter"}
-			byAction.queued = []string{"then run the linter"}
+			byKey.queued = []queuedMsg{{id: 1, text: "then run the linter"}}
+			byAction.queued = []queuedMsg{{id: 1, text: "then run the linter"}}
 
 			tm, _ := byKey.Update(tc.key)
 			byKey = tm.(Model)

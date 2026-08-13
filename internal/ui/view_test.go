@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -132,6 +133,100 @@ func TestFooterStacksGateAboveComposer(t *testing.T) {
 	}
 	if got, want := lipgloss.Height(foot), lipgloss.Height(panel)+lipgloss.Height(composer); got != want {
 		t.Errorf("footer is %d lines, want %d — layout() sizes the viewport from this", got, want)
+	}
+}
+
+// The branch badge sits beside the phase chip, on the left of the header —
+// never in the right-hand meta strip, which truncates from the tail on a
+// narrow terminal and would clip it away.
+func TestHeaderShowsBranchBadge(t *testing.T) {
+	m := sizedModel(t)
+	m.branch = "main"
+	h := m.headerView()
+
+	chipIdx := strings.Index(h, m.phase.String())
+	branchIdx := strings.Index(h, "main")
+	labelIdx := strings.Index(h, "always-click-yes")
+	if chipIdx < 0 || branchIdx < 0 || labelIdx < 0 {
+		t.Fatalf("header missing phase, branch or label:\n%s", stripAnsi(h))
+	}
+	if chipIdx >= branchIdx || branchIdx >= labelIdx {
+		t.Errorf("expected phase chip, then branch badge, then label; got order in:\n%s", stripAnsi(h))
+	}
+}
+
+// A detached-HEAD resolver's value renders on the header exactly as given.
+func TestHeaderShowsDetachedBranchVerbatim(t *testing.T) {
+	m := sizedModel(t)
+	m.branch = "detached @ abc1234"
+	if h := m.headerView(); !strings.Contains(h, "detached @ abc1234") {
+		t.Errorf("expected the detached-HEAD badge verbatim, got:\n%s", stripAnsi(h))
+	}
+}
+
+// A resolver error leaves the badge absent, and the header must still render
+// as one full-width line — resolveBranchCmd never surfaces an error string.
+func TestHeaderResolverErrorLeavesBadgeAbsent(t *testing.T) {
+	m := sizedModel(t)
+	cmd := resolveBranchCmd(func() (string, error) { return "", fmt.Errorf("not a repo") })
+	msg, ok := cmd().(branchMsg)
+	if !ok {
+		t.Fatalf("resolveBranchCmd's cmd returned %T, want branchMsg", cmd())
+	}
+	if msg.branch != "" {
+		t.Errorf("expected empty branch on resolver error, got %q", msg.branch)
+	}
+
+	m.branch = msg.branch
+	h := m.headerView()
+	if strings.Contains(stripAnsi(h), "not a repo") {
+		t.Errorf("header must never show the resolver's error text:\n%s", stripAnsi(h))
+	}
+	if lipgloss.Height(h) != 1 {
+		t.Errorf("header is %d lines, want 1 even with no branch badge", lipgloss.Height(h))
+	}
+}
+
+// A long branch name on a narrow terminal used to push `left` past m.width,
+// which made the header soft-wrap to two lines and threw off layout()'s
+// footer-height math (see headerHeight in update.go). The badge must instead
+// truncate, and the phase chip — more important than the branch name — must
+// stay legible.
+func TestHeaderTruncatesLongBranchAtNarrowWidth(t *testing.T) {
+	m := sizedModel(t)
+	tm, _ := m.Update(tea.WindowSizeMsg{Width: 30, Height: 30})
+	m = tm.(Model)
+	m.branch = "this-is-a-very-long-feature-branch-name-that-will-not-fit"
+
+	h := m.headerView()
+	if got := lipgloss.Height(h); got != 1 {
+		t.Fatalf("header is %d lines, want 1:\n%s", got, stripAnsi(h))
+	}
+	if got := lipgloss.Width(h); got != m.width {
+		t.Errorf("header is %d cols, want the full %d:\n%s", got, m.width, stripAnsi(h))
+	}
+	if !strings.Contains(stripAnsi(h), m.phase.String()) {
+		t.Errorf("header does not name the phase once the branch badge is truncated:\n%s", stripAnsi(h))
+	}
+	if strings.Contains(stripAnsi(h), m.branch) {
+		t.Errorf("expected the long branch name to be truncated, got it verbatim:\n%s", stripAnsi(h))
+	}
+}
+
+// A resolved branch must survive a resize: it is model state, not something
+// layout() or a rebuild recomputes.
+func TestBranchSurvivesResize(t *testing.T) {
+	m := sizedModel(t)
+	m.branch = "feature/x"
+
+	tm, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = tm.(Model)
+
+	if m.branch != "feature/x" {
+		t.Errorf("branch = %q after resize, want %q", m.branch, "feature/x")
+	}
+	if !strings.Contains(m.headerView(), "feature/x") {
+		t.Error("expected the branch badge still on the header after resize")
 	}
 }
 

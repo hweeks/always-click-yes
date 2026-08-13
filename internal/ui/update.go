@@ -57,8 +57,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	m.input.SetHeight(maxInputRows)
 
 	m, cmd := m.update(msg)
+	cmd = tea.Batch(cmd, m.syncComposerFocus())
 	m.layout()
 	return m, cmd
+}
+
+// syncComposerFocus reconciles the composer's focus with whatever surface
+// currently owns the keyboard. Blur needs no cmd of its own: it stops the
+// textarea's cursor from accepting the next blink tick, which is what ends
+// the blink chain (see textarea.Model.Update's `if !m.focus` branch) — no
+// timer of ours to cancel.
+func (m *Model) syncComposerFocus() tea.Cmd {
+	active := m.composerActive()
+	focused := m.input.Focused()
+	switch {
+	case active && !focused:
+		return m.input.Focus()
+	case !active && focused:
+		m.input.Blur()
+	}
+	return nil
 }
 
 // layout sizes the composer to its content and gives the transcript whatever is
@@ -148,21 +166,29 @@ func (m Model) update(msg tea.Msg) (Model, tea.Cmd) {
 			}
 			return m, tea.Quit
 		}
-		// The help overlay is dismissed by any key.
-		if m.showHelp {
+		// One of the four overlays may own the keyboard; m.surface() is the same
+		// decision view.go's render switch reads, so routing can never drive a
+		// panel the screen isn't showing (or vice versa) — see present.go.
+		switch m.surface() {
+		case SurfaceHelp:
+			// The help overlay is dismissed by any key.
 			m.showHelp = false
 			m.rebuild()
 			return m, nil
-		}
-		// The resume picker captures navigation keys until dismissed.
-		if m.picking {
+		case SurfacePicker:
+			// The resume picker captures navigation keys until dismissed.
 			cmd := m.handlePickKey(msg)
 			m.rebuild()
 			return m, cmd
-		}
-		// A pending AskUserQuestion captures navigation keys until answered.
-		if m.ask != nil {
+		case SurfaceAsk:
+			// A pending AskUserQuestion captures navigation keys until answered.
 			cmd := m.handleAskKey(msg)
+			m.rebuild()
+			return m, cmd
+		case SurfaceQueue:
+			// The /queue edit overlay captures navigation keys until closed, the
+			// same way the picker and the ask panel do.
+			cmd := m.handleQueueEditKey(msg)
 			m.rebuild()
 			return m, cmd
 		}
@@ -347,6 +373,13 @@ func (m Model) update(msg tea.Msg) (Model, tea.Cmd) {
 
 	case askClosedMsg:
 		// no more questions will arrive; nothing to re-arm
+		return m, nil
+
+	case branchTickMsg:
+		return m, tea.Batch(branchTickCmd(), resolveBranchCmd(m.branchResolver))
+
+	case branchMsg:
+		m.branch = msg.branch
 		return m, nil
 
 	case tickMsg:

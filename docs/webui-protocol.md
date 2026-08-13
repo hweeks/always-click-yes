@@ -218,6 +218,7 @@ had the token, which was printed to the process that launched acy.
 | `phase` | string | `"PLAN"`, `"AUTO-RUN"` or `"COMPLETE"` |
 | `status` | string | the one-line header state (`"working…"`, `"idle"`, …); prose, not an enum |
 | `hint` | `Hint` | the composer hint line: `{text, kind}` |
+| `composer` | `Composer` | `{active}` — whether the composer owns the keyboard right now |
 | `sessionId` | string | claude's session id; empty until its `init` event |
 | `model` | string | the model claude reported at init |
 | `billing` | string | `"subscription"`, `"API"`, or `""` when not yet known |
@@ -233,7 +234,7 @@ had the token, which was printed to the process that launched acy.
 | `tokens` | `Ledger` | the token ledger, split by spender |
 | `dispatches` | int | tasks delegated this run — can exceed `tasks.length`, which is trimmed |
 | `entries` | `Entry[]` | the transcript, in display order |
-| `queue` | string[] | messages held until the session next falls idle |
+| `queue` | `QueueItem[]` | messages held until the session next falls idle |
 | `gates` | `Gate[]` | permission requests counting down; `[0]` is the one on screen |
 | `ask` | `Ask` or null | the question claude is blocked on |
 | `tasks` | `Task[]` | the delegated-task ledger, oldest first |
@@ -245,6 +246,7 @@ had the token, which was printed to the process that launched acy.
 | `logPath` | string | the debug log, if one is open |
 | `configPath` | string | the `.acy.json` this run's settings came from |
 | `cwd` | string | the project this run belongs to |
+| `branch` | string | the current git branch/SHA badge; `""` when disabled or unresolved |
 | `finishOutcome` | string | `"completed"` or `"abandoned"`, once the session calls Finish; omitted before then |
 | `finishSummary` | string | the summary that came with `finishOutcome`; omitted before then |
 
@@ -263,6 +265,19 @@ presence, not just its value.
 `kind` exists so a client can style the line without re-deriving the condition
 that chose it. The selection lives in one place — `composerHint` in
 `internal/ui/present.go` — and both front ends call it.
+
+### `Composer`
+
+| field | type | meaning |
+|---|---|---|
+| `active` | bool | the composer is the surface the keyboard is pointed at |
+
+`active` is `false` while `/help`, the `/resume` picker, an open `Ask`, or the
+`/queue` edit overlay owns the keyboard, and `true` otherwise — including while
+a gate is pending, since the gate panel stacks above the composer rather than
+replacing it. A client should blink its own cursor only while `active` is
+`true`; the field itself never changes on its own between two frames of an
+idle run.
 
 ### `Cost` and `Ledger`
 
@@ -382,6 +397,18 @@ the fragment safe, and `internal/htmlrender` tests both adversarially:
 So a payload survives as *text* — you can still read what the command printed —
 and never as an element or an attribute. A client can insert `html` directly.
 That is the point of it being rendered here.
+
+### `QueueItem`
+
+| field | type | meaning |
+|---|---|---|
+| `id` | int | the identity; `queueEdit`/`queueRemove` name this, never a position |
+| `text` | string | the held message's text |
+
+`id` matters for the same reason a gate's `toolUseId` does: the queue flushes
+out from under a client the moment the session falls idle, so a client cannot
+target "the message at position 2" and expect it to still be that message by
+the time its action arrives.
 
 ### `Gate`
 
@@ -523,7 +550,16 @@ not have to model Go's type system to do it.
 | `clear` | — | `/clear`: empty the transcript view (not the conversation) |
 | `done` | `summary` | `/done`: end the run by hand |
 | `queueClear` | — | `/queue clear`: drop every held message, unsent |
+| `queueEdit` | `queueId`, `text` | replace the text of the queued message carrying `queueId` |
+| `queueRemove` | `queueId` | drop the queued message carrying `queueId`, unsent |
 | `quit` | — | stop the driver and exit |
+
+**`queueEdit` with blank text removes instead of refusing.** Editing a message
+down to blank or whitespace-only text drops it the same as `queueRemove`
+would, rather than being rejected as an empty edit — the two `text` fields
+already mean the same "nothing to send", and the accepted `reason` says which
+one happened (`"empty edit removed the queued message"` vs. `"queued message
+updated"`).
 
 ### `ActionResult`
 
@@ -566,6 +602,7 @@ there is one implementation, so there is one wording.
 | `pickerClose` | the picker is not open |
 | `setModel` | `name` is empty |
 | `done` | the run is already `COMPLETE` |
+| `queueEdit` / `queueRemove` | no queued message carries that `queueId` — already flushed to claude, or never existed (`"that message has already gone out"`) |
 | `clear`, `queueClear`, `quit` | never |
 | anything else | the `kind` is not one of the above |
 

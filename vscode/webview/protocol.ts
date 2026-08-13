@@ -11,6 +11,10 @@ export interface Hint {
   kind: 'gate' | 'working' | 'busy' | 'planReady' | 'plan' | 'complete' | 'default' | string;
 }
 
+export interface Composer {
+  active: boolean;
+}
+
 export interface Tokens {
   input: number;
   output: number;
@@ -109,10 +113,16 @@ export interface SessionRow {
   selected: boolean;
 }
 
+export interface QueueItem {
+  id: number;
+  text: string;
+}
+
 export interface Frame {
   phase: string;
   status: string;
   hint: Hint;
+  composer: Composer;
   sessionId: string;
   model: string;
   billing: string;
@@ -129,7 +139,7 @@ export interface Frame {
   tokens: Ledger;
   dispatches: number;
   entries: Entry[];
-  queue: string[];
+  queue: QueueItem[];
   gates: Gate[];
   ask: Ask | null;
   tasks: Task[];
@@ -138,6 +148,7 @@ export interface Frame {
   logPath: string;
   configPath: string;
   cwd: string;
+  branch: string;
 }
 
 export type ActionKind =
@@ -155,6 +166,8 @@ export type ActionKind =
   | 'clear'
   | 'done'
   | 'queueClear'
+  | 'queueEdit'
+  | 'queueRemove'
   | 'quit';
 
 /**
@@ -171,6 +184,7 @@ export interface Action {
   sessionId?: string;
   name?: string;
   summary?: string;
+  queueId?: number;
 }
 
 /**

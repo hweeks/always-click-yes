@@ -104,6 +104,11 @@ type Config struct {
 	LoadState func(id string) (state.Snapshot, bool, error)
 	SaveState func(s state.Snapshot) error
 	Replay    func(id string) ([]driver.Event, error)
+
+	// Branch resolves the current git branch/SHA badge shown beside the phase
+	// chip, cwd already baked in by the caller. Nil disables the badge:
+	// internal/ui must never shell out to git itself.
+	Branch func() (string, error)
 }
 
 // readOnlyParentTools are the tools that get no countdown when the supervising
@@ -215,6 +220,8 @@ type Model struct {
 	sessionList   []pickRow // rows shown in the picker, built by pickRows when it opens
 	pickIdx       int       // selected row in the picker
 	ask           *askState // a pending AskUserQuestion the user is answering
+	queueOpen     bool      // the /queue edit overlay is open
+	queueCursor   int       // selected row in the queue-edit overlay
 
 	// resume / persistence
 	cwd       string // the project this run belongs to
@@ -223,6 +230,11 @@ type Model struct {
 	loadState func(id string) (state.Snapshot, bool, error)
 	saveState func(s state.Snapshot) error
 	replay    func(id string) ([]driver.Event, error)
+
+	// branchResolver resolves the current git branch/SHA badge; nil disables
+	// it. branch is the last value it resolved, "" until the first tick.
+	branchResolver func() (string, error)
+	branch         string
 
 	// delegation. nil disables it: the tool is refused rather than half-served.
 	dispatcher Dispatcher
@@ -266,14 +278,17 @@ type Model struct {
 	attached []string
 
 	// queued holds messages typed while the session was busy, waiting to go out
-	// as one turn when it next falls idle. Plain strings, deliberately: Bubble Tea
-	// copies the Model on every Update, so anything with an internal self-pointer
-	// in here is the strings.Builder crash again.
+	// as one turn when it next falls idle. Plain queuedMsg values, deliberately:
+	// Bubble Tea copies the Model on every Update, so anything with an internal
+	// self-pointer in here is the strings.Builder crash again.
 	//
 	// It is never persisted. A queued message is transient intent, and one
 	// surviving a crash to be delivered into a different phase is worse than one
 	// that was lost.
-	queued []string
+	queued []queuedMsg
+	// queueSeq mints each queuedMsg's id: monotonic, never reused, the same rule
+	// entry.seq follows for the transcript.
+	queueSeq int
 
 	// phase machine
 	ctx           context.Context
@@ -364,6 +379,8 @@ func New(drv *driver.Driver, cfg Config) Model {
 		loadState: cfg.LoadState,
 		saveState: cfg.SaveState,
 		replay:    cfg.Replay,
+
+		branchResolver: cfg.Branch,
 	}
 	if m.resumeID != "" {
 		m.status = "resuming…"
@@ -405,7 +422,10 @@ func waitEvent(ch <-chan driver.Event, gen int) tea.Cmd {
 }
 
 func (m Model) Init() tea.Cmd {
-	cmds := []tea.Cmd{textarea.Blink, waitGate(m.gateReqs), waitAsk(m.askReqs), tickCmd()}
+	cmds := []tea.Cmd{
+		textarea.Blink, waitGate(m.gateReqs), waitAsk(m.askReqs), tickCmd(),
+		branchTickCmd(), resolveBranchCmd(m.branchResolver),
+	}
 	if m.dispatcher != nil {
 		cmds = append(cmds, waitChild(m.dispatcher.Events()))
 	}

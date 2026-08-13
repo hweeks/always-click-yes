@@ -57,6 +57,8 @@ const (
 	ActionClear         ActionKind = "clear"         // /clear: empty the transcript view
 	ActionDone          ActionKind = "done"          // /done: end the run by hand
 	ActionQueueClear    ActionKind = "queueClear"    // /queue clear: drop held messages
+	ActionQueueEdit     ActionKind = "queueEdit"     // edit (or, if blank, drop) one held message by id
+	ActionQueueRemove   ActionKind = "queueRemove"   // drop one held message by id, unsent
 	ActionQuit          ActionKind = "quit"          // stop the driver and exit
 	ActionRetryCooldown ActionKind = "retryCooldown" // retry a rate-limited child now
 )
@@ -70,6 +72,7 @@ var actionKinds = map[ActionKind]bool{
 	ActionAskAnswer: true, ActionAskSkip: true, ActionResume: true,
 	ActionPickerClose: true, ActionSetModel: true, ActionClear: true,
 	ActionDone: true, ActionQueueClear: true, ActionQuit: true,
+	ActionQueueEdit: true, ActionQueueRemove: true,
 	ActionRetryCooldown: true,
 }
 
@@ -101,6 +104,7 @@ type Action struct {
 	SessionID     string `json:"sessionId,omitempty"`     // Resume
 	Name          string `json:"name,omitempty"`          // SetModel
 	Summary       string `json:"summary,omitempty"`       // Done
+	QueueID       int    `json:"queueId,omitempty"`       // QueueEdit, QueueRemove
 }
 
 // The constructors. They exist so a call site reads as the action it is —
@@ -165,6 +169,15 @@ func Done(summary string) Action { return Action{Kind: ActionDone, Summary: summ
 
 // QueueClear drops every held message, unsent.
 func QueueClear() Action { return Action{Kind: ActionQueueClear} }
+
+// QueueEdit replaces the text of the queued message carrying this id — or, if
+// text is blank, drops it outright, the same as QueueRemove.
+func QueueEdit(id int, text string) Action {
+	return Action{Kind: ActionQueueEdit, QueueID: id, Text: text}
+}
+
+// QueueRemove drops the queued message carrying this id, unsent.
+func QueueRemove(id int) Action { return Action{Kind: ActionQueueRemove, QueueID: id} }
 
 // Quit stops the driver and exits.
 func Quit() Action { return Action{Kind: ActionQuit} }
@@ -347,6 +360,12 @@ func (m *Model) applyAction(a Action, ack chan<- ActionResult) (cmd tea.Cmd) {
 		n := len(m.queued)
 		cmd = m.runCommand("queue", "clear")
 		res = accepted(fmt.Sprintf("dropped %s, unsent", plural(n, "queued message")))
+
+	case ActionQueueEdit:
+		res = m.queueEditAction(a.QueueID, a.Text)
+
+	case ActionQueueRemove:
+		res = m.queueRemoveAction(a.QueueID)
 
 	case ActionQuit:
 		cmd = m.runCommand("quit", "")

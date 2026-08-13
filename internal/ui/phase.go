@@ -247,6 +247,63 @@ func (m *Model) sendInput() {
 	}
 }
 
+// queuedMsg is one message held while the session was busy, waiting to go out
+// as part of the next flush. Plain fields, deliberately: Bubble Tea copies the
+// Model by value every Update, so a self-pointer here is the strings.Builder
+// crash again.
+type queuedMsg struct {
+	id   int
+	text string
+}
+
+// findQueuedIndex returns the index of the queued message carrying this id, or
+// -1 if it has already gone out — a gate answers the same way, by id rather
+// than by position, because a client's view of "which one" can be stale by the
+// time its request lands.
+func (m Model) findQueuedIndex(id int) int {
+	for i, q := range m.queued {
+		if q.id == id {
+			return i
+		}
+	}
+	return -1
+}
+
+// removeQueuedAt deletes the queued message at i, clamps queueCursor back into
+// range, and closes the queue-edit overlay once nothing is left — it must
+// never sit open on an empty queue.
+func (m *Model) removeQueuedAt(i int) {
+	m.queued = append(m.queued[:i], m.queued[i+1:]...)
+	if m.queueCursor >= len(m.queued) {
+		m.queueCursor = len(m.queued) - 1
+	}
+	if m.queueCursor < 0 {
+		m.queueCursor = 0
+	}
+	if len(m.queued) == 0 {
+		m.queueOpen = false
+	}
+}
+
+// clearQueue drops every held message and takes the queue-edit overlay down
+// with it, for the same "never open on nothing" reason removeQueuedAt clamps
+// the cursor — a bulk clear is that same rule applied to the whole slice at
+// once rather than one row at a time.
+func (m *Model) clearQueue() {
+	m.queued = nil
+	m.queueOpen = false
+}
+
+// queuedTexts is the queue's message bodies, in order — what every reader
+// beyond the ids actually wants.
+func (m Model) queuedTexts() []string {
+	out := make([]string, len(m.queued))
+	for i, q := range m.queued {
+		out[i] = q.text
+	}
+	return out
+}
+
 // submitText sends one message to claude, or queues it when the session is
 // busy.
 //
@@ -266,7 +323,8 @@ func (m *Model) submitText(text string) ActionResult {
 		return rejected("no session is running")
 	}
 	if m.busy() {
-		m.queued = append(m.queued, text)
+		m.queueSeq++
+		m.queued = append(m.queued, queuedMsg{id: m.queueSeq, text: text})
 		m.appendEntry(entry{kind: eQueued, body: text})
 		return accepted("queued until the session falls idle")
 	}
@@ -276,6 +334,37 @@ func (m *Model) submitText(text string) ActionResult {
 	m.beginTurn()
 	m.appendEntry(entry{kind: eYou, body: text})
 	return accepted("sent")
+}
+
+// queueEditAction replaces the text of the queued message carrying this id, or
+// removes it outright when the new text is blank — an edit that empties the
+// box reads the same as dropping the row.
+//
+// An unknown id is the normal case, not an error: the queue can flush out from
+// under a client the moment the session falls idle, and the only wrong answer
+// is to guess and edit whatever is at the front instead.
+func (m *Model) queueEditAction(id int, text string) ActionResult {
+	i := m.findQueuedIndex(id)
+	if i < 0 {
+		return rejected("that message has already gone out")
+	}
+	if strings.TrimSpace(text) == "" {
+		m.removeQueuedAt(i)
+		return accepted("empty edit removed the queued message")
+	}
+	m.queued[i].text = text
+	return accepted("queued message updated")
+}
+
+// queueRemoveAction drops one queued message, unsent, by id — the same reason
+// queueEditAction is by id: a client's view of the queue can already be stale.
+func (m *Model) queueRemoveAction(id int) ActionResult {
+	i := m.findQueuedIndex(id)
+	if i < 0 {
+		return rejected("that message has already gone out")
+	}
+	m.removeQueuedAt(i)
+	return accepted("queued message dropped, unsent")
 }
 
 // flushQueue sends everything typed while the session was busy, the moment it
@@ -298,13 +387,13 @@ func (m *Model) flushQueue() bool {
 	if len(m.queued) == 0 || m.ended || m.drv == nil || m.busy() {
 		return false
 	}
-	text := strings.Join(m.queued, "\n\n")
+	text := strings.Join(m.queuedTexts(), "\n\n")
 	m.interrupted = false
 	m.turnText = ""
 	_ = m.drv.Send(text)
 	m.appendEntry(entry{kind: eYou, body: text})
 	m.beginTurn()
-	m.queued = nil
+	m.clearQueue()
 	return true
 }
 
@@ -318,8 +407,8 @@ func (m *Model) reportUnsentQueue() {
 	}
 	m.appendEntry(entry{kind: eWarn, body: fmt.Sprintf(
 		"⚠ the session ended with %s never sent — copy anything you still want:\n\n%s",
-		plural(len(m.queued), "queued message"), strings.Join(m.queued, "\n\n"))})
-	m.queued = nil
+		plural(len(m.queued), "queued message"), strings.Join(m.queuedTexts(), "\n\n"))})
+	m.clearQueue()
 }
 
 // plural renders "1 thing" / "2 things".

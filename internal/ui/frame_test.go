@@ -358,15 +358,15 @@ func TestFrameQueue(t *testing.T) {
 	if q := m.Frame().Queue; len(q) != 0 {
 		t.Errorf("queue = %v, want empty", q)
 	}
-	m.queued = []string{"alpha", "beta"}
-	if got := m.Frame().Queue; len(got) != 2 || got[0] != "alpha" || got[1] != "beta" {
-		t.Errorf("queue = %v, want [alpha beta]", got)
+	m.queued = []queuedMsg{{id: 1, text: "alpha"}, {id: 2, text: "beta"}}
+	if got := m.Frame().Queue; len(got) != 2 || got[0] != (QueueItem{ID: 1, Text: "alpha"}) || got[1] != (QueueItem{ID: 2, Text: "beta"}) {
+		t.Errorf("queue = %v, want [{1 alpha} {2 beta}]", got)
 	}
 	// A copy, not the model's own slice: a projection a caller can append to is
 	// a projection that can corrupt the run it describes.
 	f := m.Frame()
-	f.Queue[0] = "mutated"
-	if m.queued[0] != "alpha" {
+	f.Queue[0].Text = "mutated"
+	if m.queued[0].text != "alpha" {
 		t.Error("Frame handed out the model's own queue slice")
 	}
 }
@@ -551,6 +551,20 @@ func TestFrameCarriesFinishOutcomeAfterFinish(t *testing.T) {
 	}
 	if f.FinishSummary != "shipped the ledger" {
 		t.Errorf("FinishSummary = %q", f.FinishSummary)
+	}
+}
+
+// The resolved branch/SHA badge travels on the frame for the webview, which
+// has no header of its own to read it off.
+func TestFrameCarriesBranch(t *testing.T) {
+	m := New(nil, Config{})
+	if got := m.Frame().Branch; got != "" {
+		t.Errorf("Branch = %q before any resolve, want empty", got)
+	}
+
+	m.branch = "detached @ abc1234"
+	if got := m.Frame().Branch; got != "detached @ abc1234" {
+		t.Errorf("Branch = %q, want %q", got, "detached @ abc1234")
 	}
 }
 
