@@ -1,5 +1,39 @@
 # Changelog
 
+## [1.8.0](https://github.com/hweeks/always-click-yes/compare/v1.7.0...v1.8.0) (2026-08-13)
+
+
+### Features
+
+* add a jira issue-key field to the ticket board ([64b22de](https://github.com/hweeks/always-click-yes/commit/64b22de5519b073f0a3002c8875df128edaf3104))
+* add an optional jira section to .acy.json and merge it into --mcp-config ([765633b](https://github.com/hweeks/always-click-yes/commit/765633bbe782189a2bae29da422f582fa5172349))
+* carry the ticket flow diagram in the frame and webview protocol ([b469843](https://github.com/hweeks/always-click-yes/commit/b469843ebcb3935542f0aca01573f41e9ecd5369))
+* deny merges and protected-branch pushes at the permission gate ([0a0d3f1](https://github.com/hweeks/always-click-yes/commit/0a0d3f19ef906b03bdddfff03772cb441550008f))
+* draw the ticket flow at each milestone and on /flow ([5bb90fe](https://github.com/hweeks/always-click-yes/commit/5bb90fec0ed384960a9dd71d64d3c1736f258f9d))
+* make queued messages editable ([c41540e](https://github.com/hweeks/always-click-yes/commit/c41540eb38f477dc9e54031a4382884ab15d38c2))
+* render the ticket board as mermaid and ascii ([678cdf5](https://github.com/hweeks/always-click-yes/commit/678cdf53223da967b47d0edee84f21da20955e58))
+* **ui:** blur the composer only while it owns the keyboard ([7c69a6b](https://github.com/hweeks/always-click-yes/commit/7c69a6bd538d20e8973ac6f376745bdffa619918))
+* **ui:** show the current git branch beside the phase chip ([b6c4b07](https://github.com/hweeks/always-click-yes/commit/b6c4b07f553e3fd33f640cb3b98b005b3f673df0))
+* wire jira mcp tooling into the architect's config and prompt ([2f58de1](https://github.com/hweeks/always-click-yes/commit/2f58de162a9568c49d2abb6f7bf337d59dfb6ee4))
+* write flow.mmd to the ticket store on every board change ([f54775c](https://github.com/hweeks/always-click-yes/commit/f54775cf7e857acf8357077651c656b46d153233))
+
+
+### Bug Fixes
+
+* check every git push refspec, not just the first, in merge guard ([b016427](https://github.com/hweeks/always-click-yes/commit/b016427252a56761e84917dd0a4cbac13d7c5d95))
+* give queue editor and Ask a single source of truth for the keyboard ([7c771ea](https://github.com/hweeks/always-click-yes/commit/7c771eac4b9c55aca6761b63dcd745c78695b597))
+* reject embedded newlines in single-line ticket frontmatter fields ([5a4ea51](https://github.com/hweeks/always-click-yes/commit/5a4ea51592f1582e0a76c541da066f48d4269b9a))
+* render the flow entry's ASCII half in its HTML, not just the mermaid ([2c817be](https://github.com/hweeks/always-click-yes/commit/2c817bea94d83fb8ad1f44577b26b4a1e9f07602))
+* skip ticket-board pushes to the default branch ([c45ec11](https://github.com/hweeks/always-click-yes/commit/c45ec116e5c232563bf98eb453ccab21206d6994))
+* thread the configured Jira project key and site to the architect ([c3cd6a8](https://github.com/hweeks/always-click-yes/commit/c3cd6a835b5bacbc2279c52d8496037e34f91e03))
+* **ui:** bound the branch badge to the header width ([c4d2795](https://github.com/hweeks/always-click-yes/commit/c4d2795a928889c48fce52797b6151a40ae71936))
+* **ui:** route composerActive's method through the free function ([ef54a1d](https://github.com/hweeks/always-click-yes/commit/ef54a1d77a6de33c44e77b67963e9524ad10d59f))
+
+
+### Performance
+
+* cache the ticket board projection instead of re-reading it every frame ([94f28c0](https://github.com/hweeks/always-click-yes/commit/94f28c07cd54ff0f9be6337954fd64bf61f26211))
+
 ## [1.7.0](https://github.com/hweeks/always-click-yes/compare/v1.6.0...v1.7.0) (2026-08-07)
 
 
