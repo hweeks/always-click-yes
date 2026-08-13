@@ -46,6 +46,7 @@ const (
 	kindToolOK   = "toolOK"
 	kindToolErr  = "toolErr"
 	kindThinking = "thinking"
+	kindFlow     = "flow"
 )
 
 // Entry renders one transcript entry as a self-contained HTML fragment.
@@ -107,6 +108,18 @@ func entryBody(kind, body, raw, lang string) string {
 		return preText(raw)
 
 	case kindToolOK, kindToolErr, kindThinking:
+		return preText(body)
+
+	case kindFlow:
+		// body carries both halves — the ascii lanes followed by a fenced
+		// mermaid block, exactly as render.go's eFlow case shows them in the
+		// terminal — while raw is the mermaid source alone. Rendering raw
+		// here would show the webview only half of what the terminal shows,
+		// the very divergence Frame exists to prevent. chroma has no mermaid
+		// lexer, so codeBlock(raw, lang) would only ever fall back to the
+		// same escaped preformatted text preText gives anyway, which is why
+		// there is no highlighting to lose by rendering body as plain text
+		// instead.
 		return preText(body)
 	}
 

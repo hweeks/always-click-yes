@@ -314,7 +314,8 @@ func briefText(spec engineerwire.Spec) string {
 		spec.Ticket, spec.Title, spec.Brief, spec.Success)
 	b.WriteString("Plan briefly, then wait; the run will be armed for you. Commit your work locally, " +
 		"but do not push the branch or open a pull request yourself: pushing and opening the PR happen " +
-		"automatically once you call Finish.")
+		"automatically once you call Finish. Never merge to the default branch, never push to it, and " +
+		"never run `gh pr merge`: your own branch and its PR are the only things you touch.")
 	if spec.StackTrunk != "" {
 		fmt.Fprintf(&b, " Your branch is stacked on %s, which is itself an open pull request not yet "+
 			"merged to trunk: do not rebase your branch, reset it, or merge trunk (or anything else) into it.",

@@ -51,11 +51,15 @@ var idPattern = regexp.MustCompile(`^[a-z0-9-]+$`)
 // UpdateStatus has appended to it at least once, ends with a "## Log"
 // section of timestamped notes.
 type Ticket struct {
-	ID        string
-	Title     string
-	Status    string
-	Branch    string
-	PR        string
+	ID     string
+	Title  string
+	Status string
+	Branch string
+	PR     string
+	// Jira is the Jira issue key mirroring this ticket (e.g. "ENG-42"), if this
+	// repo's Jira integration is configured and the architect has recorded one.
+	// "" means untracked in Jira.
+	Jira      string
 	DependsOn []string
 	// StackOn names the ticket this one's branch is stacked on, as part of a
 	// larger stacked-PR effort landing elsewhere in the codebase. This is
@@ -79,6 +83,13 @@ type Store struct {
 	Root string
 	Mode string // "direct" commits and best-effort pushes; "none" makes Commit a no-op.
 	Run  gitops.Runner
+
+	// BaseBranch is the fleet's configured base branch (fleet.baseBranch); ""
+	// if unset. Protected alongside "main" and "master": Commit will not push
+	// to it. This is set by the caller that constructs the Store for arch
+	// mode (internal/cli's arch command), not by New() — New has no fleet
+	// config to draw it from.
+	BaseBranch string
 
 	// now is overridable by tests in this package; New defaults it to
 	// time.Now so production callers never see it.
@@ -105,8 +116,16 @@ func (s *Store) dir() string {
 
 // validateShape checks the fields every ticket must have regardless of where
 // it came from: parsed off disk, or about to be written by Put. It does not
-// check depends_on — that needs the rest of the store, and is Put's and
-// Validate's job.
+// check that depends_on/stack_on reference real tickets — that needs the
+// rest of the store, and is Put's and Validate's job.
+//
+// Every field render.go writes as a single frontmatter line ("key: value\n")
+// is checked for an embedded newline or carriage return here too: either
+// would split into extra lines the hand-rolled parser reads back as bogus or
+// duplicate keys, corrupting the ticket board. id's own idPattern already
+// happens to exclude both, but the rest (title, status, branch, pr, jira,
+// stack_on, and each depends_on entry) have no such shape restriction and
+// need the check explicitly.
 func validateShape(t Ticket) error {
 	if !idPattern.MatchString(t.ID) {
 		return fmt.Errorf("invalid id %q: must match [a-z0-9-]+", t.ID)
@@ -125,5 +144,25 @@ func validateShape(t Ticket) error {
 	if t.StackOn == t.ID {
 		return fmt.Errorf("stack_on cannot reference its own ticket %q", t.ID)
 	}
+
+	for _, f := range []struct{ name, value string }{
+		{"id", t.ID},
+		{"title", t.Title},
+		{"status", t.Status},
+		{"branch", t.Branch},
+		{"pr", t.PR},
+		{"jira", t.Jira},
+		{"stack_on", t.StackOn},
+	} {
+		if err := noNewline(f.name, f.value); err != nil {
+			return err
+		}
+	}
+	for _, dep := range t.DependsOn {
+		if err := noNewline("depends_on", dep); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }

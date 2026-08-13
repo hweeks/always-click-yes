@@ -293,6 +293,66 @@ repo root to get every key name right on a fresh clone.
     the derivation — a Linux host whose rc is sourced through `bash` needs no `shell` key at
     all, since `.bashrc` already derives it.
 
+## Jira
+
+Arch mode can optionally mirror ticket transitions onto a real Jira project, through a
+third-party MCP server rather than any Go client of Jira's REST API. Add a top-level
+`"jira"` section to `.acy.json` — a sibling of `"fleet"`, not nested inside it; see
+`.acy.json.example` for the exact shape:
+
+```json
+{
+  "jira": {
+    "server": "jira",
+    "mcp": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "https://mcp.atlassian.com/v1/sse"],
+      "env": { "JIRA_API_TOKEN": "$JIRA_API_TOKEN" }
+    },
+    "projectKey": "ENG",
+    "site": "https://acme.atlassian.net"
+  }
+}
+```
+
+- **`server`** (default `"jira"`) — the name this server is registered under, and
+  what its tools appear to the model as (`mcp__<server>__*`, whatever the actual Jira
+  MCP server exposes). Must not collide with acy's own MCP server name (`"acy"`).
+- **`mcp.command`** — required whenever a `"jira"` section is present at all; there's
+  no default for it. `mcp.args` and `mcp.env` are passed straight through to the
+  server acy launches.
+- **`mcp.env`** values of the form `"$NAME"` are substituted from acy's own
+  environment when `.acy.json` is loaded — this is how a Jira API token reaches the
+  server without being committed to the repo. If `NAME` isn't actually set in acy's
+  own environment, loading `.acy.json` fails outright rather than starting the server
+  with an empty credential.
+- **`projectKey`** / **`site`** — passed through for the model's own use (which
+  project to file issues under, which site to link), not validated or otherwise
+  interpreted by acy itself.
+
+This is merged into the **architect's own** `--mcp-config` only. A plain `acy
+run`/`acy serve` has no `"jira"` section to merge in the first place, and a
+dispatched engineer — even though it's a full, unattended `acy run` of its own —
+builds its own config from its own flags, so it never inherits the architect's Jira
+wiring either.
+
+It's prompt-driven bookkeeping, not a Go client for Jira's REST API: the ticket
+board under `.acy/tickets` stays the single source of truth, and the architect's
+system prompt tells it to mirror ticket transitions onto the corresponding Jira
+issue using whatever tools the Jira MCP server exposes, then record the resulting
+issue key back on the ticket itself via `CreateTicket`/`UpdateTicket`'s now-optional
+`jira` argument — a `Ticket` field that round-trips through the frontmatter the same
+as everything else on the board.
+
+Jira is best-effort. A failed Jira call is reported plainly by the architect and the
+run carries on — never blocked waiting on it, and never retried in a loop chasing a
+transient Jira outage.
+
+`acy fleet doctor` does not check the Jira server at all — that's a known gap, not
+implied coverage. Don't assume doctor having passed means your Jira MCP command
+actually works; the first time you'll find that out is when the architect tries to
+call it for real.
+
 ## Running `acy arch`
 
 ```sh
@@ -352,6 +412,70 @@ system prompt in place of the parent's. The flow:
    reads.
 8. **Finish.** The architect calls `Finish` once every ticket is merged or otherwise
    accounted for (blocked with a note is accounted for; silently unmentioned isn't).
+
+### Ticket flow diagrams
+
+Alongside the markdown board, `internal/tickets/flow.go`'s `Mermaid` and `ASCII` redraw
+the same `[]tickets.Ticket` deterministically in Go, as a mermaid flowchart and a
+plain-text status-lane view — never hand-drawn by the model, so there is nothing here
+for a prompt to get wrong or embellish.
+
+The diagram gets redrawn in three places: automatically, into the transcript, right
+after every successful `CreateTicket`/`UpdateTicket` call — deduped against the last
+diagram emitted, so an update that doesn't change the board's shape (re-marking a
+ticket with the status it already had) doesn't reprint it; on demand via `/flow`, which
+always redraws regardless of dedup; and on disk at `.acy/tickets/flow.mmd`, rewritten by
+`Store.Put` on every board change. `flow.mmd` lives *inside* `.acy/tickets` on purpose,
+so it rides the same `git add .acy/tickets` the ticket board itself does — committed
+under `fleet.ticketCommit: "direct"`, left as an uncommitted local file under `"none"`,
+exactly like every other file in that directory.
+
+A three-ticket board —
+
+```
+t1 (todo):        "Design schema"
+t2 (in-progress):  "Build API", depends_on: [t1]
+t3 (in-review):    "Write docs", stack_on: t2
+```
+
+— renders as ASCII:
+
+```
+[todo] (1)
+  - t1
+[in-progress] (1)
+  - t2
+[in-review] (1)
+  - t3
+[merged] (0)
+  (none)
+[blocked] (0)
+  (none)
+
+stacks:
+  t2 -> t3
+```
+
+and as mermaid:
+
+```
+flowchart TD
+    t1["t1: Design schema [todo]"]:::todo
+    t2["t2: Build API [in-progress]"]:::in-progress
+    t3["t3: Write docs [in-review]"]:::in-review
+    t1 --> t2
+    t2 -.->|stacking| t3
+    classDef todo fill:#e0e0e0
+    classDef in-progress fill:#fff3b0
+    classDef in-review fill:#bde0fe
+    classDef merged fill:#b7e4c7
+    classDef blocked fill:#f8b4b4
+```
+
+A webview client sees the same two strings via `Frame.flow` (`{mermaid, ascii}` — see
+[`docs/webui-protocol.md`](webui-protocol.md)'s `### Flow` section) and renders them as
+source text, not as a rendered graph — the webview has no mermaid renderer, the same way
+it has no markdown renderer for the rest of the transcript.
 
 ## Stacked PRs
 
@@ -464,6 +588,48 @@ Neither has a default ceiling (both are unlimited unless you set them). Set
 `runBudgetUSD` before a real run the same way you'd think about `--task-budget` on a
 plain `acy run` — it's the number that keeps a fleet that's misbehaving from being a
 number you only find out about later.
+
+## Nothing merges without a human
+
+Three independent things stand between an engineer — or the architect itself — and
+actually landing code on your default branch, worth knowing precisely before you point
+a fleet at a real repo:
+
+- **The ticket board's own commits never push to it.** `internal/tickets/commit.go`'s
+  `Store.Commit` commits `.acy/tickets` locally, then resolves the branch actually
+  checked out (`git rev-parse --abbrev-ref HEAD`) before pushing anywhere. If that's
+  `main`, `master`, or the `baseBranch` you configured, the push is skipped entirely —
+  `CreateTicket`/`UpdateTicket` report back "committed locally, but not pushed" rather
+  than either silently succeeding or looking like a failure.
+- **The permission gate denies merge and protected-push commands outright, before a
+  countdown ever starts.** `internal/ui/guard.go`'s `mergeGuardVerdict`, consulted by
+  `gate.go`'s `enqueue` on every tool call, refuses immediately — never queued for
+  auto-approval — any `gh pr merge`, any `gh api` call against a `/merges` endpoint, and
+  any `git push` whose refspec resolves to a protected branch (your `baseBranch`, plus
+  `main`/`master` always). Because an engineer runs this exact same `ui.Model`, it gets
+  this guard for free — there is no separate copy of it to fall out of sync.
+- **Both the architect and every engineer are told outright never to merge, push to the
+  default branch, or run `gh pr merge`.** That's plain prompt text (`ArchSystemPromptFor`,
+  `briefText`) — it costs nothing to include, but treat it as an assist for an
+  already-cooperative model, not a guarantee.
+
+Be honest with yourself about what the second one actually is: `mergeGuardVerdict` is
+pure string matching over a Bash command that has not executed yet. It is not a sandbox,
+and the doc comment at the top of `guard.go` says so in those words. A model that
+genuinely wanted around it — a base64-encoded script, a shell alias, a wrapper binary —
+could get around it. What you can actually rely on doesn't come from the guard at all:
+the supervising session's own tool registry has no `Bash` in it, full stop, so the
+architect (and a plain run's parent) can never reach the guard's blind spots because
+they can never reach a shell in the first place; and the only code path that ever
+pushes a branch or opens a PR is `internal/gitops`, invoked with a fixed argv the
+package itself chooses, deterministically, in Go, only after the model calls `Finish`
+— never handed to the model as an instruction to go carry out. If you're deciding how
+far to trust an unattended host, trust those two, not the prompt text or the string
+matcher.
+
+Given all three, landing anything on your default branch still requires a human
+clicking merge on GitHub — nothing here, working as designed or buggy, does that for
+you.
 
 ## The trust paragraph
 

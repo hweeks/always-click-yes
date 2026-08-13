@@ -9,6 +9,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/hweeks/always-click-yes/internal/alog"
+	"github.com/hweeks/always-click-yes/internal/config"
 	"github.com/hweeks/always-click-yes/internal/driver"
 	"github.com/hweeks/always-click-yes/internal/mcp"
 )
@@ -94,7 +95,17 @@ var ParentSystemPrompt = strings.Join([]string{
 // construction time is cheaper, and cannot be gotten wrong by the model at
 // runtime, than handing over one prompt and trusting it to branch on a mode it
 // was never told.
-func ArchSystemPromptFor(stackMode string) string {
+//
+// jira is the project's "jira" section from .acy.json, or nil when this
+// project has none. Non-nil, it appends a paragraph telling the architect to
+// mirror ticket transitions onto Jira through that server's own
+// mcp__<jira.Server>__ tools — a different prefix from mcp.Qualified, which
+// is hardcoded to acy's own server name. When jira.ProjectKey and/or
+// jira.Site are set, that same paragraph names them as the target every
+// issue belongs to, so an account with access to several projects or sites
+// is actually aimed instead of falling back to whatever the server
+// defaults to.
+func ArchSystemPromptFor(stackMode string, jira *config.JiraConfig) string {
 	lines := []string{
 		"You are the architect of a fleet run. You have Read, Grep and Glob: you can understand this",
 		"codebase, and you cannot change it.",
@@ -114,10 +125,39 @@ func ArchSystemPromptFor(stackMode string) string {
 		"human merges it, or blocked with a note the moment an engineer is stuck. A resumed run has no memory of",
 		"this conversation; the board is how it learns where it left off.",
 		"",
-		"A stack buys one review surface and one linear landing on trunk, and lets a child start as soon as its",
-		"parent's PR opens instead of waiting for it to merge. stack_on (on " + mcp.Qualified(mcp.ToolLaunchEngineer) + ")",
-		"names the parent ticket; a branch may have at most one child.",
 	}
+
+	if jira != nil {
+		jiraPrefix := "mcp__" + jira.Server + "__"
+		var target string
+		switch {
+		case jira.ProjectKey != "" && jira.Site != "":
+			target = " Every issue belongs to project " + jira.ProjectKey + " on " + jira.Site + " — never let a call fall back to whichever project or site the server defaults to."
+		case jira.ProjectKey != "":
+			target = " Every issue belongs to project " + jira.ProjectKey + " — never let a call fall back to whichever project the server defaults to."
+		case jira.Site != "":
+			target = " Every issue belongs to " + jira.Site + " — never let a call fall back to whichever site the server defaults to."
+		}
+		lines = append(lines,
+			"The ticket board remains the source of truth, not Jira. Mirror each ticket transition onto its Jira",
+			"issue too, using this project's own Jira MCP tools — they are namespaced "+jiraPrefix+"*, a different",
+			"server from acy's own. Record the issue key on the ticket itself via the jira argument on "+
+				mcp.Qualified(mcp.ToolUpdateTicket)+"."+target,
+			"Treat every Jira call as best-effort: if one fails, say so plainly in your own next message and carry",
+			"on with the ticket transition regardless — never block on it, and never retry it in a loop.",
+			"",
+		)
+	}
+
+	lines = append(lines,
+		"A stack buys one review surface and one linear landing on trunk, and lets a child start as soon as its",
+		"parent's PR opens instead of waiting for it to merge. stack_on (on "+mcp.Qualified(mcp.ToolLaunchEngineer)+")",
+		"names the parent ticket; a branch may have at most one child.",
+		"",
+		"acy never merges anything. A human reviews and merges every PR, including the top of a stack, once",
+		"it is ready. Never ask an engineer to merge its own PR, and never read an unmerged PR as a failure —",
+		"it is waiting on a human, not on you.",
+	)
 
 	if stackMode != "off" {
 		lines = append(lines,

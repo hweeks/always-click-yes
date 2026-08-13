@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hweeks/always-click-yes/internal/config"
 	"github.com/hweeks/always-click-yes/internal/driver"
 	"github.com/hweeks/always-click-yes/internal/mcp"
 )
@@ -305,7 +306,7 @@ func TestFinishIsIdempotent(t *testing.T) {
 // the choice to the human before committing to a shape for the tickets —
 // "chain" and "off" leave nothing to ask about.
 func TestArchSystemPromptForAsksOnlyWhenStackModeIsAsk(t *testing.T) {
-	askPrompt := ArchSystemPromptFor("ask")
+	askPrompt := ArchSystemPromptFor("ask", nil)
 	if !strings.Contains(askPrompt, mcp.Qualified(mcp.ToolAsk)) {
 		t.Error(`ArchSystemPromptFor("ask") should mention mcp.Qualified(mcp.ToolAsk)`)
 	}
@@ -314,7 +315,7 @@ func TestArchSystemPromptForAsksOnlyWhenStackModeIsAsk(t *testing.T) {
 	}
 
 	for _, mode := range []string{"chain", "off"} {
-		prompt := ArchSystemPromptFor(mode)
+		prompt := ArchSystemPromptFor(mode, nil)
 		if strings.Contains(prompt, "Before creating any tickets") {
 			t.Errorf("ArchSystemPromptFor(%q) should not contain the ask-before-tickets instruction", mode)
 		}
@@ -327,7 +328,7 @@ func TestArchSystemPromptForAsksOnlyWhenStackModeIsAsk(t *testing.T) {
 // absent for "off".
 func TestArchSystemPromptForAssembleStackOnlyWhenStackModeIsNotOff(t *testing.T) {
 	for _, mode := range []string{"ask", "chain"} {
-		prompt := ArchSystemPromptFor(mode)
+		prompt := ArchSystemPromptFor(mode, nil)
 		if !strings.Contains(prompt, mcp.Qualified(mcp.ToolAssembleStack)) {
 			t.Errorf("ArchSystemPromptFor(%q) should mention mcp.Qualified(mcp.ToolAssembleStack)", mode)
 		}
@@ -336,8 +337,37 @@ func TestArchSystemPromptForAssembleStackOnlyWhenStackModeIsNotOff(t *testing.T)
 		}
 	}
 
-	prompt := ArchSystemPromptFor("off")
+	prompt := ArchSystemPromptFor("off", nil)
 	if strings.Contains(prompt, mcp.Qualified(mcp.ToolAssembleStack)) {
 		t.Error(`ArchSystemPromptFor("off") should not mention AssembleStack`)
+	}
+}
+
+// The Jira paragraph must appear only when a project has actually configured
+// a Jira MCP server — an unconfigured project must not see it mentioned at
+// all, and a configured one must be told the tool prefix and that Jira calls
+// are best-effort.
+func TestArchSystemPromptForJiraOnlyWhenConfigured(t *testing.T) {
+	unconfigured := ArchSystemPromptFor("off", nil)
+	if strings.Contains(strings.ToLower(unconfigured), "jira") {
+		t.Error(`ArchSystemPromptFor("off", nil) should not mention Jira`)
+	}
+
+	configured := ArchSystemPromptFor("off", &config.JiraConfig{
+		Server:     "jira",
+		ProjectKey: "ENG",
+		Site:       "acme.atlassian.net",
+	})
+	if !strings.Contains(configured, "mcp__jira__") {
+		t.Error(`ArchSystemPromptFor("off", jira) should mention the mcp__jira__ tool prefix`)
+	}
+	if !strings.Contains(configured, "best-effort") && !strings.Contains(configured, "fails") {
+		t.Error(`ArchSystemPromptFor("off", jira) should describe Jira calls as best-effort/fallible`)
+	}
+	if !strings.Contains(configured, "ENG") {
+		t.Error(`ArchSystemPromptFor("off", jira) should name the configured project key`)
+	}
+	if !strings.Contains(configured, "acme.atlassian.net") {
+		t.Error(`ArchSystemPromptFor("off", jira) should name the configured site`)
 	}
 }

@@ -28,6 +28,96 @@ func rawTicketFull(id, title, status, dependsOn, stackOn string) string {
 		"---\n\nBody.\n"
 }
 
+// A jira value containing a newline used to be written verbatim into the
+// single "jira: <value>\n" frontmatter line, splitting into an extra line
+// the hand-rolled parser reads back as a bogus or duplicate key. Put must
+// refuse it before it ever reaches disk.
+func TestPutRejectsNewlineInJira(t *testing.T) {
+	s := newTestStore(t)
+	err := s.Put(Ticket{ID: "a", Title: "A", Status: StatusTodo, Jira: "ENG-1\nstatus: merged"})
+	if err == nil {
+		t.Fatal("Put with a newline embedded in jira: want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "jira") {
+		t.Fatalf("error %q does not name the jira field", err)
+	}
+}
+
+// Every field render.go writes on its own single frontmatter line has the
+// same hole jira did: an embedded newline or carriage return splits it into
+// extra lines. Put must reject all of them, not just jira.
+func TestPutRejectsNewlineInEverySingleLineField(t *testing.T) {
+	cases := []struct {
+		name string
+		t    Ticket
+	}{
+		{"id", Ticket{ID: "a\nb", Title: "T", Status: StatusTodo}},
+		{"title", Ticket{ID: "a", Title: "T\nx: y", Status: StatusTodo}},
+		{"status", Ticket{ID: "a", Title: "T", Status: "todo\nx: y"}},
+		{"branch", Ticket{ID: "a", Title: "T", Status: StatusTodo, Branch: "b\nx: y"}},
+		{"pr", Ticket{ID: "a", Title: "T", Status: StatusTodo, PR: "1\nx: y"}},
+		{"jira", Ticket{ID: "a", Title: "T", Status: StatusTodo, Jira: "ENG-1\r\nx: y"}},
+		{"stack_on", Ticket{ID: "a", Title: "T", Status: StatusTodo, StackOn: "p\nx: y"}},
+		{"depends_on", Ticket{ID: "a", Title: "T", Status: StatusTodo, DependsOn: []string{"p\nx: y"}}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s := newTestStore(t)
+			if err := s.Put(c.t); err == nil {
+				t.Fatalf("Put with a newline embedded in %s: want error, got nil", c.name)
+			}
+		})
+	}
+}
+
+// A legitimate value with ordinary punctuation — including a colon, which
+// the frontmatter format itself uses as a delimiter — must still round-trip
+// through Put/Get unchanged. The fix must reject newlines specifically, not
+// tighten the format so far that real values stop working.
+func TestPutRoundTripsLegitimateFieldValues(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.Put(Ticket{ID: "base", Title: "Base ticket", Status: StatusTodo}); err != nil {
+		t.Fatalf("Put(base): %v", err)
+	}
+
+	tk := Ticket{
+		ID:        "a",
+		Title:     "Fix: the thing, properly!",
+		Status:    StatusInProgress,
+		Branch:    "feature/fix-the-thing",
+		PR:        "https://github.com/org/repo/pull/42",
+		Jira:      "ENG-42",
+		DependsOn: []string{"base"},
+		StackOn:   "base",
+	}
+	if err := s.Put(tk); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	got, err := s.Get("a")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Title != tk.Title {
+		t.Errorf("Title = %q, want %q", got.Title, tk.Title)
+	}
+	if got.Branch != tk.Branch {
+		t.Errorf("Branch = %q, want %q", got.Branch, tk.Branch)
+	}
+	if got.PR != tk.PR {
+		t.Errorf("PR = %q, want %q", got.PR, tk.PR)
+	}
+	if got.Jira != tk.Jira {
+		t.Errorf("Jira = %q, want %q", got.Jira, tk.Jira)
+	}
+	if got.StackOn != tk.StackOn {
+		t.Errorf("StackOn = %q, want %q", got.StackOn, tk.StackOn)
+	}
+	if len(got.DependsOn) != 1 || got.DependsOn[0] != "base" {
+		t.Errorf("DependsOn = %v, want [base]", got.DependsOn)
+	}
+}
+
 func TestValidateOK(t *testing.T) {
 	s := newTestStore(t)
 	if err := s.Put(Ticket{ID: "a", Title: "A", Status: StatusTodo}); err != nil {

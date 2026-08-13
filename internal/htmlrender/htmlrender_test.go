@@ -64,6 +64,16 @@ func goldenCases() []kindCase {
 		{name: "good", kind: "good", body: "✔ auto-approved · ⚙ Bash"},
 		{name: "warn", kind: "warn", body: "⚠ vetoed · ⚙ Bash"},
 		{name: "queued", kind: "queued", body: "also update the docs"},
+		{
+			// body carries both halves — the ascii lanes followed by the fenced
+			// mermaid block flowBody produces in internal/ui/tickets.go — and
+			// chroma has no mermaid lexer, so this falls back to preformatted
+			// escaped text rather than tokenised code either way.
+			name: "flow", kind: "flow",
+			body: "[todo] (1)\n  - t1\n\n```mermaid\nflowchart TD\n    t1[\"t1: add x [todo]\"]:::todo\n```",
+			raw:  "flowchart TD\n    t1[\"t1: add x [todo]\"]:::todo\n",
+			lang: "mermaid",
+		},
 	}
 }
 
@@ -101,6 +111,22 @@ func TestEntryCarriesItsKind(t *testing.T) {
 		got := Entry(tc.kind, tc.title, tc.body, tc.raw, tc.lang)
 		if want := `class="acy-entry acy-entry--` + tc.kind + `"`; !strings.Contains(got, want) {
 			t.Errorf("%s: fragment does not carry %s:\n%s", tc.name, want, got)
+		}
+	}
+}
+
+// The terminal shows a flow entry as ascii lanes followed by a fenced mermaid
+// block (see render.go's eFlow case), and the html fragment must show the
+// same thing — not the mermaid source alone — or the webview and the
+// terminal disagree about what a flow entry looks like.
+func TestFlowRendersBothASCIIAndMermaid(t *testing.T) {
+	mermaid := "flowchart TD\n    t1[\"t1: add x [todo]\"]:::todo\n"
+	body := "[todo] (1)\n  - t1\n\n```mermaid\n" + mermaid + "```"
+	got := Entry("flow", "", body, mermaid, "mermaid")
+
+	for _, want := range []string{"[todo] (1)", "- t1", "flowchart TD"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("flow html missing %q:\n%s", want, got)
 		}
 	}
 }

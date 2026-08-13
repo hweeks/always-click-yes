@@ -242,6 +242,7 @@ had the token, which was printed to the process that launched acy.
 | `engineers` | `Engineer[]` | the architect's fleet ledger, oldest first; empty for a session with no fleet wired |
 | `fleet` | `FleetSummary` | `{active, capacityUsed, capacityTotal}` across the fleet's hosts; all zero with no fleet wired |
 | `tickets` | `Ticket[]` | the architect's ticket board, sorted by id; empty for a session with no ticket store wired |
+| `flow` | `Flow` | the ticket board redrawn as mermaid and ascii; `{mermaid: "", ascii: ""}` for a session with no ticket store wired |
 | `interruptedTasks` | string[] | tasks a restart caught mid-flight |
 | `logPath` | string | the debug log, if one is open |
 | `configPath` | string | the `.acy.json` this run's settings came from |
@@ -297,7 +298,7 @@ show `parent` flat while `child` climbs.
 | field | type | meaning |
 |---|---|---|
 | `seq` | int | identity of this entry across frames |
-| `kind` | string | one of `meta`, `you`, `claude`, `thinking`, `tool`, `toolOK`, `toolErr`, `plan`, `turn`, `complete`, `good`, `warn`, `queued` |
+| `kind` | string | one of `meta`, `you`, `claude`, `thinking`, `tool`, `toolOK`, `toolErr`, `plan`, `turn`, `complete`, `good`, `warn`, `queued`, `flow` |
 | `title` | string | a tool name, where there is one |
 | `body` | string | plain text, ANSI stripped |
 | `raw` | string | the unhighlighted source behind `body` |
@@ -349,6 +350,7 @@ What each kind becomes:
 | `tool` with an empty `lang` | preformatted escaped text — an argument preview is not code | `raw` |
 | `toolOK`, `toolErr`, `thinking` | preformatted escaped text | `body` |
 | `meta`, `you`, `turn`, `good`, `warn`, `queued` | escaped text, line breaks kept as `<br>` | `body` |
+| `flow` | preformatted escaped text — the ascii lanes followed by the fenced mermaid block, the same two halves the terminal shows | `body` |
 
 The shape is one wrapper `<div class="acy-entry acy-entry--<kind>">`, an optional
 `<div class="acy-entry__title">` when `title` is non-empty, and the content. The
@@ -506,6 +508,21 @@ this projection.
 Empty for a session with no ticket store wired — `acy arch` is the only
 caller that wires one — which is not an error, the same way an empty
 `engineers` ledger is not one.
+
+### `Flow`
+
+The same board as `tickets`, redrawn as a diagram rather than listed. It is
+the *current* board, not a transcript entry — it is kept up to date on every
+frame the same way `tickets` is, independent of the `flow`-kind entries
+`/flow` and a ticket milestone append to the transcript.
+
+| field | type | meaning |
+|---|---|---|
+| `mermaid` | string | the board as a mermaid flowchart source |
+| `ascii` | string | the board as a plain-text status-lane summary |
+
+Both are `""` for a session with no ticket store wired — not the rendering of
+an empty board, which is what a wired store with zero tickets on it produces.
 
 ### `SessionRow`
 

@@ -76,6 +76,11 @@ type Frame struct {
 	// session with no ticket store wired.
 	Tickets []Ticket `json:"tickets"`
 
+	// Flow is the ticket board redrawn as mermaid and ascii — the *current*
+	// board, not a transcript entry — kept up to date the same way Tickets is.
+	// Both fields are "" for a session with no ticket store wired.
+	Flow Flow `json:"flow"`
+
 	// InterruptedTasks names the tasks a restart caught mid-flight, so a client
 	// can say what a resumed run may have left half-done.
 	InterruptedTasks []string `json:"interruptedTasks"`
@@ -259,6 +264,14 @@ type Ticket struct {
 	PRURL  string `json:"prUrl"`
 }
 
+// Flow is the ticket board redrawn as mermaid and ascii — the *current*
+// board, not a transcript entry — kept up to date the same way Tickets is.
+// Both fields are "" for a session with no ticket store wired.
+type Flow struct {
+	Mermaid string `json:"mermaid"`
+	ASCII   string `json:"ascii"`
+}
+
 // SessionRow is one line of the /resume picker.
 type SessionRow struct {
 	ID            string `json:"id"`
@@ -292,6 +305,7 @@ var entryKinds = map[ekind]string{
 	eGood:     "good",
 	eWarn:     "warn",
 	eQueued:   "queued",
+	eFlow:     "flow",
 }
 
 // Frame projects the model for a non-terminal front end. It is a read: nothing
@@ -345,6 +359,7 @@ func (m Model) Frame() Frame {
 		Engineers: m.frameEngineers(),
 		Fleet:     m.frameFleet(),
 		Tickets:   m.frameTickets(),
+		Flow:      m.frameFlow(),
 
 		InterruptedTasks: strs(m.interruptedTasks),
 
@@ -481,24 +496,23 @@ func (m Model) frameFleet() FleetSummary {
 	}
 }
 
-// frameTickets reads the board directly rather than through a mirror kept in
-// sync by an event stream — unlike the fleet, there is no push side to
-// tickets, so a read is the only way to know its current state. A nil store
-// or a read error both project as no tickets, matching how an unwired fleet
-// projects as no engineers.
+// frameTickets projects cachedTickets, the mirror refreshTicketCache keeps —
+// see refreshTicketCache — rather than reading the store itself, so Frame
+// stays a read of the model's own state even when a ticket store is wired.
+// A nil store leaves the cache at its zero value, which projects as no
+// tickets, matching how an unwired fleet projects as no engineers.
 func (m Model) frameTickets() []Ticket {
-	if m.tickets == nil {
-		return []Ticket{}
-	}
-	ts, err := m.tickets.List()
-	if err != nil {
-		return []Ticket{}
-	}
-	out := make([]Ticket, 0, len(ts))
-	for _, t := range ts {
-		out = append(out, Ticket{ID: t.ID, Title: t.Title, Status: t.Status, PRURL: t.PR})
-	}
-	return out
+	// Copied, and copied into a non-nil slice: a caller must not be handed the
+	// model's own backing array, and Tickets marshals as [] rather than null.
+	return append(make([]Ticket, 0, len(m.cachedTickets)), m.cachedTickets...)
+}
+
+// frameFlow projects cachedFlow, the same mirror frameTickets reads, for the
+// same reason: Frame must not touch disk on every tick. A nil store leaves
+// the cache at its zero value, the zero Flow{}, matching how it projects as
+// no tickets.
+func (m Model) frameFlow() Flow {
+	return m.cachedFlow
 }
 
 func (m Model) framePicker() []SessionRow {

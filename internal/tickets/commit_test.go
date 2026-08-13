@@ -61,6 +61,15 @@ func initGitRepo(t *testing.T, run func(context.Context, string, string, ...stri
 	return dir
 }
 
+// checkoutBranch creates and switches to a new branch in dir. Tests that
+// actually want a push to reach origin need to be off "main" (or whatever
+// protected branch is in play), since Commit now skips the push outright on
+// a protected branch regardless of whether origin would have accepted it.
+func checkoutBranch(t *testing.T, run func(context.Context, string, string, ...string) (string, error), dir, branch string) {
+	t.Helper()
+	mustGit(t, run, dir, "checkout", "-b", branch)
+}
+
 func commitCount(t *testing.T, run func(context.Context, string, string, ...string) (string, error), dir string) int {
 	t.Helper()
 	out := mustGit(t, run, dir, "rev-list", "--count", "HEAD")
@@ -69,6 +78,26 @@ func commitCount(t *testing.T, run func(context.Context, string, string, ...stri
 		t.Fatalf("parsing rev-list output %q: %v", out, err)
 	}
 	return n
+}
+
+// bareRefCommitCount counts commits reachable from ref (e.g. "refs/heads/main")
+// directly in a bare repo, run with the bare directory itself as the git dir.
+func bareRefCommitCount(t *testing.T, run func(context.Context, string, string, ...string) (string, error), bareDir, ref string) int {
+	t.Helper()
+	out := mustGit(t, run, bareDir, "rev-list", "--count", ref)
+	n, err := strconv.Atoi(strings.TrimSpace(out))
+	if err != nil {
+		t.Fatalf("parsing rev-list output %q: %v", out, err)
+	}
+	return n
+}
+
+// bareHasRef reports whether ref exists in a bare repo, without failing the
+// test if it does not — used to confirm a branch that only ever lived
+// locally never reached origin.
+func bareHasRef(run func(context.Context, string, string, ...string) (string, error), bareDir, ref string) bool {
+	_, err := run(context.Background(), bareDir, "git", "rev-parse", "--verify", "--quiet", ref)
+	return err == nil
 }
 
 func TestCommitOnlyWhenDirty(t *testing.T) {
@@ -82,6 +111,7 @@ func TestCommitOnlyWhenDirty(t *testing.T) {
 	mustGit(t, run, "", "clone", "--bare", source, bare)
 	repo := filepath.Join(t.TempDir(), "clone")
 	mustGit(t, run, "", "clone", bare, repo)
+	checkoutBranch(t, run, repo, "feature/x")
 
 	s := New(repo, "direct", run)
 	before := commitCount(t, run, repo)
@@ -150,6 +180,7 @@ func TestCommitPushFailureIsDistinguishable(t *testing.T) {
 
 	repo := filepath.Join(t.TempDir(), "clone")
 	mustGit(t, run, "", "clone", bare, repo)
+	checkoutBranch(t, run, repo, "feature/x")
 
 	// Remove the origin so the eventual `git push origin HEAD` fails cleanly,
 	// without needing a network.
@@ -173,5 +204,108 @@ func TestCommitPushFailureIsDistinguishable(t *testing.T) {
 	// The commit itself must have gone through despite the push failure.
 	if got := commitCount(t, run, repo); got != before+1 {
 		t.Fatalf("commit count = %d, want %d (the local commit should survive a push failure)", got, before+1)
+	}
+}
+
+// TestCommitSkipsPushOnProtectedBranch proves that Commit refuses to push
+// when the checked-out branch is "main" (the unconditionally protected
+// default, with no BaseBranch configured), or when it equals a Store's
+// explicitly configured BaseBranch — while the local commit still lands
+// either way, and nothing new reaches the bare origin.
+func TestCommitSkipsPushOnProtectedBranch(t *testing.T) {
+	t.Run("main", func(t *testing.T) {
+		run := hermeticRunner(t)
+		source := initGitRepo(t, run)
+
+		bare := filepath.Join(t.TempDir(), "origin.git")
+		mustGit(t, run, "", "clone", "--bare", source, bare)
+		repo := filepath.Join(t.TempDir(), "clone")
+		mustGit(t, run, "", "clone", bare, repo)
+		// Left checked out on "main" (the clone's default), deliberately.
+
+		s := New(repo, "direct", run)
+		before := commitCount(t, run, repo)
+		bareBefore := bareRefCommitCount(t, run, bare, "refs/heads/main")
+
+		if err := s.Put(Ticket{ID: "t1", Title: "T1", Status: StatusTodo}); err != nil {
+			t.Fatalf("Put: %v", err)
+		}
+
+		err := s.Commit(context.Background(), "chore: ticket sync")
+		if !errors.Is(err, ErrPushSkipped) {
+			t.Fatalf("Commit error = %v, want it to wrap ErrPushSkipped", err)
+		}
+
+		if got := commitCount(t, run, repo); got != before+1 {
+			t.Fatalf("commit count = %d, want %d (the local commit should still land)", got, before+1)
+		}
+		if got := bareRefCommitCount(t, run, bare, "refs/heads/main"); got != bareBefore {
+			t.Fatalf("bare origin main commit count = %d, want unchanged %d (nothing should have been pushed)", got, bareBefore)
+		}
+	})
+
+	t.Run("custom BaseBranch", func(t *testing.T) {
+		run := hermeticRunner(t)
+		source := initGitRepo(t, run)
+
+		bare := filepath.Join(t.TempDir(), "origin.git")
+		mustGit(t, run, "", "clone", "--bare", source, bare)
+		repo := filepath.Join(t.TempDir(), "clone")
+		mustGit(t, run, "", "clone", bare, repo)
+		checkoutBranch(t, run, repo, "trunk")
+
+		s := New(repo, "direct", run)
+		s.BaseBranch = "trunk"
+		before := commitCount(t, run, repo)
+
+		if err := s.Put(Ticket{ID: "t1", Title: "T1", Status: StatusTodo}); err != nil {
+			t.Fatalf("Put: %v", err)
+		}
+
+		err := s.Commit(context.Background(), "chore: ticket sync")
+		if !errors.Is(err, ErrPushSkipped) {
+			t.Fatalf("Commit error = %v, want it to wrap ErrPushSkipped", err)
+		}
+
+		if got := commitCount(t, run, repo); got != before+1 {
+			t.Fatalf("commit count = %d, want %d (the local commit should still land)", got, before+1)
+		}
+		// "trunk" never existed on origin, and Commit must not have pushed it.
+		if bareHasRef(run, bare, "refs/heads/trunk") {
+			t.Fatal("bare origin has a trunk ref, want none — nothing should have been pushed")
+		}
+	})
+}
+
+// TestCommitPushesOnOrdinaryFeatureBranch is the regression check for the
+// skip logic above: an ordinary feature branch (not main, master, or
+// BaseBranch) must still push successfully, exactly as before.
+func TestCommitPushesOnOrdinaryFeatureBranch(t *testing.T) {
+	run := hermeticRunner(t)
+	source := initGitRepo(t, run)
+
+	bare := filepath.Join(t.TempDir(), "origin.git")
+	mustGit(t, run, "", "clone", "--bare", source, bare)
+	repo := filepath.Join(t.TempDir(), "clone")
+	mustGit(t, run, "", "clone", bare, repo)
+	checkoutBranch(t, run, repo, "feature/x")
+
+	s := New(repo, "direct", run)
+	s.BaseBranch = "trunk" // configured, but irrelevant here: not the checked-out branch
+	bareBefore := bareRefCommitCount(t, run, bare, "refs/heads/main")
+
+	if err := s.Put(Ticket{ID: "t1", Title: "T1", Status: StatusTodo}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	if err := s.Commit(context.Background(), "chore: ticket sync"); err != nil {
+		t.Fatalf("Commit on an ordinary feature branch: %v", err)
+	}
+
+	if !bareHasRef(run, bare, "refs/heads/feature/x") {
+		t.Fatal("bare origin has no feature/x ref, want the push to have created one")
+	}
+	if got := bareRefCommitCount(t, run, bare, "refs/heads/feature/x"); got != bareBefore+1 {
+		t.Fatalf("bare origin feature/x commit count = %d, want %d (the push should have landed)", got, bareBefore+1)
 	}
 }

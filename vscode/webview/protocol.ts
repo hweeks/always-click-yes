@@ -49,7 +49,8 @@ export type EntryKind =
   | 'complete'
   | 'good'
   | 'warn'
-  | 'queued';
+  | 'queued'
+  | 'flow';
 
 export interface Entry {
   seq: number;
@@ -118,6 +119,16 @@ export interface QueueItem {
   text: string;
 }
 
+/**
+ * The ticket board redrawn as mermaid and ascii — the *current* board, not a
+ * transcript entry. Both fields are "" for a session with no ticket store
+ * wired.
+ */
+export interface Flow {
+  mermaid: string;
+  ascii: string;
+}
+
 export interface Frame {
   phase: string;
   status: string;
@@ -144,6 +155,7 @@ export interface Frame {
   ask: Ask | null;
   tasks: Task[];
   picker: SessionRow[];
+  flow: Flow;
   interruptedTasks: string[];
   logPath: string;
   configPath: string;

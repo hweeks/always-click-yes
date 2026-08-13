@@ -25,7 +25,7 @@ import (
 type TicketStore interface {
 	List() ([]tickets.Ticket, error)
 	Put(t tickets.Ticket) error
-	UpdateFields(id, status, note, branch, pr string) error
+	UpdateFields(id, status, note, branch, pr, jira string) error
 	Commit(ctx context.Context, msg string) error
 }
 
@@ -62,6 +62,7 @@ type updateTicketArgs struct {
 	Note   string `json:"note"`
 	Branch string `json:"branch"`
 	PR     string `json:"pr"`
+	Jira   string `json:"jira"`
 }
 
 // parseUpdateTicket decodes an UpdateTicket call, strictly: a missing required
@@ -79,6 +80,7 @@ func parseUpdateTicket(raw json.RawMessage) (updateTicketArgs, error) {
 	a.Note = strings.TrimSpace(a.Note)
 	a.Branch = strings.TrimSpace(a.Branch)
 	a.PR = strings.TrimSpace(a.PR)
+	a.Jira = strings.TrimSpace(a.Jira)
 
 	var missing []string
 	if a.ID == "" {
@@ -112,7 +114,7 @@ func (m *Model) startUpdateTicket(p *mcp.Pending) {
 			". Nothing was changed. Fix the arguments and call it again."})
 		return
 	}
-	if err := m.tickets.UpdateFields(args.ID, args.Status, args.Note, args.Branch, args.PR); err != nil {
+	if err := m.tickets.UpdateFields(args.ID, args.Status, args.Note, args.Branch, args.PR, args.Jira); err != nil {
 		p.Resolve(mcp.Answer{Text: "UpdateTicket failed: " + err.Error()})
 		return
 	}
@@ -125,12 +127,16 @@ func (m *Model) startUpdateTicket(p *mcp.Pending) {
 		p.Resolve(mcp.Answer{Text: fmt.Sprintf(
 			"ticket %s updated to %s and committed locally, but the push failed — the human should push "+
 				"(a protected main branch rejecting a direct push is normal here, not an error)", args.ID, args.Status)})
+	case errors.Is(commitErr, tickets.ErrPushSkipped):
+		p.Resolve(mcp.Answer{Text: fmt.Sprintf(
+			"ticket %s updated to %s and committed locally, but not pushed: %s", args.ID, args.Status, commitErr.Error())})
 	default:
 		p.Resolve(mcp.Answer{Text: fmt.Sprintf(
 			"ticket %s updated to %s, but committing it failed: %s", args.ID, args.Status, commitErr.Error())})
 		return
 	}
 	m.appendEntry(entry{kind: eGood, body: fmt.Sprintf("ticket %s → %s", args.ID, args.Status)})
+	m.emitFlowDiagram()
 }
 
 // --- CreateTicket ---
@@ -141,6 +147,7 @@ type createTicketArgs struct {
 	Brief     string   `json:"brief"`
 	DependsOn []string `json:"depends_on"`
 	StackOn   string   `json:"stack_on"`
+	Jira      string   `json:"jira"`
 }
 
 // parseCreateTicket decodes a CreateTicket call, strictly: a missing required
@@ -158,6 +165,7 @@ func parseCreateTicket(raw json.RawMessage) (createTicketArgs, error) {
 	a.Title = strings.TrimSpace(a.Title)
 	a.Brief = strings.TrimSpace(a.Brief)
 	a.StackOn = strings.TrimSpace(a.StackOn)
+	a.Jira = strings.TrimSpace(a.Jira)
 
 	var missing []string
 	if a.ID == "" {
@@ -213,6 +221,7 @@ func (m *Model) startCreateTicket(p *mcp.Pending) {
 		Body:      args.Brief,
 		DependsOn: args.DependsOn,
 		StackOn:   args.StackOn,
+		Jira:      args.Jira,
 	})
 	if err != nil {
 		p.Resolve(mcp.Answer{Text: "CreateTicket failed: " + err.Error()})
@@ -228,12 +237,16 @@ func (m *Model) startCreateTicket(p *mcp.Pending) {
 		p.Resolve(mcp.Answer{Text: fmt.Sprintf(
 			"ticket %s created at %s and committed locally, but the push failed — the human should push "+
 				"(a protected main branch rejecting a direct push is normal here, not an error)", args.ID, path)})
+	case errors.Is(commitErr, tickets.ErrPushSkipped):
+		p.Resolve(mcp.Answer{Text: fmt.Sprintf(
+			"ticket %s created at %s and committed locally, but not pushed: %s", args.ID, path, commitErr.Error())})
 	default:
 		p.Resolve(mcp.Answer{Text: fmt.Sprintf(
 			"ticket %s created at %s, but committing it failed: %s", args.ID, path, commitErr.Error())})
 		return
 	}
 	m.appendEntry(entry{kind: eGood, body: fmt.Sprintf("ticket %s created", args.ID)})
+	m.emitFlowDiagram()
 }
 
 // ticketFilePath names the file CreateTicket just wrote, mirroring
@@ -266,6 +279,82 @@ func ticketSlugify(title string) string {
 	return slug
 }
 
+// --- flow diagram ---
+
+// flowBody renders the board as the ascii lanes followed by a fenced mermaid
+// block — the shared shape emitFlowDiagram and /flow both append as an eFlow
+// entry's body, so the two can never disagree about what a flow entry looks
+// like. mermaid and ascii are returned separately so a caller can dedupe, set
+// raw, or cache the projection without re-deriving either from the fenced
+// body.
+func flowBody(ts []tickets.Ticket) (body, mermaid, ascii string) {
+	mermaid = tickets.Mermaid(ts)
+	ascii = tickets.ASCII(ts)
+	body = ascii + "\n\n```mermaid\n" + mermaid + "\n```"
+	return body, mermaid, ascii
+}
+
+// projectTickets is Frame's Ticket projection of the board — the summary a
+// client lists, not the full brief ReadTickets/UpdateTicket hand the model.
+func projectTickets(ts []tickets.Ticket) []Ticket {
+	out := make([]Ticket, 0, len(ts))
+	for _, t := range ts {
+		out = append(out, Ticket{ID: t.ID, Title: t.Title, Status: t.Status, PRURL: t.PR})
+	}
+	return out
+}
+
+// refreshTicketCache is the ticket board's only read path: it re-lists the
+// store once and refreshes cachedTickets/cachedFlow, the mirror Frame
+// projects — mirroring how syncFleet keeps a mirror for the fleet, except
+// triggered by CreateTicket/UpdateTicket's own success rather than an event,
+// because there is no other way the board changes during a run. That keeps
+// Frame a genuine read of the model's own state: it runs once per tick
+// (120ms) with a webview attached, and hitting disk on every one of those
+// ticks — twice, once each for Tickets and Flow — was what made an idle run
+// with no board change still re-read and re-parse every ticket file twice a
+// tick and regenerate both diagrams from possibly-disagreeing reads.
+//
+// A nil store or a read error leaves the cache exactly as it was, matching
+// how the callers already treat both as "skip silently, not fatal".
+func (m *Model) refreshTicketCache() (ts []tickets.Ticket, body, mermaid string, err error) {
+	if m.tickets == nil {
+		return nil, "", "", nil
+	}
+	ts, err = m.tickets.List()
+	if err != nil {
+		return nil, "", "", err
+	}
+	var ascii string
+	body, mermaid, ascii = flowBody(ts)
+	m.cachedTickets = projectTickets(ts)
+	m.cachedFlow = Flow{Mermaid: mermaid, ASCII: ascii}
+	return ts, body, mermaid, nil
+}
+
+// emitFlowDiagram redraws the ticket flow into the transcript after a
+// CreateTicket/UpdateTicket milestone. It is best-effort UI decoration, not
+// the tool's answer — a nil store or a read error is silently skipped rather
+// than surfaced — and it dedupes against the last diagram emitted so a
+// milestone that leaves the board's shape unchanged (e.g. re-marking a
+// ticket with the status it already had) does not print the same diagram
+// twice. The cache refreshes unconditionally, even when deduped: a field the
+// diagram does not draw (PR, branch, jira, note) can still have changed.
+func (m *Model) emitFlowDiagram() {
+	if m.tickets == nil {
+		return
+	}
+	_, body, mermaid, err := m.refreshTicketCache()
+	if err != nil {
+		return
+	}
+	if mermaid == m.lastFlowDiagram {
+		return
+	}
+	m.lastFlowDiagram = mermaid
+	m.appendEntry(entry{kind: eFlow, body: body, raw: mermaid, lang: "mermaid"})
+}
+
 // --- rendering ---
 
 // renderTicketBoard renders the whole board as cheap markdown: one block per
@@ -277,7 +366,7 @@ func renderTicketBoard(ts []tickets.Ticket) string {
 		return "no tickets yet — .acy/tickets is empty"
 	}
 	var b strings.Builder
-	if chains := stackChains(ts); len(chains) > 0 {
+	if chains := tickets.StackChains(ts); len(chains) > 0 {
 		for _, chain := range chains {
 			fmt.Fprintf(&b, "stack: %s\n", strings.Join(chain, " -> "))
 		}
@@ -295,6 +384,9 @@ func renderTicketBoard(ts []tickets.Ticket) string {
 		if t.PR != "" {
 			fmt.Fprintf(&b, " · pr: %s", t.PR)
 		}
+		if t.Jira != "" {
+			fmt.Fprintf(&b, " · jira: %s", t.Jira)
+		}
 		if len(t.DependsOn) > 0 {
 			fmt.Fprintf(&b, " · depends_on: %s", strings.Join(t.DependsOn, ", "))
 		}
@@ -309,40 +401,6 @@ func renderTicketBoard(ts []tickets.Ticket) string {
 	return b.String()
 }
 
-// stackChains walks the stack_on relation across the whole board and returns
-// one ordered id slice per chain of length >= 2, root first. At most one
-// ticket may claim a given stack_on parent — tickets.Store enforces that on
-// Put — so this relation can only ever branch into disjoint chains, never a
-// tree, and a simple parent-to-single-child map is enough to walk it.
-func stackChains(ts []tickets.Ticket) [][]string {
-	childOf := make(map[string]string, len(ts))
-	for _, t := range ts {
-		if t.StackOn != "" {
-			childOf[t.StackOn] = t.ID
-		}
-	}
-
-	var chains [][]string
-	for _, t := range ts {
-		if t.StackOn != "" {
-			continue // not a root
-		}
-		chain := []string{t.ID}
-		for cur := t.ID; ; {
-			next, ok := childOf[cur]
-			if !ok {
-				break
-			}
-			chain = append(chain, next)
-			cur = next
-		}
-		if len(chain) >= 2 {
-			chains = append(chains, chain)
-		}
-	}
-	return chains
-}
-
 // ticketsReport is /tickets's body: the same board ReadTickets hands the
 // architect, re-read so a human checking in sees the current board rather
 // than whatever it looked like when the run started.
@@ -355,4 +413,22 @@ func (m *Model) ticketsReport() string {
 		return "could not read tickets: " + err.Error()
 	}
 	return renderTicketBoard(ts)
+}
+
+// runFlowCommand answers /flow: an explicit request to redraw the ticket
+// flow, so unlike emitFlowDiagram it always appends — it deliberately never
+// touches m.lastFlowDiagram, which exists only to dedupe the automatic
+// milestone emission.
+func (m *Model) runFlowCommand() {
+	if m.tickets == nil {
+		m.appendEntry(entry{kind: eMeta, body: "no ticket store configured in this session"})
+		return
+	}
+	ts, err := m.tickets.List()
+	if err != nil {
+		m.appendEntry(entry{kind: eMeta, body: "could not read tickets: " + err.Error()})
+		return
+	}
+	body, mermaid, _ := flowBody(ts)
+	m.appendEntry(entry{kind: eFlow, body: body, raw: mermaid, lang: "mermaid"})
 }

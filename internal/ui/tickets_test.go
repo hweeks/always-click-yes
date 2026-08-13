@@ -32,7 +32,7 @@ type fakeTicketStore struct {
 	commitMsgs []string
 }
 
-type ticketUpdateCall struct{ id, status, note, branch, pr string }
+type ticketUpdateCall struct{ id, status, note, branch, pr, jira string }
 
 func (f *fakeTicketStore) List() ([]tickets.Ticket, error) {
 	f.mu.Lock()
@@ -47,10 +47,10 @@ func (f *fakeTicketStore) Put(t tickets.Ticket) error {
 	return f.putErr
 }
 
-func (f *fakeTicketStore) UpdateFields(id, status, note, branch, pr string) error {
+func (f *fakeTicketStore) UpdateFields(id, status, note, branch, pr, jira string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.updates = append(f.updates, ticketUpdateCall{id, status, note, branch, pr})
+	f.updates = append(f.updates, ticketUpdateCall{id, status, note, branch, pr, jira})
 	return f.updateErr
 }
 
@@ -93,6 +93,24 @@ func TestReadTicketsRendersBoard(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("board = %q, missing %q", got, want)
 		}
+	}
+}
+
+func TestRenderTicketBoardIncludesJiraWhenSet(t *testing.T) {
+	got := renderTicketBoard([]tickets.Ticket{
+		{ID: "t1", Title: "add x", Status: tickets.StatusTodo, Jira: "ENG-1"},
+	})
+	if !strings.Contains(got, "jira: ENG-1") {
+		t.Errorf("board = %q, want it to contain %q", got, "jira: ENG-1")
+	}
+}
+
+func TestRenderTicketBoardOmitsJiraWhenUnset(t *testing.T) {
+	got := renderTicketBoard([]tickets.Ticket{
+		{ID: "t1", Title: "add x", Status: tickets.StatusTodo},
+	})
+	if strings.Contains(got, "jira:") {
+		t.Errorf("board = %q, want no \"jira:\" substring", got)
 	}
 }
 
@@ -187,7 +205,7 @@ func TestUpdateTicketUpdatesAndCommits(t *testing.T) {
 	p, reply := ticketPending(mcp.ToolUpdateTicket, `{"id":"t1","status":"in-review","note":"PR opened"}`)
 	m.startUpdateTicket(p)
 
-	if len(fake.updates) != 1 || fake.updates[0] != (ticketUpdateCall{"t1", "in-review", "PR opened", "", ""}) {
+	if len(fake.updates) != 1 || fake.updates[0] != (ticketUpdateCall{"t1", "in-review", "PR opened", "", "", ""}) {
 		t.Fatalf("update not applied: %+v", fake.updates)
 	}
 	if len(fake.commitMsgs) != 1 || !strings.Contains(fake.commitMsgs[0], "t1") || !strings.Contains(fake.commitMsgs[0], "in-review") {
@@ -199,8 +217,12 @@ func TestUpdateTicketUpdatesAndCommits(t *testing.T) {
 			t.Errorf("answer = %q, missing %q", got, want)
 		}
 	}
-	if len(m.entries) != 1 {
-		t.Fatalf("want 1 transcript entry, got %d", len(m.entries))
+	// The eGood milestone notice, plus the flow diagram it triggers.
+	if len(m.entries) != 2 {
+		t.Fatalf("want 2 transcript entries, got %d", len(m.entries))
+	}
+	if m.entries[1].kind != eFlow {
+		t.Errorf("second entry kind = %v, want eFlow", m.entries[1].kind)
 	}
 }
 
@@ -215,8 +237,23 @@ func TestUpdateTicketPassesBranchAndPRWhenSet(t *testing.T) {
 	m.startUpdateTicket(p)
 	answer(t, reply)
 
-	if len(fake.updates) != 1 || fake.updates[0] != (ticketUpdateCall{"t1", "in-progress", "", "agent/t1", "https://example.com/pr/1"}) {
+	if len(fake.updates) != 1 || fake.updates[0] != (ticketUpdateCall{"t1", "in-progress", "", "agent/t1", "https://example.com/pr/1", ""}) {
 		t.Fatalf("update not applied with branch/pr: %+v", fake.updates)
+	}
+}
+
+// UpdateTicket accepts an optional jira and threads it through to the store
+// untouched, the same as branch and pr.
+func TestUpdateTicketPassesJiraWhenSet(t *testing.T) {
+	fake := &fakeTicketStore{}
+	m := &Model{tickets: fake, ctx: context.Background()}
+	p, reply := ticketPending(mcp.ToolUpdateTicket,
+		`{"id":"t1","status":"in-progress","jira":"ENG-2"}`)
+	m.startUpdateTicket(p)
+	answer(t, reply)
+
+	if len(fake.updates) != 1 || fake.updates[0].jira != "ENG-2" {
+		t.Fatalf("update not applied with jira: %+v", fake.updates)
 	}
 }
 
@@ -247,8 +284,9 @@ func TestUpdateTicketPushFailureStillSucceeds(t *testing.T) {
 			t.Errorf("answer = %q, missing %q", got, want)
 		}
 	}
-	if len(m.entries) != 1 {
-		t.Fatalf("want 1 transcript entry even though the push failed, got %d", len(m.entries))
+	// The eGood milestone notice, plus the flow diagram it triggers.
+	if len(m.entries) != 2 {
+		t.Fatalf("want 2 transcript entries even though the push failed, got %d", len(m.entries))
 	}
 }
 
@@ -349,8 +387,27 @@ func TestCreateTicketCreatesAndCommits(t *testing.T) {
 	if reply2 := answer(t, reply); !strings.Contains(reply2, "t1") {
 		t.Errorf("answer = %q, missing the ticket id", reply2)
 	}
-	if len(m.entries) != 1 {
-		t.Fatalf("want 1 transcript entry, got %d", len(m.entries))
+	// The eGood milestone notice, plus the flow diagram it triggers.
+	if len(m.entries) != 2 {
+		t.Fatalf("want 2 transcript entries, got %d", len(m.entries))
+	}
+	if m.entries[1].kind != eFlow {
+		t.Errorf("second entry kind = %v, want eFlow", m.entries[1].kind)
+	}
+}
+
+// CreateTicket accepts an optional jira and passes it through to the store's
+// Put untouched, the same as depends_on and stack_on.
+func TestCreateTicketPassesJira(t *testing.T) {
+	fake := &fakeTicketStore{}
+	m := &Model{tickets: fake, ctx: context.Background()}
+	p, reply := ticketPending(mcp.ToolCreateTicket,
+		`{"id":"t1","title":"add x","brief":"do the thing","jira":"ENG-1"}`)
+	m.startCreateTicket(p)
+	answer(t, reply)
+
+	if len(fake.puts) != 1 || fake.puts[0].Jira != "ENG-1" {
+		t.Fatalf("ticket put Jira = %+v, want ENG-1", fake.puts)
 	}
 }
 
@@ -369,8 +426,9 @@ func TestCreateTicketPushFailureStillSucceeds(t *testing.T) {
 			t.Errorf("answer = %q, missing %q", got, want)
 		}
 	}
-	if len(m.entries) != 1 {
-		t.Fatalf("want 1 transcript entry even though the push failed, got %d", len(m.entries))
+	// The eGood milestone notice, plus the flow diagram it triggers.
+	if len(m.entries) != 2 {
+		t.Fatalf("want 2 transcript entries even though the push failed, got %d", len(m.entries))
 	}
 }
 
@@ -460,6 +518,104 @@ func TestTicketsSlashCommandWithoutStore(t *testing.T) {
 	}
 }
 
+// --- flow diagram ---
+
+// countKind counts how many entries carry the given kind, so a dedupe test
+// can compare a before/after count rather than assuming a fixed index.
+func countKind(entries []entry, k ekind) int {
+	n := 0
+	for _, e := range entries {
+		if e.kind == k {
+			n++
+		}
+	}
+	return n
+}
+
+func TestUpdateTicketMilestoneEmitsFlowDiagram(t *testing.T) {
+	fake := &fakeTicketStore{list: []tickets.Ticket{{ID: "t1", Title: "add x", Status: tickets.StatusTodo}}}
+	m := &Model{tickets: fake, ctx: context.Background()}
+	p, reply := ticketPending(mcp.ToolUpdateTicket, `{"id":"t1","status":"in-progress"}`)
+	m.startUpdateTicket(p)
+	answer(t, reply)
+
+	if got := countKind(m.entries, eFlow); got != 1 {
+		t.Fatalf("eFlow entries = %d, want 1", got)
+	}
+}
+
+// A milestone that leaves the board's shape unchanged — here, a second
+// UpdateTicket call to the same status the fake store already reports — must
+// not print the same diagram again.
+func TestUpdateTicketMilestoneDedupesUnchangedBoard(t *testing.T) {
+	fake := &fakeTicketStore{list: []tickets.Ticket{{ID: "t1", Title: "add x", Status: tickets.StatusInProgress}}}
+	m := &Model{tickets: fake, ctx: context.Background()}
+
+	p1, reply1 := ticketPending(mcp.ToolUpdateTicket, `{"id":"t1","status":"in-progress"}`)
+	m.startUpdateTicket(p1)
+	answer(t, reply1)
+	if got := countKind(m.entries, eFlow); got != 1 {
+		t.Fatalf("eFlow entries after first update = %d, want 1", got)
+	}
+
+	p2, reply2 := ticketPending(mcp.ToolUpdateTicket, `{"id":"t1","status":"in-progress"}`)
+	m.startUpdateTicket(p2)
+	answer(t, reply2)
+	if got := countKind(m.entries, eFlow); got != 1 {
+		t.Fatalf("eFlow entries after an unchanged-board update = %d, want still 1", got)
+	}
+}
+
+// --- /flow ---
+
+func TestFlowSlashCommandWithoutStore(t *testing.T) {
+	m := New(nil, Config{})
+	if cmd := m.runCommand("flow", ""); cmd != nil {
+		t.Error("runCommand(flow) should not return a tea.Cmd")
+	}
+	got := m.entries[len(m.entries)-1].body
+	if !strings.Contains(got, "no ticket store") {
+		t.Errorf("flow report = %q, want it to say no store is configured", got)
+	}
+}
+
+func TestFlowSlashCommandRendersDiagram(t *testing.T) {
+	fake := &fakeTicketStore{list: []tickets.Ticket{{ID: "t1", Title: "add x", Status: tickets.StatusTodo}}}
+	m := New(nil, Config{Tickets: fake})
+	before := len(m.entries)
+
+	if cmd := m.runCommand("flow", ""); cmd != nil {
+		t.Error("runCommand(flow) should not return a tea.Cmd")
+	}
+	if len(m.entries) != before+1 {
+		t.Fatalf("entries = %d, want %d (one flow diagram appended)", len(m.entries), before+1)
+	}
+	got := m.entries[len(m.entries)-1]
+	if got.kind != eFlow {
+		t.Errorf("entry kind = %v, want eFlow", got.kind)
+	}
+	if got.raw == "" {
+		t.Error("raw should carry the mermaid source, not be empty")
+	}
+	if !strings.Contains(got.body, "```mermaid") {
+		t.Errorf("body = %q, want it to contain a fenced mermaid block", got.body)
+	}
+}
+
+// /flow is an explicit request, unlike the milestone emission — it must
+// print every time regardless of whether the board changed in between.
+func TestFlowSlashCommandAlwaysPrintsEvenWhenUnchanged(t *testing.T) {
+	fake := &fakeTicketStore{list: []tickets.Ticket{{ID: "t1", Title: "add x", Status: tickets.StatusTodo}}}
+	m := New(nil, Config{Tickets: fake})
+
+	m.runCommand("flow", "")
+	m.runCommand("flow", "")
+
+	if got := countKind(m.entries, eFlow); got != 2 {
+		t.Fatalf("eFlow entries after two /flow calls = %d, want 2", got)
+	}
+}
+
 // --- routing ---
 
 // The ask socket must dispatch all three ticket tools through the real
@@ -528,6 +684,7 @@ func TestFrameCarriesTickets(t *testing.T) {
 		{ID: "t1", Title: "add x", Status: tickets.StatusInReview, PR: "https://example.com/pr/1"},
 	}}
 	m := &Model{tickets: fake}
+	m.refreshTicketCache()
 
 	fr := m.Frame()
 	if len(fr.Tickets) != 1 {
@@ -547,5 +704,96 @@ func TestFrameTicketsEmptyWithoutStore(t *testing.T) {
 	}
 	if len(fr.Tickets) != 0 {
 		t.Errorf("want no tickets with no store wired, got %d", len(fr.Tickets))
+	}
+}
+
+// The board redrawn as mermaid and ascii is a separate projection from the
+// ticket list, kept current the same way — a read of the store, not a mirror.
+func TestFrameCarriesFlow(t *testing.T) {
+	fake := &fakeTicketStore{list: []tickets.Ticket{
+		{ID: "t1", Title: "add x", Status: tickets.StatusInReview},
+	}}
+	m := &Model{tickets: fake}
+	m.refreshTicketCache()
+
+	fl := m.Frame().Flow
+	if fl.Mermaid == "" || !strings.Contains(fl.Mermaid, "t1") {
+		t.Errorf("flow.mermaid = %q, want the board's mermaid source", fl.Mermaid)
+	}
+	if fl.ASCII == "" || !strings.Contains(fl.ASCII, "t1") {
+		t.Errorf("flow.ascii = %q, want the board's ascii lanes", fl.ASCII)
+	}
+}
+
+// With no ticket store wired, flow is the zero value — both fields empty —
+// mirroring how Tickets projects as no tickets.
+func TestFrameFlowEmptyWithoutStore(t *testing.T) {
+	m := &Model{}
+	fl := m.Frame().Flow
+	if fl.Mermaid != "" || fl.ASCII != "" {
+		t.Errorf("flow = %+v, want the zero value with no store wired", fl)
+	}
+}
+
+// internal/hub relies on an idle run's frame marshalling to identical bytes
+// twice in a row, or it would never fall silent. Flow projects the cached
+// mirror refreshTicketCache keeps rather than reading the board on every
+// call, so this pins that two calls against an unchanged cache produce
+// byte-identical JSON, not just equal-looking structs.
+func TestFrameFlowIsByteStableAcrossRepeatedCalls(t *testing.T) {
+	fake := &fakeTicketStore{list: []tickets.Ticket{
+		{ID: "t1", Title: "add x", Status: tickets.StatusInProgress},
+		{ID: "t2", Title: "add y", Status: tickets.StatusTodo, DependsOn: []string{"t1"}},
+	}}
+	m := New(nil, Config{Tickets: fake})
+	m.now = frameTime
+
+	first := mustMarshal(t, m.Frame())
+	second := mustMarshal(t, m.Frame())
+	if first != second {
+		t.Fatalf("two consecutive Frame() calls on an unchanged board diverged:\n1: %s\n2: %s", first, second)
+	}
+}
+
+// countingTicketStore wraps fakeTicketStore to count List() calls, so a test
+// can assert Frame() makes none of its own rather than just inferring it from
+// output shape.
+type countingTicketStore struct {
+	*fakeTicketStore
+	listCalls int
+}
+
+func (c *countingTicketStore) List() ([]tickets.Ticket, error) {
+	c.listCalls++
+	return c.fakeTicketStore.List()
+}
+
+// Frame() must not touch the ticket store at all: it used to call List()
+// twice a tick (once each for Tickets and Flow), so an idle run with a
+// webview subscriber attached re-read and re-parsed every ticket file on
+// disk twice every 120ms. The board only changes when CreateTicket or
+// UpdateTicket changes it — see refreshTicketCache — so Frame projects the
+// cached mirror instead. New()'s one-time seed read is allowed; nothing
+// after it is.
+func TestFrameDoesNotReadTicketStoreOnIdleTicks(t *testing.T) {
+	counting := &countingTicketStore{fakeTicketStore: &fakeTicketStore{list: []tickets.Ticket{
+		{ID: "t1", Title: "add x", Status: tickets.StatusInProgress},
+	}}}
+	m := New(nil, Config{Tickets: counting})
+	m.now = frameTime
+	seeded := counting.listCalls
+	if seeded == 0 {
+		t.Fatal("New() should have seeded the cache with one read")
+	}
+
+	for i := 1; i <= 5; i++ {
+		m.now = frameTime.Add(time.Duration(i) * tickInterval)
+		_ = m.Frame()
+		_ = m.Frame().Tickets
+		_ = m.Frame().Flow
+	}
+
+	if counting.listCalls != seeded {
+		t.Fatalf("ticket store List() called %d times across 5 idle ticks (each rendering Frame, Tickets and Flow), want still %d — Frame must not read the store", counting.listCalls, seeded)
 	}
 }

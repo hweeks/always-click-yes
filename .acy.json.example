@@ -1,4 +1,14 @@
 {
+  "jira": {
+    "server": "jira",
+    "mcp": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "https://mcp.atlassian.com/v1/sse"],
+      "env": { "JIRA_API_TOKEN": "$JIRA_API_TOKEN" }
+    },
+    "projectKey": "ENG",
+    "site": "https://your-org.atlassian.net"
+  },
   "fleet": {
     "baseBranch": "main",
     "prCap": 4,

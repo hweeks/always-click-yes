@@ -88,6 +88,8 @@ func (m *Model) runCommand(name, args string) tea.Cmd {
 		m.appendEntry(entry{kind: eMeta, body: m.fleetReport()})
 	case "tickets":
 		m.appendEntry(entry{kind: eMeta, body: m.ticketsReport()})
+	case "flow":
+		m.runFlowCommand()
 	case "model":
 		if args == "" {
 			cur := m.nextModel

@@ -81,6 +81,7 @@ func resolveArchFlags(f *supervisor.Flags, changed func(string) bool) (*config.F
 	if f.Model == "" {
 		f.Model = defaultArchModel
 	}
+	f.Jira = file.Jira
 	return file.Fleet, nil
 }
 
@@ -168,7 +169,9 @@ func runArch(ctx context.Context, f supervisor.Flags, changed func(string) bool)
 	manager := fleet.NewManager(*fleetCfg, fleet.ForHost, opts...)
 	f.ArchMode = true
 	f.Fleet = manager
-	f.Tickets = tickets.New(cwd, fleetCfg.TicketCommit, gitops.DefaultRunner)
+	ticketStore := tickets.New(cwd, fleetCfg.TicketCommit, gitops.DefaultRunner)
+	ticketStore.BaseBranch = fleetCfg.BaseBranch
+	f.Tickets = ticketStore
 	f.GitRunner = gitops.DefaultRunner
 	f.Trunk = fleetCfg.BaseBranch
 
