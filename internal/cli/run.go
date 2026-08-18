@@ -46,6 +46,8 @@ func newRunCmd() *cobra.Command {
 func addRunFlags(cmd *cobra.Command, f *supervisor.Flags) {
 	cmd.Flags().StringVar(&f.Model, "model", "", "model to use (e.g. sonnet, opus); default = claude's default")
 	cmd.Flags().StringVar(&f.Bin, "claude-bin", "claude", "path to the claude binary")
+	cmd.Flags().StringVar(&f.Agent, "agent", "claude", "which coding-agent CLI to supervise: claude or codex")
+	cmd.Flags().StringVar(&f.CodexBin, "codex-bin", "codex", "path to the codex binary")
 	cmd.Flags().DurationVar(&f.Countdown, "countdown", 30*time.Second, "auto-approve delay per gated tool")
 	cmd.Flags().StringVar(&f.LogPath, "log", "acy-debug.log", "debug log file (raw event stream, gate decisions, transitions); empty to disable")
 	cmd.Flags().IntVar(&f.MaxLines, "max-lines", 10, "max lines shown per tool call/result/thinking block in the transcript")

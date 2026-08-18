@@ -57,7 +57,7 @@ func resumeModel(t *testing.T, snap state.Snapshot, hasSnap bool, evs []driver.E
 		Ctx:       context.Background(),
 		Countdown: 30 * time.Second,
 		Cwd:       "/proj",
-		Launcher: func(context.Context, LaunchSpec) (*driver.Driver, error) {
+		Launcher: func(context.Context, LaunchSpec) (Agent, error) {
 			return driver.New(driver.Options{}), nil // never started; these tests don't run the cmd
 		},
 		LoadState: func(string) (state.Snapshot, bool, error) { return snap, hasSnap, nil },

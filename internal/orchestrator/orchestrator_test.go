@@ -368,6 +368,69 @@ func TestTaskForAttributesBySessionID(t *testing.T) {
 	}
 }
 
+// fakeCodexChild is a fakeChild that also reports its own, server-assigned
+// session id — standing in for *codex.Driver, whose thread id (unlike
+// claude's caller-chosen --session-id) is only known once Start returns.
+type fakeCodexChild struct {
+	*fakeChild
+	sessionID string
+}
+
+func (f *fakeCodexChild) SessionID() string { return f.sessionID }
+
+// TestRunRekeysGateAttributionToACodexChildsRealSessionID proves the fix
+// this exact scenario needs: a codex child never adopts the session id
+// orchestrator pre-assigned (codex has no --session-id equivalent — the
+// server assigns thread/start's own id), so without re-keying, TaskFor would
+// never recognize the child's own approval requests as coming from a child
+// at all. On a codex run that misattribution is not cosmetic: it is read as
+// "the parent," and with ParentNoExec set, every one of the child's tool
+// calls would be denied outright instead of counted down.
+func TestRunRekeysGateAttributionToACodexChildsRealSessionID(t *testing.T) {
+	const realSessionID = "codex-thread-abc"
+	var mu sync.Mutex
+	var spawnedPreAssignedID string
+
+	o := New(func(_ context.Context, t Task) (Child, error) {
+		mu.Lock()
+		spawnedPreAssignedID = t.SessionID
+		mu.Unlock()
+		return &fakeCodexChild{fakeChild: newFakeChild(), sessionID: realSessionID}, nil
+	}, 1)
+	defer o.Close()
+
+	p, answers := dispatchCall(t, `{"title":"x","instruction":"do x"}`)
+	st, err := o.Dispatch(t.Context(), p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preAssignedID := st.Task.SessionID
+	if preAssignedID == "" {
+		t.Fatal("Dispatch must still hand the child a pre-assigned session id")
+	}
+
+	// state flips to "running" synchronously inside pump(), before the run()
+	// goroutine it just started has even called spawn — so wait on the
+	// rekey's own effect instead of the task's state.
+	waitForTaskFor(t, o, realSessionID, st.Task.ID)
+
+	mu.Lock()
+	got := spawnedPreAssignedID
+	mu.Unlock()
+	if got != preAssignedID {
+		t.Fatalf("spawn was called with SessionID %q, want the pre-assigned %q", got, preAssignedID)
+	}
+	if id, ok := o.TaskFor(realSessionID); !ok || id != st.Task.ID {
+		t.Errorf("TaskFor(%q) = %q,%v; want %q,true — the child's real session id must be attributed", realSessionID, id, ok, st.Task.ID)
+	}
+	if _, ok := o.TaskFor(preAssignedID); ok {
+		t.Errorf("TaskFor(%q) still matches after rekeying — the stale pre-assigned id must be forgotten", preAssignedID)
+	}
+
+	o.CancelAll("test done")
+	waitAnswer(t, answers)
+}
+
 // With limit 1 the second dispatch waits rather than running concurrently.
 func TestSecondDispatchQueuesBehindTheFirst(t *testing.T) {
 	var mu sync.Mutex
@@ -506,4 +569,20 @@ func waitForState(t *testing.T, o *Orchestrator, id, want string) {
 		time.Sleep(2 * time.Millisecond)
 	}
 	t.Fatalf("task %s never reached state %q", id, want)
+}
+
+// waitForTaskFor polls TaskFor(sessionID) until it attributes to wantTaskID
+// or the deadline passes. Used where the effect under test — rekeying —
+// happens inside the run goroutine sometime after spawn returns, with no
+// state transition of its own to poll on.
+func waitForTaskFor(t *testing.T, o *Orchestrator, sessionID, wantTaskID string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if id, ok := o.TaskFor(sessionID); ok && id == wantTaskID {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("TaskFor(%q) never attributed to %q", sessionID, wantTaskID)
 }

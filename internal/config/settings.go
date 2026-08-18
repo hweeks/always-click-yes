@@ -52,6 +52,17 @@ type ExtraMCPServer struct {
 	Env     map[string]string
 }
 
+// MCPServerArgv returns the command and args that invoke acy's own binary as
+// an MCP server for the given role: `<exePath> mcp --socket <socketPath>
+// --role <role>`. WriteMCPConfig uses this to build claude's --mcp-config
+// file; internal/supervisor's codex path builds thread/start's inline
+// config.mcp_servers overlay from the exact same call instead of writing a
+// file — one construction, so the two can never invoke acy's own MCP server
+// two different ways.
+func MCPServerArgv(exePath, socketPath string, role mcp.Role) (command string, args []string) {
+	return exePath, []string{"mcp", "--socket", socketPath, "--role", string(role)}
+}
+
 // WriteMCPConfig writes the --mcp-config JSON registering acy's own binary as an
 // MCP server, so claude gains the mcp__acy__* tools (AskUserQuestion, PresentPlan)
 // that `claude -p` otherwise has no equivalent of, plus any extra servers a
@@ -65,10 +76,11 @@ type ExtraMCPServer struct {
 // inherits nothing: it is launched with the child config, so it never sees
 // Dispatch and cannot spawn children of its own.
 func WriteMCPConfig(dir, exePath, socketPath string, role mcp.Role, extra ...ExtraMCPServer) (string, error) {
+	command, args := MCPServerArgv(exePath, socketPath, role)
 	mcpServers := map[string]any{
 		mcp.ServerName: map[string]any{
-			"command": exePath,
-			"args":    []string{"mcp", "--socket", socketPath, "--role", string(role)},
+			"command": command,
+			"args":    args,
 		},
 	}
 	for _, e := range extra {

@@ -46,7 +46,10 @@ type LaunchSpec struct {
 // Launcher starts a claude driver for a launch spec. For PhaseAutoRun the
 // launcher enables hooks and the default permission mode; for PhasePlan it uses
 // plan mode without hooks. ResumeID continues an existing session in either mode.
-type Launcher func(ctx context.Context, spec LaunchSpec) (*driver.Driver, error)
+//
+// It returns Agent rather than *driver.Driver so a second CLI backend can be
+// slotted in behind the same wiring — see agent.go.
+type Launcher func(ctx context.Context, spec LaunchSpec) (Agent, error)
 
 // ParentSystemPrompt is appended to the supervising session's system prompt.
 //
@@ -239,7 +242,7 @@ func kickoffPromptFor(hasFleet bool) string {
 // --- launch plumbing ---
 
 type driverReadyMsg struct {
-	drv   *driver.Driver
+	drv   Agent
 	phase Phase
 }
 

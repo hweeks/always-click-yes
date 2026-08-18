@@ -32,6 +32,13 @@ type File struct {
 	GatewayBin string    `json:"gatewayBin,omitempty"`
 	GatewayURL string    `json:"gatewayUrl,omitempty"`
 
+	// Agent selects which coding-agent CLI acy supervises ("claude" or
+	// "codex") — a different axis from Provider, which selects which model
+	// backend claude itself talks to. CodexBin is codex's equivalent of
+	// ClaudeBin.
+	Agent    string `json:"agent,omitempty"`
+	CodexBin string `json:"codexBin,omitempty"`
+
 	// Child knobs: a dispatched task is a separate process doing the actual
 	// work, so it can be priced and paced separately from the session you talk
 	// to. childModel is usually the most effective one — children do the bulk

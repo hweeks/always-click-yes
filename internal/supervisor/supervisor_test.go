@@ -1,6 +1,8 @@
 package supervisor
 
 import (
+	"context"
+	"strings"
 	"testing"
 
 	"github.com/hweeks/always-click-yes/internal/state"
@@ -54,4 +56,47 @@ func TestResumeTargetContinueWithNothingToContinue(t *testing.T) {
 	if _, err := resumeTarget(Flags{Continue: true}, "/proj"); err == nil {
 		t.Fatal("--continue with no prior session should be a clear error, not a silent cold start")
 	}
+}
+
+// An unknown --agent must abort loudly, the same way an unknown --provider
+// does — this repo's config parsing is strict on purpose. Fails before any
+// process is spawned, so it needs no real claude/codex binary.
+func TestNewSupervisorRejectsUnknownAgent(t *testing.T) {
+	_, err := NewSupervisor(context.Background(), Flags{Agent: "bogus"})
+	if err == nil {
+		t.Fatal("unknown --agent should be an error")
+	}
+	if !strings.Contains(err.Error(), `"bogus"`) {
+		t.Errorf("error should name the bad value: %v", err)
+	}
+	if !strings.Contains(err.Error(), "claude") || !strings.Contains(err.Error(), "codex") {
+		t.Errorf("error should name the valid choices: %v", err)
+	}
+}
+
+// --agent codex only ever makes sense against the anthropic provider: the
+// gateway acy would otherwise start speaks the Anthropic Messages API, which
+// a codex process has no use for at all.
+func TestNewSupervisorRejectsCodexWithNonAnthropicProvider(t *testing.T) {
+	_, err := NewSupervisor(context.Background(), Flags{Agent: "codex", Provider: "openai"})
+	if err == nil {
+		t.Fatal("--agent codex --provider openai should be an error")
+	}
+	if !strings.Contains(err.Error(), "openai") {
+		t.Errorf("error should name the offending provider: %v", err)
+	}
+	if !strings.Contains(err.Error(), "Anthropic Messages") {
+		t.Errorf("error should explain the gateway incompatibility: %v", err)
+	}
+}
+
+// --agent codex alone (provider left at its anthropic default) must be
+// accepted — this task only adds the config surface, it does not yet make
+// codex do anything, so nothing here should require a real codex binary.
+func TestNewSupervisorAcceptsCodexAlone(t *testing.T) {
+	sup, err := NewSupervisor(context.Background(), Flags{Agent: "codex"})
+	if err != nil {
+		t.Fatalf("--agent codex alone should be accepted: %v", err)
+	}
+	sup.Close()
 }

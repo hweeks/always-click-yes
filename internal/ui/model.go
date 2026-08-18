@@ -109,6 +109,20 @@ type Config struct {
 	// chip, cwd already baked in by the caller. Nil disables the badge:
 	// internal/ui must never shell out to git itself.
 	Branch func() (string, error)
+
+	// ParentNoExec reconstructs, at the gate, a guarantee that on claude is
+	// structural: the supervising session's registry simply has no Bash in it
+	// (see AGENTS.md, "Why the parent cannot write"). Codex has no equivalent
+	// of --tools Read,Grep,Glob — sandbox and approval policy only ever wrap
+	// an ever-present shell tool (docs/codex-cli-findings.md §4) — so on a
+	// codex-backed run the parent *can* ask to run a shell command, and this
+	// is the only thing standing between that ask and a countdown. It is
+	// therefore weaker in kind, not just in degree: a bug here removes a
+	// constraint, where on claude the same mistake would have nothing to
+	// remove. Only `acy`'s codex launch path ever sets this true; every
+	// claude path leaves it false, so every existing claude behavior is
+	// unchanged. See enqueue in gate.go for where it is consulted.
+	ParentNoExec bool
 }
 
 // readOnlyParentTools are the tools that get no countdown when the supervising
@@ -143,7 +157,7 @@ type gateItem struct {
 
 // Model is the root Bubble Tea model.
 type Model struct {
-	drv *driver.Driver
+	drv Agent
 
 	vp    viewport.Model
 	input textarea.Model
@@ -281,6 +295,11 @@ type Model struct {
 	paused    bool
 	now       time.Time
 
+	// parentNoExec mirrors Config.ParentNoExec; see its doc comment. Consulted
+	// in enqueue, after the merge guard/intercepted/answerTools branches, so
+	// acy's own MCP tools and result delivery are never affected by it.
+	parentNoExec bool
+
 	// attached names the files a paste resolved into the composer, so the footer
 	// can say the drag registered. It describes what is currently *in* the box —
 	// clearComposer is the only place it dies, and it has to be, or a 📎 line
@@ -317,7 +336,15 @@ type Model struct {
 }
 
 // New builds the initial model bound to a started driver.
-func New(drv *driver.Driver, cfg Config) Model {
+//
+// drv takes the Agent interface, not *driver.Driver, on purpose: every
+// caller that has no driver yet passes a literal nil, and if this parameter
+// were the concrete pointer type, that nil would arrive here already typed
+// as a nil *driver.Driver — which, boxed into the interface field below,
+// becomes a non-nil Agent holding a nil pointer. Taking Agent directly means
+// a literal nil argument stays the true nil interface value that every
+// `m.drv == nil` check in this package depends on.
+func New(drv Agent, cfg Config) Model {
 	// A textarea, not a textinput: the composer grows with its content (see
 	// layout), and a textinput is single-line by construction — it scrolls
 	// sideways and can only ever be one row tall.
@@ -392,6 +419,7 @@ func New(drv *driver.Driver, cfg Config) Model {
 		replay:    cfg.Replay,
 
 		branchResolver: cfg.Branch,
+		parentNoExec:   cfg.ParentNoExec,
 	}
 	if m.resumeID != "" {
 		m.status = "resuming…"

@@ -312,6 +312,7 @@ func (o *Orchestrator) run(ctx context.Context, t *task) {
 			o.finishFailed(t, err)
 			return
 		}
+		o.rekeyIfNeeded(t, child)
 		o.emit(Event{TaskID: t.ID, Title: t.Title, Kind: KindStarted, Status: new(t.status())})
 		prompt := taskPrompt(t.Task)
 		if t.retries > 0 {
@@ -589,6 +590,41 @@ func (o *Orchestrator) CancelAll(reason string) {
 	for _, id := range ids {
 		o.Cancel(id, reason)
 	}
+}
+
+// sessioner is implemented by a Child whose real session id is only known
+// once Start has returned — codex's thread id, assigned by the server in
+// thread/start's response, rather than a caller-chosen one the way claude's
+// --session-id works (docs/codex-cli-findings.md §7). Checked with a type
+// assertion so the claude path costs nothing: *driver.Driver adopts exactly
+// the id orchestrator gave it via --session-id and has no reason to
+// implement this.
+type sessioner interface {
+	SessionID() string
+}
+
+// rekeyIfNeeded re-attributes gate requests to a child whose actual session
+// id differs from the one orchestrator pre-assigned and asked it to adopt.
+// Without this, every one of a codex child's tool calls would arrive at the
+// gate carrying an id TaskFor has never heard of, get attributed to the
+// *parent* instead of the child that actually raised it, and — on a codex
+// run, where ui.Config.ParentNoExec is set — be denied outright rather than
+// counted down. A no-op for claude, whose *driver.Driver never implements
+// sessioner and keeps using the id it was told to adopt.
+func (o *Orchestrator) rekeyIfNeeded(t *task, child Child) {
+	sr, ok := child.(sessioner)
+	if !ok {
+		return
+	}
+	id := sr.SessionID()
+	if id == "" || id == t.SessionID {
+		return
+	}
+	o.mu.Lock()
+	delete(o.bySess, t.SessionID)
+	t.SessionID = id
+	o.bySess[id] = t.ID
+	o.mu.Unlock()
 }
 
 // TaskFor maps a child's claude session id to its task. It is how a gate
