@@ -6,6 +6,7 @@ import (
 
 	"github.com/hweeks/always-click-yes/internal/alog"
 	"github.com/hweeks/always-click-yes/internal/driver"
+	"github.com/hweeks/always-click-yes/internal/mcp"
 )
 
 // handleNotification routes a server->client notification (method+params, no
@@ -49,20 +50,47 @@ type agentMessageItem struct {
 	Text string `json:"text"`
 }
 
-// reasoningItem's field shapes beyond "type" were never populated in any
-// captured fixture (docs/codex-fixtures/app-server-session.ndjson's reasoning
-// items all have empty summary/content arrays), so the exact schema is
-// unconfirmed. summary/content are read defensively on the working
-// hypothesis that, like agentMessage, a reasoning item is a sequence of
-// text-bearing chunks; if that guess is wrong the result is an empty thinking
-// block, not a decode error.
+// reasoningItem's summary is VERIFIED LIVE (docs/codex-fixtures/reasoning-summary.jsonl,
+// captured with `-c model_reasoning_summary="detailed"` and effort "high" —
+// the account's default config never populates it, which is why the original
+// recon fixture's reasoning items were always empty): each summary entry is a
+// bare JSON string, e.g. "summary":["**Verifying primality of 1237**"], not
+// an object with a "text" field as this package originally guessed. content
+// was still empty in that capture, so its element shape remains unconfirmed.
+//
+// reasoningChunk's UnmarshalJSON accepts either shape — a bare string (the
+// confirmed one) or an object carrying "text" (the original guess, kept as a
+// fallback for content or a future codex version) — and never itself returns
+// an error. That matters beyond tolerance: a struct-typed
+// []reasoningChunk{Text string `json:"text"`} failed json.Unmarshal outright
+// on the real "summary":["..."] shape, which made handleItemCompleted drop
+// the ENTIRE item silently (see its own error-logging branch) rather than
+// degrade to the "empty thinking block" this comment used to promise — the
+// promise was wrong in practice, not just in shape.
 type reasoningItem struct {
 	Summary []reasoningChunk `json:"summary"`
 	Content []reasoningChunk `json:"content"`
 }
 
 type reasoningChunk struct {
-	Text string `json:"text"`
+	Text string
+}
+
+// UnmarshalJSON never fails: an unrecognized chunk shape decodes to an empty
+// Text rather than aborting the whole reasoning item's decode, which is the
+// property that matters most here — see reasoningItem's own comment.
+func (c *reasoningChunk) UnmarshalJSON(b []byte) error {
+	var s string
+	if err := json.Unmarshal(b, &s); err == nil {
+		c.Text = s
+		return nil
+	}
+	var obj struct {
+		Text string `json:"text"`
+	}
+	_ = json.Unmarshal(b, &obj) // best-effort; an unrecognized shape just yields empty text
+	c.Text = obj.Text
+	return nil
 }
 
 func reasoningText(it reasoningItem) string {
@@ -74,6 +102,58 @@ func reasoningText(it reasoningItem) string {
 		b.WriteString(c.Text)
 	}
 	return b.String()
+}
+
+// mcpToolCallItem is codex's representation of a completed MCP tool call —
+// VERIFIED FROM SCHEMA, not a live capture: `codex app-server
+// generate-json-schema --out <dir> --experimental` (codex-cli 0.147.0) is
+// free — no model call, no cost (docs/codex-cli-findings.md:237) — and its
+// ServerNotification.json defines ThreadItem as a oneOf union whose
+// "mcpToolCall" variant (title McpToolCallThreadItem) is a THIRD, distinct
+// item type alongside "agentMessage"/"reasoning"/"commandExecution": codex
+// does not fold an MCP call into a commandExecution item, it emits its own.
+// This is the piece the original recon never saw (docs/codex-cli-findings.md
+// §5 says outright it "could not test with a real MCP server"), and it is why
+// PresentPlan/Finish calls vanished before this file grew this case — they
+// fell through handleItemCompleted's default branch under the wrong type
+// string entirely.
+//
+// Every field below is the schema's own name, required-ness, and type:
+// id/server/tool/status are required strings; arguments/result/error are
+// typed `true` (arbitrary JSON) or nullable refs in the schema, not narrowed
+// further by the generator, which is why arguments is decoded as raw JSON
+// here rather than a typed struct — it's genuinely the call's argument
+// object verbatim (e.g. {"plan": "..."} for PresentPlan), the same shape a
+// tools/call request carries on acy's own MCP server (internal/mcp/stdio.go).
+// status is McpToolCallStatus, an enum of exactly "inProgress"/"completed"/
+// "failed" — but since this type only ever arrives via item/completed (whose
+// own doc comment ties completedAtMs to "when this item lifecycle
+// completed"), "inProgress" should never actually appear here.
+type mcpToolCallItem struct {
+	ID        string             `json:"id"`
+	Server    string             `json:"server"`
+	Tool      string             `json:"tool"`
+	Arguments json.RawMessage    `json:"arguments"`
+	Status    string             `json:"status"`
+	Result    *mcpToolCallResult `json:"result"`
+	Error     *mcpToolCallError  `json:"error"`
+}
+
+// mcpToolCallResult is McpToolCallResult from the schema. Content is left as
+// raw JSON rather than a typed slice: the schema itself types it `items:
+// true`, i.e. an unconstrained array — in practice the standard MCP
+// content-block shape ([{"type":"text","text":"..."}]), which is exactly what
+// ui.rawText already knows how to read (it tries a []ContentText decode
+// before falling back to the raw bytes), and exactly what acy's own MCP
+// server hands back (internal/mcp/stdio.go's toolResult).
+type mcpToolCallResult struct {
+	Content json.RawMessage `json:"content"`
+}
+
+// mcpToolCallError is McpToolCallError from the schema: a single required
+// "message" string, nothing else.
+type mcpToolCallError struct {
+	Message string `json:"message"`
 }
 
 type commandExecutionItem struct {
@@ -121,6 +201,13 @@ func (d *Driver) handleItemCompleted(raw json.RawMessage) {
 			return
 		}
 		d.emitCommandExecution(it)
+	case "mcpToolCall":
+		var it mcpToolCallItem
+		if err := json.Unmarshal(p.Item, &it); err != nil {
+			alog.Printf("codex: decode mcpToolCall item: %v", err)
+			return
+		}
+		d.emitMcpToolCall(it)
 	case "userMessage":
 		// Our own injected input, echoed back by codex. claude's driver never
 		// echoes an injected turn either (AGENTS.md's stream-json notes) —
@@ -201,6 +288,97 @@ func (d *Driver) emitCommandExecution(it commandExecutionItem) {
 	}
 }
 
+// emitMcpToolCall emits the tool_use/tool_result pair a completed mcpToolCall
+// item implies, mirroring emitCommandExecution's shape: both arrive as one
+// item/completed notification, so both are translated into a call and its
+// outcome together rather than as two separately-timed events the way
+// claude's driver reports a tool_use/tool_result pair.
+//
+// This is the fix for the defect this package existed to close: PresentPlan
+// and Finish (internal/cli/mcp.go) are answered locally by the `acy mcp`
+// child rather than over the supervisor socket, precisely because the
+// supervisor/UI reads their content out of the ordinary tool_use event
+// instead (see ui.ingestToolUse's own comment) — so unless codex's
+// "mcpToolCall" item type gets translated into that same tool_use/tool_result
+// shape, those two tools are answered correctly by the MCP server and then
+// vanish, which is exactly what was observed live: PresentPlan calls
+// succeeding (isError false, "Plan recorded...") while the human saw no plan
+// at all.
+//
+// The emitted Name MUST carry codex's server name mcp__<server>__<tool>
+// qualification the way claude's own event stream does — ui.baseToolName
+// strips exactly that prefix back off to match PresentPlan/Finish/etc. by
+// their bare name. It is built from the item's own "server" field, NOT
+// hardcoded to acy's name: acy is not necessarily the only MCP server on a
+// codex thread (`codex mcp add` writes servers into the user's own
+// ~/.codex/config.toml, and thread/start's inline config overlays that
+// rather than replacing it), so a tool call from some other configured
+// server must keep that server's name rather than being relabelled as acy's
+// — ui.ingestToolUse dispatches on the bare name baseToolName strips this
+// prefix down to, so mislabeling would let a third-party tool named e.g.
+// "Finish" silently drive acy's own end-the-run path. internal/mcp imports
+// only alog and version — nothing that reaches back into internal/codex — so
+// importing it here for mcp.QualifiedServer is not a cycle.
+func (d *Driver) emitMcpToolCall(it mcpToolCallItem) {
+	input := it.Arguments
+	if len(input) == 0 {
+		input = json.RawMessage(`{}`)
+	}
+	// server is required by the schema, but an empty value here would format
+	// as the malformed "mcp____tool" rather than a real qualification — fall
+	// back to acy's own name, today's (pre-fix) behavior, instead.
+	server := it.Server
+	if server == "" {
+		server = mcp.ServerName
+	}
+	d.emitAssistantBlock(driver.ContentBlock{
+		Type:  driver.BlockToolUse,
+		ID:    it.ID,
+		Name:  mcp.QualifiedServer(server, it.Tool),
+		Input: input,
+	})
+
+	// A failed call still gets a result — the model needs to see it failed —
+	// so it falls back to the error message when there is no result content,
+	// the same "either signal alone is enough" logic emitCommandExecution
+	// uses for a declined/failed shell command.
+	isError := it.Status != "completed" || it.Error != nil
+	var content json.RawMessage
+	switch {
+	case it.Result != nil && len(it.Result.Content) > 0:
+		content = it.Result.Content
+	case it.Error != nil:
+		msg, err := json.Marshal(it.Error.Message)
+		if err != nil {
+			alog.Printf("codex: marshal mcpToolCall error message: %v", err)
+			return
+		}
+		content = msg
+	default:
+		content = json.RawMessage(`""`)
+	}
+
+	resultContent, err := json.Marshal([]driver.ContentBlock{{
+		Type:      driver.BlockToolResult,
+		ToolUseID: it.ID,
+		Content:   content,
+		IsError:   isError,
+	}})
+	if err != nil {
+		alog.Printf("codex: marshal mcpToolCall tool_result block: %v", err)
+		return
+	}
+
+	d.mu.Lock()
+	threadID := d.threadID
+	d.mu.Unlock()
+	d.events <- driver.Event{
+		Type:      driver.TypeUser,
+		SessionID: threadID,
+		Message:   &driver.Message{Role: "user", Content: resultContent},
+	}
+}
+
 type tokenUsageHalf struct {
 	InputTokens           int `json:"inputTokens"`
 	OutputTokens          int `json:"outputTokens"`
@@ -254,8 +432,44 @@ func (d *Driver) handleTokenUsage(raw json.RawMessage) {
 type turnCompletedParams struct {
 	ThreadID string `json:"threadId"`
 	Turn     struct {
-		ID string `json:"id"`
+		ID    string         `json:"id"`
+		Items []turnItemHead `json:"items"`
 	} `json:"turn"`
+}
+
+// turnItemHead reads just enough of one of turn/completed's own echoed
+// items to find the final agentMessage — see extractStructuredOutput.
+type turnItemHead struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
+// extractStructuredOutput is protocol detail #10 from
+// docs/codex-cli-findings.md, VERIFIED LIVE
+// (docs/codex-fixtures/structured-output-turn-completed.jsonl): codex has no
+// separate field analogous to claude's result event structured_output.
+// TurnStartParams.outputSchema instead constrains the final assistant
+// MESSAGE itself — the last agentMessage item's own "text" IS the
+// schema-validated JSON, verbatim, both inline in item/completed and echoed
+// again in turn/completed's own turn.items. This only ever returns non-nil
+// when this driver was actually started with an OutputSchema — a plain
+// conversational turn's final agentMessage is prose, not JSON, and forcing
+// it through json.Valid would just silently produce nil anyway, but gating
+// on OutputSchema up front means that is by design, not by accident.
+func (d *Driver) extractStructuredOutput(p turnCompletedParams) json.RawMessage {
+	if len(d.opts.OutputSchema) == 0 {
+		return nil
+	}
+	var text string
+	for _, it := range p.Turn.Items {
+		if it.Type == "agentMessage" {
+			text = it.Text // last one wins if a turn ever has more than one
+		}
+	}
+	if text == "" || !json.Valid([]byte(text)) {
+		return nil
+	}
+	return json.RawMessage(text)
 }
 
 // handleTurnCompleted is acy's idle signal: it ends the turn, banking this
@@ -267,6 +481,8 @@ func (d *Driver) handleTurnCompleted(raw json.RawMessage) {
 		alog.Printf("codex: decode turn/completed: %v", err)
 		return
 	}
+
+	structuredOutput := d.extractStructuredOutput(p)
 
 	d.usageMu.Lock()
 	usage := d.turnUsage
@@ -287,10 +503,11 @@ func (d *Driver) handleTurnCompleted(raw json.RawMessage) {
 	}
 
 	d.events <- driver.Event{
-		Type:       driver.TypeResult,
-		SessionID:  p.ThreadID,
-		Usage:      &usage,
-		ModelUsage: modelUsageMap,
+		Type:             driver.TypeResult,
+		SessionID:        p.ThreadID,
+		Usage:            &usage,
+		ModelUsage:       modelUsageMap,
+		StructuredOutput: structuredOutput,
 		// TotalCostUSD is deliberately left at its zero value: codex reports no
 		// dollar figure anywhere in its protocol — docs/codex-cli-findings.md §9
 		// greps every captured fixture and every generated schema for one and

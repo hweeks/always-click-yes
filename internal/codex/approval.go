@@ -7,8 +7,8 @@ import (
 )
 
 // ApprovalRequest is a server-initiated request codex is blocking on: one of
-// item/commandExecution/requestApproval, item/fileChange/requestApproval, or
-// item/permissions/requestApproval (docs/codex-cli-findings.md §3). This
+// item/commandExecution/requestApproval, item/fileChange/requestApproval,
+// item/permissions/requestApproval, or mcpServer/elicitation/request. This
 // package never decides one — it only surfaces it and lets a caller answer it
 // with Approve; wiring that caller to acy's own countdown gate is a separate
 // task.
@@ -79,18 +79,29 @@ func (d *Driver) PendingApprovals() []ApprovalRequest {
 // whatever wires this to acy's gate, not to this package (see the package
 // doc).
 func (d *Driver) Approve(id int64, decision any) error {
+	d.approvalsMu.Lock()
+	req, known := d.approvalsOut[id]
+	delete(d.approvalsOut, id)
+	d.approvalsMu.Unlock()
+
+	// The normal item/* approval requests use {decision: ...}. An MCP
+	// elicitation is a different app-server ServerRequest, despite also
+	// blocking the turn: its response is {action: ...}. The first live
+	// supervisor run found this difference when Codex asked to invoke acy's
+	// Dispatch tool; replying with {decision:"decline"} made the app server
+	// reject it as malformed before the MCP server ever saw the call.
+	field := "decision"
+	if known && req.Method == methodMCPServerElicitation {
+		field = "action"
+	}
 	payload := map[string]any{
 		"id":     id,
-		"result": map[string]any{"decision": decision},
+		"result": map[string]any{field: decision},
 	}
 	b, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
-
-	d.approvalsMu.Lock()
-	delete(d.approvalsOut, id)
-	d.approvalsMu.Unlock()
 
 	alog.Raw("TX", string(b))
 	b = append(b, '\n')

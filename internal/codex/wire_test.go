@@ -229,6 +229,35 @@ func TestWireApprovalReply(t *testing.T) {
 	}
 }
 
+// TestWireMCPElicitationReply uses the other response envelope Codex expects
+// for mcpServer/elicitation/request: {action:"accept"}, not the item-tool
+// approval's {decision:"accept"}. This was verified by the first dogfood
+// supervisor run: the wrong field makes Codex refuse Dispatch before acy's MCP
+// server receives it.
+func TestWireMCPElicitationReply(t *testing.T) {
+	var tx bytes.Buffer
+	d := NewWithWriter(Options{}, nopWriteCloser{&tx})
+	d.handleServerRequest(wireEnvelope{
+		ID:     json.RawMessage(`7`),
+		Method: methodMCPServerElicitation,
+		Params: json.RawMessage(`{"mode":"form","requestedSchema":{"type":"object"}}`),
+	})
+	if err := d.Approve(7, "accept"); err != nil {
+		t.Fatal(err)
+	}
+
+	result, ok := decodeWire(t, tx.Bytes())["result"].(map[string]any)
+	if !ok {
+		t.Fatalf("result missing or wrong shape: %s", tx.String())
+	}
+	if result["action"] != "accept" {
+		t.Errorf("result.action = %v, want accept", result["action"])
+	}
+	if _, ok := result["decision"]; ok {
+		t.Errorf("MCP elicitation response must use action, not decision: %s", tx.String())
+	}
+}
+
 // TestApproveClearsOutstanding confirms answering a request removes it from
 // PendingApprovals, so a caller can trust that list as "still blocked."
 func TestApproveClearsOutstanding(t *testing.T) {

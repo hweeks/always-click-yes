@@ -261,6 +261,240 @@ func TestFixtureReplaySurfacesApprovalRequest(t *testing.T) {
 	}
 }
 
+// TestReasoningItemSummaryIsPlainStrings replays a real captured
+// item/completed line (docs/codex-fixtures/reasoning-summary.jsonl) whose
+// reasoning item has a non-empty summary — every earlier fixture's reasoning
+// items were empty, so this is the first live proof of the array element's
+// actual shape: a bare string, not an object with a "text" field. Before
+// reasoningChunk grew a tolerant UnmarshalJSON, decoding this exact line
+// failed outright and silently dropped the whole item (see translate.go's
+// own comment on reasoningItem).
+func TestReasoningItemSummaryIsPlainStrings(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "docs", "codex-fixtures", "reasoning-summary.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("fixture has %d lines, want 2 (item/started, item/completed)", len(lines))
+	}
+
+	var tx bytes.Buffer
+	d := NewWithWriter(Options{}, nopWriteCloser{&tx})
+	for _, line := range lines {
+		d.handleLine([]byte(line))
+	}
+	close(d.events)
+
+	var got driver.Event
+	var n int
+	for ev := range d.Events() {
+		got = ev
+		n++
+	}
+	if n != 1 {
+		t.Fatalf("want exactly 1 event (item/started produces none), got %d", n)
+	}
+	if got.Type != driver.TypeAssistant {
+		t.Fatalf("event = %+v, want assistant", got)
+	}
+	b := firstBlock(t, got)
+	if b.Type != driver.BlockThinking {
+		t.Fatalf("block = %+v, want thinking", b)
+	}
+	want := "**Verifying primality of 1237**"
+	if b.Thinking != want {
+		t.Errorf("Thinking = %q, want %q", b.Thinking, want)
+	}
+}
+
+// TestTurnCompletedExtractsStructuredOutputFromFinalAgentMessage replays a
+// real captured item/completed + turn/completed pair
+// (docs/codex-fixtures/structured-output-turn-completed.jsonl) from a driver
+// started with an OutputSchema. There is no claude-style dedicated
+// "structured_output" field on turn/completed — outputSchema constrains the
+// final agentMessage item itself, so its own "text" IS the validated JSON,
+// both on item/completed and echoed again in turn/completed's turn.items.
+func TestTurnCompletedExtractsStructuredOutputFromFinalAgentMessage(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "docs", "codex-fixtures", "structured-output-turn-completed.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("fixture has %d lines, want 2 (item/completed, turn/completed)", len(lines))
+	}
+
+	var tx bytes.Buffer
+	d := NewWithWriter(Options{OutputSchema: json.RawMessage(`{"type":"object"}`)}, nopWriteCloser{&tx})
+	for _, line := range lines {
+		d.handleLine([]byte(line))
+	}
+	close(d.events)
+
+	var result driver.Event
+	var gotResult bool
+	for ev := range d.Events() {
+		if ev.Type == driver.TypeResult {
+			result = ev
+			gotResult = true
+		}
+	}
+	if !gotResult {
+		t.Fatal("no result event")
+	}
+	want := `{"outcome":"ok","note":"hello"}`
+	if string(result.StructuredOutput) != want {
+		t.Errorf("StructuredOutput = %s, want %s", result.StructuredOutput, want)
+	}
+}
+
+// TestTurnCompletedOmitsStructuredOutputWithoutOutputSchema confirms
+// extractStructuredOutput only ever fires when this driver was actually
+// started with an OutputSchema — an ordinary conversational final message is
+// prose, not a report, and must never be handed to ParseReport as one.
+func TestTurnCompletedOmitsStructuredOutputWithoutOutputSchema(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "docs", "codex-fixtures", "structured-output-turn-completed.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+
+	var tx bytes.Buffer
+	d := NewWithWriter(Options{}, nopWriteCloser{&tx})
+	for _, line := range lines {
+		d.handleLine([]byte(line))
+	}
+	close(d.events)
+
+	for ev := range d.Events() {
+		if ev.Type == driver.TypeResult && len(ev.StructuredOutput) != 0 {
+			t.Errorf("StructuredOutput = %s, want empty when no OutputSchema was configured", ev.StructuredOutput)
+		}
+	}
+}
+
+// TestMcpToolCallItemEmitsQualifiedToolUseAndResult replays a SCHEMA-DERIVED
+// fixture (docs/codex-fixtures/mcp-tool-call-schema-derived.jsonl) — NOT a
+// live capture. Provoking a real "mcpToolCall" item requires a codex session
+// that actually calls one of acy's own MCP tools, which spends real usage
+// against the account's ChatGPT plan; this task was explicitly told not to
+// spend that (ACY_LIVE=1 tests are off limits here). Instead the fixture's
+// shape is read directly off `codex app-server generate-json-schema --out
+// <dir> --experimental` (costs nothing, no model call —
+// docs/codex-cli-findings.md:237): ServerNotification.json's ThreadItem union
+// has an "mcpToolCall" variant (McpToolCallThreadItem) with required
+// id/server/tool/status/arguments and nullable result/error — see
+// translate.go's own comment on mcpToolCallItem for the full field-by-field
+// account.
+//
+// This is the fixture that proves the actual defect this task fixes: before
+// handleItemCompleted grew the "mcpToolCall" case, this exact item fell
+// through to its default branch ("unhandled item/completed type") and was
+// dropped — meaning PresentPlan (and Finish) never reached the UI even though
+// acy's MCP server had already answered them correctly.
+func TestMcpToolCallItemEmitsQualifiedToolUseAndResult(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "docs", "codex-fixtures", "mcp-tool-call-schema-derived.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("fixture has %d lines, want 1 (item/completed)", len(lines))
+	}
+
+	var tx bytes.Buffer
+	d := NewWithWriter(Options{}, nopWriteCloser{&tx})
+	for _, line := range lines {
+		d.handleLine([]byte(line))
+	}
+	close(d.events)
+
+	var events []driver.Event
+	for ev := range d.Events() {
+		events = append(events, ev)
+	}
+	if len(events) != 2 {
+		t.Fatalf("want 2 events (tool_use, tool_result), got %d: %+v", len(events), events)
+	}
+
+	toolUse := firstBlock(t, events[0])
+	if events[0].Type != driver.TypeAssistant || toolUse.Type != driver.BlockToolUse {
+		t.Fatalf("event 0 = %+v (block %+v), want assistant/tool_use", events[0], toolUse)
+	}
+	const wantName = "mcp__acy__PresentPlan"
+	if toolUse.Name != wantName {
+		t.Errorf("tool_use Name = %q, want %q", toolUse.Name, wantName)
+	}
+	if toolUse.ID != "mcptool-f1518689-dde4-4887-8102-b710292228b1" {
+		t.Errorf("tool_use ID = %q", toolUse.ID)
+	}
+	var args struct {
+		Plan string `json:"plan"`
+	}
+	if err := json.Unmarshal(toolUse.Input, &args); err != nil {
+		t.Fatalf("tool_use Input not JSON: %v (%s)", err, toolUse.Input)
+	}
+	if !strings.Contains(args.Plan, "Translate codex's mcpToolCall item") {
+		t.Errorf("tool_use Input plan = %q, want it to contain the fixture's plan text", args.Plan)
+	}
+
+	toolResult := firstBlock(t, events[1])
+	if events[1].Type != driver.TypeUser || toolResult.Type != driver.BlockToolResult {
+		t.Fatalf("event 1 = %+v (block %+v), want user/tool_result", events[1], toolResult)
+	}
+	if toolResult.ToolUseID != toolUse.ID {
+		t.Errorf("tool_result ToolUseID = %q, want %q", toolResult.ToolUseID, toolUse.ID)
+	}
+	if toolResult.IsError {
+		t.Error("tool_result should not be an error: the fixture's status is \"completed\"")
+	}
+	if !strings.Contains(string(toolResult.Content), "Plan recorded and shown to the human") {
+		t.Errorf("tool_result Content = %s, want it to contain the MCP server's own PlanRecorded text", toolResult.Content)
+	}
+}
+
+// TestMcpToolCallItemQualifiesByItsOwnServerNotAcys is the discrimination
+// test for the defect this task fixes: emitMcpToolCall used to build its
+// tool_use Name with mcp.Qualified(it.Tool), which hardcodes acy's own
+// ServerName and ignores the item's actual "server" field entirely. A codex
+// thread's configured MCP servers are not limited to acy's own — `codex mcp
+// add` writes into the user's ~/.codex/config.toml, merged with acy's inline
+// config rather than replaced by it — so a tool call from any other server
+// was silently relabelled as acy's. That is not cosmetic: a foreign server's
+// tool named "Finish" would then read as acy's own end-the-run tool_use to
+// anything downstream that trusts the name (ui.ingestToolUse). This drives a
+// synthesized item/completed with server "some-other-server" and tool
+// "Finish" through the same handleLine path TestMcpToolCallItemEmits... uses,
+// and asserts the emitted Name carries that real server, not "acy" — the ui
+// side of this same discrimination (a Model must not end the run on it) is
+// TestIngestForeignMcpServerFinishDoesNotEndTheRun in internal/ui/ingest_test.go.
+func TestMcpToolCallItemQualifiesByItsOwnServerNotAcys(t *testing.T) {
+	const line = `{"method":"item/completed","params":{"item":{"type":"mcpToolCall","id":"mcptool-foreign-1","server":"some-other-server","tool":"Finish","arguments":{"outcome":"completed","summary":"not acy's"},"status":"completed","result":{"content":[{"type":"text","text":"ok"}]},"error":null},"threadId":"` + fixtureThreadID + `"}}`
+
+	var tx bytes.Buffer
+	d := NewWithWriter(Options{}, nopWriteCloser{&tx})
+	d.handleLine([]byte(line))
+	close(d.events)
+
+	var events []driver.Event
+	for ev := range d.Events() {
+		events = append(events, ev)
+	}
+	if len(events) != 2 {
+		t.Fatalf("want 2 events (tool_use, tool_result), got %d: %+v", len(events), events)
+	}
+
+	toolUse := firstBlock(t, events[0])
+	const wantName = "mcp__some-other-server__Finish"
+	if toolUse.Name != wantName {
+		t.Errorf("tool_use Name = %q, want %q", toolUse.Name, wantName)
+	}
+	if unwanted := "mcp__acy__Finish"; toolUse.Name == unwanted {
+		t.Errorf("tool_use Name = %q, must not be relabelled as acy's own Finish", toolUse.Name)
+	}
+}
+
 // syncWriter is a thread-safe io.WriteCloser that also notifies a channel per
 // write, so a test can drive a goroutine blocked in Driver.call and know
 // exactly when its request has been written — without racing a plain

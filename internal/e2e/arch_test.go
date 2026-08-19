@@ -56,7 +56,7 @@ When you are armed: launch BOTH engineers (T1 and T2) before you Await either on
 // to hand back a distinct PR URL per call so two concurrent `pr create`s can
 // be told apart.
 func TestE2EArchRunsEngineersInParallel(t *testing.T) {
-	requireLive(t)
+	requireLive(t, "claude")
 
 	acyBin, err := acyBinary()
 	if err != nil {

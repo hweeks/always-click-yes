@@ -19,6 +19,14 @@ import (
 const (
 	methodCommandExecutionApproval = "item/commandExecution/requestApproval"
 	methodFileChangeApproval       = "item/fileChange/requestApproval"
+	// mcpServer/elicitation/request is Codex asking its client whether an MCP
+	// server may proceed with an elicitation. acy's own MCP server raises this
+	// for every tool call under Codex's untrusted policy. It is not a shell or
+	// file operation: the eventual Dispatch/Finish/Ask call is still validated
+	// by acy's MCP bridge and phase machine, so it must not be put through the
+	// filesystem tool countdown. It does need an immediate {action:"accept"}
+	// response or Codex rejects the MCP call before acy sees it.
+	methodMCPServerElicitation = "mcpServer/elicitation/request"
 )
 
 // codex's own decision vocabulary (docs/codex-cli-findings.md §3). Only two
@@ -210,6 +218,11 @@ func (b *Bridge) forward(d *Driver, req ApprovalRequest) {
 	b.wg.Add(1)
 	b.mu.Unlock()
 	defer b.wg.Done()
+	if req.Method == methodMCPServerElicitation {
+		alog.Printf("codex: gate bridge: accepting MCP elicitation id=%d", req.ID)
+		b.approve(d, req.ID, decisionAccept)
+		return
+	}
 
 	in, ok := BuildPreToolUseInput(req)
 	if !ok {

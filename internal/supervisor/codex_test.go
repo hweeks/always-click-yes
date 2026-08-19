@@ -124,6 +124,22 @@ func TestCodexChildOptionsCarryChildInvariants(t *testing.T) {
 	}
 }
 
+// TestCodexChildOptionsDoesNotLeakClaudeDefaultModel proves the default
+// --child-model=sonnet does not get sent to Codex, where it is not a supported
+// ChatGPT model name. The first dogfood child reached app-server successfully
+// but failed its turn with that exact 400 before doing any work.
+func TestCodexChildOptionsDoesNotLeakClaudeDefaultModel(t *testing.T) {
+	opts := codexChildOptions(Flags{Model: "gpt-parent", ChildModel: "sonnet"}, "/bin/acy", "/tmp/mcp.sock", nil, nil)
+	if opts.Model != "gpt-parent" {
+		t.Errorf("child Model = %q, want parent Codex model %q rather than Claude default sonnet", opts.Model, "gpt-parent")
+	}
+
+	opts = codexChildOptions(Flags{ChildModel: "sonnet"}, "/bin/acy", "/tmp/mcp.sock", nil, nil)
+	if opts.Model != "" {
+		t.Errorf("child Model = %q, want empty so Codex selects its own default", opts.Model)
+	}
+}
+
 // TestAssertCodexParentSafeAcceptsTheRealConstruction proves the actual
 // codexParentOptions output passes the safety check — the check must not be
 // stricter than what the constructor above actually produces.

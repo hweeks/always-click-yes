@@ -640,6 +640,231 @@ specifically (as opposed to the fact that the input mechanism exists, which is s
 
 ---
 
+## 12. MCP tool-call item shape (closing the Q5 gap)
+
+`VERIFIED FROM SCHEMA` (`codex app-server generate-json-schema --out <dir> --experimental`,
+codex-cli 0.147.0 — free, no model call, no cost, per §1's own citation of this command). Not
+live-exercised: doing so would require a real `app-server` turn that calls one of acy's own MCP
+tools, which spends real usage against the account's ChatGPT plan. §5 above already flagged this
+exact gap ("this recon found no dedicated `ServerRequest` variant for it and could not test with
+a real MCP server") — this section closes the *item-shape* half of it (not the approval-gating
+half, which remains `UNKNOWN` exactly as §5 left it).
+
+**The item type is `mcpToolCall` (`McpToolCallThreadItem`), a full sibling of
+`commandExecution` in `ThreadItem`'s `oneOf`, not a variant of it.** The complete
+18-member `ThreadItem` union, read off `ServerNotification.json`'s own `definitions`:
+`userMessage`, `hookPrompt`, `agentMessage`, `plan`, `reasoning`, `commandExecution`,
+`fileChange`, `mcpToolCall`, `dynamicToolCall`, `collabAgentToolCall`, `subAgentActivity`,
+`webSearch`, `imageView`, `sleep`, `imageGeneration`, `enteredReviewMode`, `exitedReviewMode`,
+`contextCompaction`. So an MCP tool call arrives on the exact same `item/completed`
+notification this package already handles, discriminated by `"type":"mcpToolCall"` — no new
+notification method, no opt-in flag.
+
+Its fields (all read directly off the generated schema, not inferred):
+
+- `id` (string, required) — the item id, used the same way `commandExecution`'s `id` already
+  is for `tool_use_id`/`tool_result`'s `tool_use_id`.
+- `server` (string, required) — the configured MCP server name; for acy's own tools this is
+  `mcp.ServerName` ("acy"), because `internal/supervisor/codex.go`'s `codexMCPServerConfig`
+  registers it under exactly that key.
+- `tool` (string, required) — the bare tool name, e.g. `"PresentPlan"`.
+- `arguments` — typed `true` in the schema (unconstrained JSON), i.e. the call's argument
+  object verbatim (`{"plan": "..."}` for PresentPlan), the same object a `tools/call` request
+  carries on acy's own MCP server.
+- `status` (`McpToolCallStatus` enum: `inProgress` | `completed` | `failed`) — required.
+  Never `inProgress` in practice at `item/completed` time, since completion is what triggers
+  the notification in the first place.
+- `result` (nullable `McpToolCallResult: {content, structuredContent, _meta}`) — `content` is
+  again typed `true` (unconstrained array), which in practice is the standard MCP content-block
+  shape (`[{"type":"text","text":"..."}]`) — the exact shape acy's own MCP server already
+  returns (`internal/mcp/stdio.go`'s `toolResult`).
+- `error` (nullable `McpToolCallError: {message}`) — set on failure, alongside `status:
+  "failed"`.
+- `durationMs`, `pluginId`, `readOnlyHint`, `appContext`, `mcpAppResourceUri` — present,
+  optional, not needed for the tool_use/tool_result translation.
+
+**The JS `exec` wrapper the model actually calls through (`tools.mcp__acy__PresentPlan(...)`)
+is a separate concern, and — best evidence available without spending live usage — reports as
+an ordinary `commandExecution` item, not a distinct type.** Two things support this:
+
+1. `ThreadItem`'s 18 variants (above) have no dedicated "this was a sandboxed JS call" entry.
+   The only item type shaped like "a thing that ran with a command/exit code/output" is
+   `commandExecution`.
+2. There *is* a distinct discriminator for exactly this shape — `custom_tool_call`
+   (`CustomToolCallResponseItem`: `call_id`, `input` (the JS source), `name`, `namespace`,
+   `status`) — but it lives on a completely different, lower-level surface:
+   `RawResponseItemCompletedNotification`, a v2/experimental raw passthrough of the underlying
+   model-API response items, not `ItemCompletedNotification`/`ThreadItem`. This package never
+   subscribes to that surface (see `handleNotification`'s method switch), so it never sees a
+   `custom_tool_call` item at all regardless of which item shape codex uses internally.
+
+Given `commandExecution` is therefore the only structurally available surface for it, and its
+`CommandExecutionThreadItem.command` field is just `"The command to be executed"` with no
+metadata flagging "this one is actually a JS wrapper" (`source`'s enum —
+`agent`/`userShell`/`unifiedExecStartup`/`unifiedExecInteraction` — has nothing that says so
+either), the conclusion is: **the raw JS (`const r = await tools.mcp__acy__PresentPlan(...)`)
+most likely renders as an ordinary shell command box in acy's transcript, indistinguishable at
+the schema level from a real shell command.** This was **not live-verified** in this task per
+its own instructions (no `ACY_LIVE` runs); it is the best inference the schema supports.
+
+**Decision: leave it as acceptable noise, do not suppress it.** Filtering it out would mean
+pattern-matching the `command` string's content for `tools.mcp__` (there is no schema-level
+`source` flag to key off instead), which is exactly the kind of "guess a shape instead of
+reading it off the schema" this task was explicitly told not to do — and it is fragile besides
+(it breaks the moment codex's JS wrapper syntax changes). The actual defect this task fixes —
+the plan box never appearing at all — is closed by the `mcpToolCall` item now translating
+correctly; the JS box being additionally visible is cosmetic redundancy, not a correctness bug,
+and is left as a follow-up rather than folded into this fix.
+
+**Other `ThreadItem` variants this package still silently drops** (falls through
+`handleItemCompleted`'s `default` branch, logged and discarded) — worth a future task, not
+implemented here:
+
+- `plan` (`PlanThreadItem: {id, text}`) — codex's own *native* plan/todo concept, entirely
+  separate from acy's MCP-based `PresentPlan`. Whether this is a todo-list-shaped feature worth
+  surfacing in its own right is an open question this task did not explore.
+- `fileChange` (`FileChangeThreadItem: {id, changes, status}`) — a structured file-edit item,
+  as opposed to a shell command that happens to write a file. Currently invisible in acy's
+  transcript if codex ever reports an edit this way instead of via `commandExecution`.
+- `webSearch`, `imageView`, `imageGeneration` — native tool results with no acy transcript
+  representation at all today.
+- `dynamicToolCall` — the `dynamicTools`/`item/tool/call` mechanism §5 already flagged as a
+  more direct structural analog to acy's own MCP tools; still unhandled here.
+- `contextCompaction` — a signal worth surfacing next to the existing token-usage UI, currently
+  dropped.
+- `collabAgentToolCall`, `subAgentActivity`, `hookPrompt`, `enteredReviewMode`,
+  `exitedReviewMode`, `sleep` — lower-priority, no clear acy-side counterpart yet.
+
+---
+
+## 13. MCP tool-call item shape — independent re-verification, plus the exec-wrapper gap
+
+`VERIFIED FROM SCHEMA` unless noted otherwise — `codex app-server generate-json-schema --out
+<dir> --experimental`, run fresh in this task (`codex-cli 0.147.0`, confirmed live via `codex
+--version`; both `--help` variants checked first, each returning in well under a second, per this
+task's own command-hygiene requirement). §12 above (the item catalog, the `mcpToolCall` field
+list, the exec-wrapper reasoning) was already present, uncommitted, in this file before this task
+started — see the provenance note at the end of this section. Everything below was re-derived
+this session directly from a freshly generated schema bundle in `/tmp`, not copied from §12 on
+trust, specifically to check whether §12 itself was another instance of the guessing failure mode
+this task was warned about (it wasn't — see below).
+
+**(a) The complete `item/completed` item-type catalog**, read with `python3 -c
+"import json; ...; defs['ThreadItem']['oneOf']"` against a freshly generated
+`ServerNotification.json`: an 18-member `oneOf`, one required-string `type` enum value per
+member, in schema order:
+`userMessage`, `hookPrompt`, `agentMessage`, `plan`, `reasoning`, `commandExecution`,
+`fileChange`, `mcpToolCall`, `dynamicToolCall`, `collabAgentToolCall`, `subAgentActivity`,
+`webSearch`, `imageView`, `sleep`, `imageGeneration`, `enteredReviewMode`, `exitedReviewMode`,
+`contextCompaction`. Matches §12's list exactly, member for member — independent confirmation,
+not a re-typed guess.
+
+**(b) The `mcpToolCall` item, field by field**, read directly off `McpToolCallThreadItem`'s own
+schema object this session:
+- `type`: enum `["mcpToolCall"]` — required.
+- `id` (string) — required.
+- `server` (string) — required. The configured MCP server name (`"acy"` for acy's own tools,
+  per `internal/supervisor/codex.go`'s server registration).
+- `tool` (string) — required. The bare tool name, e.g. `"PresentPlan"`.
+- `arguments` — schema type `true` (unconstrained JSON) — **required**, not optional: a call
+  with no arguments still carries an explicit (e.g. empty-object) value here, never an absent
+  field.
+- `status` — `$ref McpToolCallStatus`, required; enum is exactly `["inProgress", "completed",
+  "failed"]`.
+- `result` — `anyOf [$ref McpToolCallResult, null]`, optional/nullable.
+  `McpToolCallResult = {content: array (items: true, i.e. unconstrained — the standard MCP
+  content-block shape in practice), structuredContent: (type: true), _meta: (type: true)}`,
+  with only `content` required inside it.
+- `error` — `anyOf [$ref McpToolCallError, null]`, optional/nullable.
+  `McpToolCallError = {message: string}`, `message` required.
+- Also present, all optional/nullable: `durationMs` (int64), `pluginId` (string), `readOnlyHint`
+  (bool), `appContext` (`McpToolCallAppContext` — itself `{connectorId (required), actionName,
+  appName, linkId, resourceUri}`, evidently aimed at ChatGPT "app"/connector integrations rather
+  than a plain stdio MCP server like acy's), `mcpAppResourceUri` (string, the schema's own
+  description marks it `"Deprecated: use appContext.resourceUri instead"`).
+
+A failed call is signalled by `status: "failed"` together with a populated `error.message`; the
+schema does not force the two to co-occur (a `"failed"` status with `error: null`, or the
+reverse, are both structurally legal), matching the "either signal alone is enough" defensiveness
+already present on the shell-command side of this package.
+
+This field list is a byte-for-byte match with §12's — independently re-derived this session, not
+re-read from it.
+
+**New since §12: a dedicated MCP progress notification.** The full method catalog inside
+`ServerNotification.json`'s top-level `oneOf` includes `item/mcpToolCall/progress`
+(params `McpToolCallProgressNotification`: `{itemId, message, threadId, turnId}`, all four
+required, `message` a plain string) — structurally analogous to `item/commandExecution/
+outputDelta`: a mid-flight streaming update tied by `itemId` to an item still in progress,
+distinct from the terminal `item/completed`. §12 did not mention this notification; it sharpens
+the answer to "how many items does one MCP call produce": **exactly one `ThreadItem`** — the
+`mcpToolCall` item on `item/completed` — plus zero or more non-item
+`item/mcpToolCall/progress` notifications carrying free-text progress messages for that same
+`itemId` while the call is outstanding. Not a second item, and not a nested pair — the same
+one-item-plus-streaming-deltas shape `commandExecution` already has. Separately,
+`ItemStartedNotification.item` is typed as a full `$ref ThreadItem` (not a stripped-down head),
+so a `mcpToolCall` item can schema-legally appear on `item/started` too, with `status:
+"inProgress"` — the one point in the lifecycle where that enum value is actually expected to
+occur (`item/completed`, as translate.go's own comment already notes, should never carry it).
+
+**(c) The JS `exec`-wrapper question — sharpened, still `UNKNOWN`.** §12 reasoned that the JS
+wrapper (`tools.mcp__acy__PresentPlan(...)`) "most likely renders as an ordinary
+`commandExecution` item," on the grounds that `ThreadItem` has no dedicated "sandboxed JS call"
+entry and `CommandExecutionSource`'s enum (`agent`/`userShell`/`unifiedExecStartup`/
+`unifiedExecInteraction`, reconfirmed byte-for-byte this session) has nothing flagging "this one
+is actually a JS/MCP wrapper." That reasoning still holds, but this session found no trace of a
+JS/code-execution tool-calling mechanism anywhere in the schema at all: grepping every generated
+file (both full bundles and every per-type file) for `javascript`, `tools.mcp__`, `code
+interpreter`/`codeInterpreter`, and `code_mode`/`codeMode` returned zero hits, and neither
+`TurnStartParams` nor `ThreadStartParams` has any field describing tools as JS-callable
+functions (`ThreadStartParams` only has `dynamicTools`, a different, non-JS mechanism per §5).
+Combined with the newly-found `item/mcpToolCall/progress` notification — a first-class,
+dedicated lifecycle signal that only makes sense if `mcpToolCall` items are tracked as their own
+thing from the moment a call starts, not synthesized after the fact from a shell command's output
+— the balance of schema evidence leans slightly toward **`app-server` abstracting away however
+the model's underlying turn actually invoked the call, surfacing only a single `mcpToolCall`
+item and no separate exec-shaped item at all**, rather than §12's "ordinary `commandExecution`
+item" guess or a "nested pair" of both. But this is still an inference from absence on both
+counts — the schema documents item *shapes*, not the runtime rule for when one gets created
+relative to a model's own tool-use mechanics — so neither hypothesis is confirmed.
+**Correct label: `UNKNOWN`, narrowed but not resolved.** What would settle it: one real
+`app-server` turn against a working stdio MCP server (the same live test §5 and §12 both flagged
+as never performed, for the same live-usage-budget reason this task was told to avoid), watching
+whether any `commandExecution`-typed `item/started`/`item/completed` appears at all around a turn
+that only ever calls an MCP tool. Its presence proves a nested pair; its absence proves the
+single-item hypothesis.
+
+**Verbatim schema-derived example.** `docs/codex-fixtures/mcp-tool-call-schema-derived.jsonl`
+was already present in this working tree (not created by this task); this task checked its
+provenance rather than taking the "schema-derived" label on faith, because its `result` text
+reads unusually specifically for a hand-built example. It checks out: every field name,
+nullability, and the field set itself line up exactly with `McpToolCallThreadItem` as dumped
+above, and its `result.content[0].text` is not model output at all but the verbatim compile-time
+constant `mcp.PlanRecorded` (`internal/mcp/protocol.go:206-208`) — confirmed by grepping the
+constant's own text in this codebase. Reproduced here, labelled honestly as constructed, not
+captured:
+```json
+{"method":"item/completed","params":{"item":{"type":"mcpToolCall","id":"mcptool-f1518689-dde4-4887-8102-b710292228b1","server":"acy","tool":"PresentPlan","arguments":{"plan":"1. Translate codex's mcpToolCall item into a driver.BlockToolUse/BlockToolResult pair.\n2. Confirm the plan box appears and Finish ends the run."},"status":"completed","result":{"content":[{"type":"text","text":"Plan recorded and shown to the human.\n\nYou have NOT exited the planning phase — you cannot; only the human can, by pressing Ctrl+G to arm the run. Stop here. Do not begin implementing, do not call this tool again, and do not ask whether to proceed: no reply is coming. If they want changes, they will say so."}],"structuredContent":null},"error":null,"durationMs":842,"pluginId":null,"readOnlyHint":null,"appContext":null,"mcpAppResourceUri":null},"threadId":"01a01547-26f7-7fd2-afeb-349415035aa2","turnId":"01a01547-2704-7cc1-9c7e-6b8f2a9d9a10","completedAtMs":1787070750069},"emittedAtMs":1787070750069}
+```
+Its `threadId`/`turnId` values are themselves reused from earlier live IDs already documented
+elsewhere in this file (§7's own example thread id is `01a01547-26f7-7fd2-afeb-349415035aa2`) —
+consistent with a hand-assembled example borrowing realistic-looking but non-fresh identifiers,
+not a new live call.
+
+**Provenance note.** `internal/codex/translate.go`'s `mcpToolCall` handling and §12 itself were
+already present, uncommitted, in this working tree before this task began — `git diff --stat`
+against `HEAD` (`88c63b3`) shows `translate.go` and this file already modified, plus untracked
+`internal/codex/driver_live_test.go`, `internal/e2e/codex_test.go`, and three fixtures under
+`docs/codex-fixtures/` (all dated today). This is almost certainly the output of the prior
+attempt this task's own brief describes as having "hung for thirty minutes and had to be killed."
+This task did not write any of that, was not asked to (Go files were explicitly off-limits), and
+did not rely on it: every §12 claim re-checked above was re-derived independently from a fresh
+schema dump before being treated as confirmed, which is what turned up the one genuine gap
+(§13(c) above) that §12's original phrasing had stated more confidently than the schema actually
+supports.
+
+---
+
 ## Fit against acy's seams
 
 - **`internal/driver`** — needs a second implementation entirely, not a flag change: codex's

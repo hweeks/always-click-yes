@@ -291,6 +291,13 @@ type SessionRow struct {
 // entryKinds maps the internal styling enum to the wire names. A table rather
 // than a String() method on ekind, because these strings are protocol: renaming
 // an ekind constant must not silently rename a JSON value a client switches on.
+//
+// eClaude's "claude" is one of those wire names, not a label: it is a
+// structural discriminator the webview switches its entry-kind union and CSS
+// class on (see vscode/webview/protocol.ts), and the webview never prints it
+// as a badge. It deliberately does not follow Model.agentBadge — a codex run
+// still ships "claude" here — because renaming it would be a breaking wire
+// change for no visible difference. Do not "fix" it to track the agent name.
 var entryKinds = map[ekind]string{
 	eMeta:     "meta",
 	eYou:      "you",

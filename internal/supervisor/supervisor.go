@@ -554,6 +554,7 @@ func NewSupervisor(ctx context.Context, f Flags) (*Supervisor, error) {
 		Countdown:    f.Countdown,
 		LogPath:      logPath,
 		ConfigPath:   f.ConfigPath,
+		Agent:        f.Agent,
 		StartupNote:  f.StartupNote,
 		MaxLines:     f.MaxLines,
 		Cwd:          cwd,

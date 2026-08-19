@@ -302,6 +302,28 @@ func TestFinishIsIdempotent(t *testing.T) {
 	}
 }
 
+// A real run showed the model skipping straight to Dispatch instead of
+// presenting a plan first — Dispatch refused, and a turn was lost before the
+// human ever saw a plan. Both prompts must say the job plainly instead of
+// leaving it to be discovered by a refusal.
+func TestPromptsTellTheModelToPresentAPlanAndStop(t *testing.T) {
+	for name, prompt := range map[string]string{
+		"ParentSystemPrompt":  ParentSystemPrompt,
+		"ArchSystemPromptFor": ArchSystemPromptFor("off", nil),
+	} {
+		if !strings.Contains(prompt, mcp.Qualified(mcp.ToolPlan)) {
+			t.Errorf("%s: should name %s", name, mcp.Qualified(mcp.ToolPlan))
+		}
+		lower := strings.ToLower(prompt)
+		if !strings.Contains(lower, "stop") {
+			t.Errorf("%s: should tell the model to stop once the plan is presented", name)
+		}
+		if !strings.Contains(lower, "arm") {
+			t.Errorf("%s: should tie that instruction to the run not yet being armed", name)
+		}
+	}
+}
+
 // stackMode "ask" is the only case where the architect must be told to put
 // the choice to the human before committing to a shape for the tickets —
 // "chain" and "off" leave nothing to ask about.

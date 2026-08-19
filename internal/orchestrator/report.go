@@ -26,13 +26,35 @@ const (
 	OutcomeRejected  = "rejected"
 )
 
-// ReportSchema is passed to the child as --json-schema, which makes claude
-// validate its own final answer against it and hand back a parsed
-// structured_output object on the result event.
+// ReportSchema is passed to the child as --json-schema for a claude child, and
+// as turn/start's outputSchema for a codex child (internal/supervisor/codex.go).
+// Both backends validate the child's final answer against it and hand back a
+// parsed structured_output object.
+//
+// The codex path reaches OpenAI's STRICT structured-output validator, which is
+// stricter than claude's: every object node must set "additionalProperties":
+// false AND list every one of its properties in "required" — there is no such
+// thing as an optional property, only a required one whose type includes
+// "null". A schema that omits an optional key from "required" is rejected
+// outright, before the child gets to run at all; a live codex child hit this
+// on its very first turn:
+//
+//	Invalid schema for response_format 'codex_output_schema': In
+//	context=('properties', 'changed', 'items'), 'required' is required to be
+//	supplied and to be an array including every key in properties. Missing
+//	'note'.
+//
+// So every optional field below is expressed as a nullable union
+// (`["string", "null"]` or `["array", "null"]`) and listed in its object's
+// "required", with the description telling the child that null (or an empty
+// array) is the correct answer when it has nothing to say — otherwise a model
+// reading "required" without reading this comment will assume it must invent
+// something for every field. This is one schema for both backends: a
+// codex-only fork would drift from what claude actually enforces.
 const ReportSchema = `{
   "type": "object",
   "additionalProperties": false,
-  "required": ["outcome", "summary", "changed"],
+  "required": ["outcome", "summary", "changed", "verified", "followups", "needs_decision"],
   "properties": {
     "outcome": {
       "type": "string",
@@ -41,7 +63,6 @@ const ReportSchema = `{
     },
     "summary": {
       "type": "string",
-      "maxLength": 2000,
       "description": "What you did and what it means for the caller, in 1-3 sentences. Written for someone who did NOT watch you work and will never read your transcript."
     },
     "changed": {
@@ -51,58 +72,68 @@ const ReportSchema = `{
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["path", "action"],
+        "required": ["path", "action", "note"],
         "properties": {
           "path": {"type": "string", "description": "Repo-relative path."},
           "action": {"type": "string", "enum": ["created", "modified", "deleted"]},
-          "note": {"type": "string", "maxLength": 300, "description": "Only when the path alone does not say what changed."}
+          "note": {"type": ["string", "null"], "maxLength": 300, "description": "Only when the path alone does not say what changed. Null otherwise — do not invent one."}
         }
       }
     },
     "verified": {
-      "type": "array",
+      "type": ["array", "null"],
       "maxItems": 10,
-      "description": "Checks you actually ran, and what they said. A claim in summary with no check here is an unverified claim, and the caller will read it that way.",
+      "description": "Checks you actually ran, and what they said. A claim in summary with no check here is an unverified claim, and the caller will read it that way. Null or empty if you ran none.",
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["check", "result"],
+        "required": ["check", "result", "detail"],
         "properties": {
           "check": {"type": "string", "maxLength": 200, "description": "The exact command or check, for example: go test ./internal/ui/"},
           "result": {"type": "string", "enum": ["pass", "fail", "not_run"]},
-          "detail": {"type": "string", "maxLength": 500, "description": "Required when result is fail: the failing case, not the raw output."}
+          "detail": {"type": ["string", "null"], "maxLength": 500, "description": "Required when result is fail: the failing case, not the raw output. Null otherwise."}
         }
       }
     },
     "followups": {
-      "type": "array",
+      "type": ["array", "null"],
       "maxItems": 5,
-      "description": "Work you deliberately did not do. Phrase each so it could be dispatched as its own task; if you cannot, it belongs in summary instead.",
+      "description": "Work you deliberately did not do. Phrase each so it could be dispatched as its own task; if you cannot, it belongs in summary instead. Null or empty if there are none.",
       "items": {"type": "string", "maxLength": 300}
     },
     "needs_decision": {
-      "type": "string",
+      "type": ["string", "null"],
       "maxLength": 600,
-      "description": "Only when outcome is blocked and a human must choose. State the choice and the options — not the background."
+      "description": "Only when outcome is blocked and a human must choose. State the choice and the options — not the background. Null otherwise."
     }
   }
 }`
 
 // FileChange is one file a task touched.
+//
+// Note is required by ReportSchema but nullable in meaning: a child sends
+// explicit JSON null when it has nothing to add. encoding/json's documented
+// behaviour for unmarshaling null into a non-pointer field is a no-op — the
+// field is simply left at its zero value and no error is produced — so a
+// plain string is enough to accept both "absent" and "null" without a pointer.
 type FileChange struct {
 	Path   string `json:"path"`
 	Action string `json:"action"`
 	Note   string `json:"note,omitempty"`
 }
 
-// Check is one verification the child actually ran.
+// Check is one verification the child actually ran. Detail is nullable for the
+// same reason as FileChange.Note above.
 type Check struct {
 	Check  string `json:"check"`
 	Result string `json:"result"`
 	Detail string `json:"detail,omitempty"`
 }
 
-// Report is a child's structured account of its task.
+// Report is a child's structured account of its task. Verified, Followups and
+// NeedsDecision are all nullable in ReportSchema — a JSON null for a slice
+// field unmarshals to nil with no error, the same as an absent key, so these
+// need no special-case handling either.
 type Report struct {
 	Outcome       string       `json:"outcome"`
 	Summary       string       `json:"summary"`
@@ -143,20 +174,25 @@ func degraded(reason string) Report {
 }
 
 // Render is what the parent's conversation actually pays for, so it is a fixed
-// compact shape rather than the child's prose. Everything here is bounded: a
-// pathological report must not cost more than the work it describes.
+// compact shape rather than the child's prose. The summary is the part a human
+// actually reads and is exempt from every cap here — a child's summary must
+// reach the parent whole, however long. Everything after it is bounded: a
+// pathological pile of changed files, checks or followups must not cost more
+// than the work it describes.
 func (r Report) Render(taskID, title string) string {
-	var b strings.Builder
+	var head strings.Builder
 
-	head := strings.ToUpper(r.Outcome)
-	if head == "" {
-		head = "UNKNOWN"
+	outcome := strings.ToUpper(r.Outcome)
+	if outcome == "" {
+		outcome = "UNKNOWN"
 	}
-	fmt.Fprintf(&b, "%s %s — %s\n", taskID, title, head)
-	b.WriteString(clip(r.Summary, maxSummaryRunes))
+	fmt.Fprintf(&head, "%s %s — %s\n", taskID, title, outcome)
+	head.WriteString(strings.TrimSpace(r.Summary))
+
+	var tail strings.Builder
 
 	if len(r.Changed) > 0 {
-		b.WriteString("\nchanged: ")
+		tail.WriteString("\nchanged: ")
 		parts := make([]string, 0, len(r.Changed))
 		for i, c := range r.Changed {
 			if i == maxRenderedFiles {
@@ -169,11 +205,11 @@ func (r Report) Render(taskID, title string) string {
 			}
 			parts = append(parts, p)
 		}
-		b.WriteString(strings.Join(parts, " · "))
+		tail.WriteString(strings.Join(parts, " · "))
 	}
 
 	if len(r.Verified) > 0 {
-		b.WriteString("\nverified: ")
+		tail.WriteString("\nverified: ")
 		parts := make([]string, 0, len(r.Verified))
 		for i, c := range r.Verified {
 			if i == maxRenderedChecks {
@@ -186,26 +222,32 @@ func (r Report) Render(taskID, title string) string {
 			}
 			parts = append(parts, p)
 		}
-		b.WriteString(strings.Join(parts, " · "))
+		tail.WriteString(strings.Join(parts, " · "))
 	}
 
 	if r.NeedsDecision != "" {
-		b.WriteString("\nneeds a decision: " + clip(r.NeedsDecision, maxDecisionRunes))
+		tail.WriteString("\nneeds a decision: " + clip(r.NeedsDecision, maxDecisionRunes))
 	}
 
 	for i, f := range r.Followups {
 		if i == maxRenderedFollowups {
-			fmt.Fprintf(&b, "\nfollowup: … +%d more", len(r.Followups)-i)
+			fmt.Fprintf(&tail, "\nfollowup: … +%d more", len(r.Followups)-i)
 			break
 		}
-		b.WriteString("\nfollowup: " + clip(f, maxFollowupRunes))
+		tail.WriteString("\nfollowup: " + clip(f, maxFollowupRunes))
 	}
 
-	// Per-field clips bound each part but say nothing about the whole, and it is
-	// the whole that lands in the parent's context and is re-read on every turn
-	// thereafter. So the total is capped outright. The first line — id, title,
-	// outcome — is written first and therefore always survives.
-	return clip(b.String(), maxRenderedRunes)
+	// Per-field clips bound each part of the tail but say nothing about the
+	// whole of it, and it is the whole that lands in the parent's context and is
+	// re-read on every turn thereafter. So the tail's total is capped outright,
+	// same as before — what changed is that the summary is no longer part of
+	// what gets clipped here. The header and summary are written first and
+	// therefore always survive.
+	out := head.String()
+	if t := clip(tail.String(), maxRenderedRunes); t != "" {
+		out += "\n" + t
+	}
+	return out
 }
 
 const (
@@ -216,7 +258,8 @@ const (
 	// ~1250 tokens. A dozen of these is still a rounding error against the
 	// hundreds of thousands of tokens the children spent producing them.
 	// Counted in runes, because that is what clip bounds — splitting a rune to
-	// hit a byte target would corrupt the text for no benefit.
+	// hit a byte target would corrupt the text for no benefit. This bounds the
+	// non-summary tail only; the summary itself carries no cap.
 	maxRenderedRunes = 5000
 )
 
@@ -226,11 +269,14 @@ const (
 // the child was allowed to write, and a cap below it costs the child its whole
 // report to a validation error over text the renderer would have carried.
 //
+// summary is deliberately absent from both this list and the schema's
+// maxLength: a long summary must reach the parent whole, so it has no clip
+// constant and ReportSchema's "summary" property carries no maxLength either.
+//
 // These are a safety net, not guidance. What the child actually writes is shaped
 // by the descriptions in the schema — "in 1-3 sentences" and the like — so the
 // caps sit far above them and should effectively never bind.
 const (
-	maxSummaryRunes  = 2000
 	maxNoteRunes     = 300
 	maxCheckRunes    = 200
 	maxDetailRunes   = 500
@@ -251,10 +297,13 @@ func actionGlyph(action string) string {
 	}
 }
 
-// clip truncates on a rune boundary. claude enforces the schema's maxLength on
-// the child's structured output, and a violation costs the entire report rather
-// than merely a long one, so the caps sit far above the guidance the descriptions
-// give and the renderer is what actually bounds the parent's context.
+// clip truncates on a rune boundary. Both backends enforce a field's schema
+// maxLength on the child's structured output — claude directly, and codex via
+// OpenAI's strict structured-output validator — and a violation costs the
+// entire report rather than merely a long field, so the caps sit far above the
+// guidance the descriptions give and the renderer is what actually bounds the
+// parent's context. summary has no maxLength and is never passed through clip:
+// see the const block above.
 func clip(s string, limit int) string {
 	s = strings.TrimSpace(s)
 	if len(s) <= limit {

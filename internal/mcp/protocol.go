@@ -80,7 +80,17 @@ func ParseRole(s string) Role {
 
 // Qualified returns the name claude uses for one of our tools in the event stream
 // and in --allowedTools.
-func Qualified(tool string) string { return "mcp__" + ServerName + "__" + tool }
+func Qualified(tool string) string { return QualifiedServer(ServerName, tool) }
+
+// QualifiedServer is Qualified generalized to an arbitrary server name, for a
+// client (like codex) whose event stream can carry tool calls from MCP
+// servers other than acy's own — `codex mcp add` writes servers into the
+// user's ~/.codex/config.toml, and a thread's inline server config overlays
+// that rather than replacing it, so acy is not necessarily the only server on
+// the thread. Qualified(tool) is exactly QualifiedServer(ServerName, tool);
+// this exists so a caller holding a call's own server name never has to
+// hardcode ServerName to reuse the same "mcp__<server>__<tool>" format.
+func QualifiedServer(server, tool string) string { return "mcp__" + server + "__" + tool }
 
 // defaultProtocolVersion is used only if the client sends none. Normally we echo
 // whatever claude asked for; negotiation is lenient (a probe server that answered

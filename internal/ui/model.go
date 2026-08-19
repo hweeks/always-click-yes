@@ -37,6 +37,14 @@ type Config struct {
 	Countdown  time.Duration        // auto-approve delay per gated tool, and per question in AUTO-RUN
 	LogPath    string               // debug log file path (shown in the UI), if any
 	ConfigPath string               // .acy.json the run's settings came from (shown in the UI), if any
+
+	// Agent names the CLI this run supervises — supervisor.Flags.Agent,
+	// "claude" or "codex" — and drives every human-readable string the UI
+	// prints about it: the transcript badge and the ask/rate-limit/help
+	// prose (see agentBadge/agentProse). "" behaves exactly like "claude":
+	// every caller and test that predates this field builds a Config
+	// without setting it, and none of them may change behavior as a result.
+	Agent string
 	// StartupNote is a human-readable notice shown once at startup, "" if
 	// none — e.g. `acy arch` uses it to tell a human that fleet.stackMode
 	// "ask" got silently downgraded to "off" because gh-stack wasn't
@@ -125,6 +133,34 @@ type Config struct {
 	ParentNoExec bool
 }
 
+// agentBadge is the lowercase register the transcript badge and the entry's
+// wire tag use: Config.Agent verbatim, or "claude" when a run left it unset
+// — every caller that predates this field relies on exactly that default. A
+// name acy does not recognize still passes through unchanged rather than
+// rendering blank, so a future third agent reads as itself instead of vanishing.
+func (m Model) agentBadge() string {
+	if m.agent == "" {
+		return "claude"
+	}
+	return m.agent
+}
+
+// agentProse is the capitalized register the human-readable sentences use
+// ("Claude is asking…", "Codex rate limit reached…"). It is a total
+// function over agentBadge: the two agents acy ships get their proper
+// names, and anything else is upper-cased at the front so it still reads as
+// a sentence rather than coming back empty.
+func (m Model) agentProse() string {
+	switch b := m.agentBadge(); b {
+	case "claude":
+		return "Claude"
+	case "codex":
+		return "Codex"
+	default:
+		return strings.ToUpper(b[:1]) + b[1:]
+	}
+}
+
 // readOnlyParentTools are the tools that get no countdown when the supervising
 // session itself calls them.
 //
@@ -185,7 +221,8 @@ type Model struct {
 	logPath       string
 	configPath    string // .acy.json this run's settings came from, for the projection
 	maxLines      int
-	renderHTML    bool // stamp each entry with its HTML rendering (see Config.RenderHTML)
+	renderHTML    bool   // stamp each entry with its HTML rendering (see Config.RenderHTML)
+	agent         string // Config.Agent, "" meaning "claude" — see agentBadge/agentProse
 
 	// Billing. apiKeySource comes from claude's init event and says which account
 	// actually paid; see billing().
@@ -403,6 +440,7 @@ func New(drv Agent, cfg Config) Model {
 		maxLines:   cfg.MaxLines,
 		altScreen:  cfg.AltScreen,
 		renderHTML: cfg.RenderHTML,
+		agent:      cfg.Agent,
 
 		sessionLister: cfg.Sessions,
 		dispatcher:    cfg.Dispatcher,
@@ -532,6 +570,9 @@ func (m *Model) stamp(e entry) entry {
 	if e.raw == "" {
 		e.raw = stripAnsi(e.body)
 	}
+	if e.agentTag == "" {
+		e.agentTag = m.agentBadge()
+	}
 	if m.renderHTML {
 		// stripAnsi for the same reason Frame does it: a tool body is chroma's
 		// terminal256 output, and escape codes mean nothing to a browser.
@@ -577,7 +618,7 @@ func (m *Model) ingest(ev driver.Event) {
 			until := time.Unix(ev.RateLimitInfo.ResetsAt, 0).Add(5 * time.Minute)
 			m.cooldownUntil = until
 			m.status = "cooling down — resumes " + until.Local().Format("3:04 PM")
-			m.appendEntry(entry{kind: eWarn, body: "Claude rate limit reached — automatic retry is scheduled for " + until.Local().Format(time.Kitchen)})
+			m.appendEntry(entry{kind: eWarn, body: m.agentProse() + " rate limit reached — automatic retry is scheduled for " + until.Local().Format(time.Kitchen)})
 		}
 	case driver.TypeAssistant:
 		for _, b := range ev.Message.Blocks() {
@@ -722,7 +763,11 @@ var intercepted = map[string]bool{
 }
 
 // baseToolName strips an "mcp__<server>__" prefix so an MCP-provided tool is
-// matched by the same name as its built-in counterpart.
+// matched by the same name as its built-in counterpart. It does not care
+// which server the prefix names — fine for display and for the approval
+// gate, where a tool named e.g. "Bash" should render/gate the same way
+// regardless of which MCP server exposed it. It is deliberately NOT used for
+// ingestToolUse's own dispatch below — see acyDispatchName.
 func baseToolName(name string) string {
 	if !strings.HasPrefix(name, "mcp__") {
 		return name
@@ -731,6 +776,30 @@ func baseToolName(name string) string {
 		return name[i+len("__"):]
 	}
 	return name
+}
+
+// acyDispatchName is what ingestToolUse's switch actually keys on: the bare
+// tool name, but ONLY when the call is either unqualified (claude's own
+// built-ins, e.g. ExitPlanMode) or qualified by acy's own MCP server segment.
+// baseToolName alone strips ANY "mcp__<server>__" prefix regardless of which
+// server sent it — right for rendering, wrong here, because a codex thread's
+// configured MCP servers are not limited to acy's own (`codex mcp add`
+// writes into the user's ~/.codex/config.toml, merged with acy's inline
+// config rather than replaced by it — see emitMcpToolCall's own comment in
+// internal/codex/translate.go). A different server's tool that happens to be
+// named "Finish" or "PresentPlan" must fall through to the default "render
+// as an ordinary tool call" case below, not be mistaken for acy's own
+// end-the-run or plan-box tool — so this returns "" for a foreign server's
+// call, which matches none of the switch's cases.
+func acyDispatchName(name string) string {
+	if !strings.HasPrefix(name, "mcp__") {
+		return name
+	}
+	server, tool, ok := strings.Cut(strings.TrimPrefix(name, "mcp__"), "__")
+	if !ok || server != mcp.ServerName {
+		return ""
+	}
+	return tool
 }
 
 // ingestToolUse renders a tool call. PresentPlan (and ExitPlanMode, from a session
@@ -743,7 +812,7 @@ func baseToolName(name string) string {
 // would race the socket and produce a second panel with no way to reply. Because
 // the two paths write different state, their arrival order is irrelevant.
 func (m *Model) ingestToolUse(b driver.ContentBlock) {
-	switch baseToolName(b.Name) {
+	switch acyDispatchName(b.Name) {
 	case "ExitPlanMode", mcp.ToolPlan:
 		plan := planText(b.Input)
 		if plan == "" {

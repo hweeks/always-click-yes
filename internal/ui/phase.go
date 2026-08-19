@@ -63,6 +63,17 @@ type Launcher func(ctx context.Context, spec LaunchSpec) (Agent, error)
 // of that prompt was describing constraints that are now structurally true.
 // "Do NOT implement it" needs no words when there is no tool that could; "you
 // cannot leave this phase" needs none when the tool that would says so itself.
+//
+// One line earns its place despite that. Which plan to present is behavioural,
+// not structural: nothing stops the model from reaching for Dispatch first, and
+// in a real run that is exactly what happened — it skipped straight to Dispatch,
+// got DispatchNotArmed's refusal, and the human was left staring at no plan.
+// The refusal caught the mistake; it did not prevent it, and by then a turn was
+// already spent. Saying the job plainly up front — understand the work, present
+// it, stop — costs one line and pays for itself before that turn, not after.
+// And because there is only one prompt for the whole run, that line has to read
+// right in AUTO-RUN too, once the plan is already presented and approved — it
+// does, since it only ever describes what happens before arming.
 var ParentSystemPrompt = strings.Join([]string{
 	"You are the lead on a supervised run. You have Read, Grep and Glob: you can understand this",
 	"codebase, and you cannot change it.",
@@ -72,6 +83,10 @@ var ParentSystemPrompt = strings.Join([]string{
 	"this conversation, so a task has to stand alone: what to change, where, and how they will know",
 	"it worked. One task per call, scoped so that a report can honestly say \"completed\". Read each",
 	"report before you dispatch the next one.",
+	"",
+	"Until a human arms the run, presenting a plan is the whole job: understand the work, then call " +
+		mcp.Qualified(mcp.ToolPlan) + " once with a finished plan and stop there — wait, rather than asking",
+	"whether to proceed.",
 	"",
 	mcp.Qualified(mcp.ToolPlan) + " shows the human a finished plan.",
 	mcp.Qualified(mcp.ToolAsk) + " puts a real choice to them and blocks for an answer.",
@@ -89,6 +104,11 @@ var ParentSystemPrompt = strings.Join([]string{
 // Dispatch's instruction does, scoped to one PR of work. Await is the
 // architect's main loop rather than a blocking call, so the prompt says so
 // plainly: launch to capacity, then Await, then react.
+//
+// It closes the same gap ParentSystemPrompt does, for the same reason:
+// LaunchEngineer refuses until the run is armed, but that refusal only fires
+// after the architect has already reached for it and lost a turn. Telling it
+// plainly up front — present a plan, then stop — is cheaper than the refusal.
 //
 // It takes stackMode — the run's already-resolved effective fleet.stackMode,
 // never the raw configured value, per cli/arch.go's resolveStackMode — because
@@ -188,6 +208,10 @@ func ArchSystemPromptFor(stackMode string, jira *config.JiraConfig) string {
 	}
 
 	lines = append(lines,
+		"",
+		"Until a human arms the run, presenting a plan is the whole job: understand the work, then call "+
+			mcp.Qualified(mcp.ToolPlan)+" once with a finished plan and stop there — wait, rather than asking",
+		"whether to proceed.",
 		"",
 		mcp.Qualified(mcp.ToolPlan)+" shows the human a finished plan.",
 		mcp.Qualified(mcp.ToolAsk)+" puts a real choice to them and blocks for an answer.",

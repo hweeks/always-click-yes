@@ -203,6 +203,33 @@ func TestBridgeAbandonedPendingStillAnswersDriver(t *testing.T) {
 	}
 }
 
+// TestBridgeAcceptsMCPElicitationWithoutQueueing proves an acy MCP call can
+// reach acy's own phase/dispatch rules. Codex wraps each such call in an MCP
+// elicitation under its untrusted approval policy; it is not a filesystem tool
+// and must neither wait for nor consume the ordinary tool countdown.
+func TestBridgeAcceptsMCPElicitationWithoutQueueing(t *testing.T) {
+	w := newSyncWriter()
+	d := NewWithWriter(Options{}, w)
+	b := NewBridge()
+	b.Attach(d)
+	defer b.Close()
+
+	d.handleLine([]byte(`{"method":"mcpServer/elicitation/request","id":4,"params":{"mode":"form","requestedSchema":{"type":"object"}}}`))
+	w.awaitWrite(t)
+
+	select {
+	case p := <-b.Requests():
+		t.Fatalf("MCP elicitation was incorrectly queued as tool %q", p.Input.ToolName)
+	case <-time.After(100 * time.Millisecond):
+	}
+	w.mu.Lock()
+	got := w.buf.String()
+	w.mu.Unlock()
+	if !strings.Contains(got, `"id":4`) || !strings.Contains(got, `"action":"accept"`) {
+		t.Errorf("wire output = %s, want MCP elicitation id=4 accepted with action", got)
+	}
+}
+
 // TestBridgeTwoDriversBothForward proves the fan-in: two independently
 // attached drivers both land their approval requests on the one shared
 // channel.

@@ -150,10 +150,21 @@ func codexParentOptions(f Flags, exe, mcpSocket string, parentRole mcp.Role, par
 // ways the claude spawn closure already diverges from launcher — see each
 // field's own comment for which is which.
 func codexChildOptions(f Flags, exe, mcpSocket string, env map[string]string, stripEnv []string) codex.Options {
+	childModel := f.ChildModel
+	// addRunFlags defaults ChildModel to Claude's inexpensive "sonnet". That
+	// is a sensible default for the Claude backend but not a Codex model name;
+	// passing it through makes every otherwise-default Codex child fail its
+	// first turn with a 400. Treat that inherited CLI default as "same model as
+	// the Codex parent". Any actual Codex model supplied in .acy.json or with
+	// --child-model still wins, and an empty parent model lets Codex choose its
+	// own default just as the parent does.
+	if childModel == "sonnet" {
+		childModel = f.Model
+	}
 	opts := codex.Options{
 		Bin:      f.CodexBin,
 		Cwd:      f.Cwd,
-		Model:    childModel(f),
+		Model:    childModel,
 		Env:      env,
 		StripEnv: stripEnv,
 

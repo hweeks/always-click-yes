@@ -96,7 +96,7 @@ func (m *Model) openAsk(p *mcp.Pending) {
 	if !ok {
 		alog.Printf("mcp: unparseable ask args, answering with a no-op: %s", string(p.Req.Args))
 		p.Resolve(mcp.Answer{Text: mcp.SupervisorGone})
-		m.appendEntry(entry{kind: eWarn, body: "⚠ Claude asked a question acy could not read — told it to use its best judgment"})
+		m.appendEntry(entry{kind: eWarn, body: "⚠ " + m.agentProse() + " asked a question acy could not read — told it to use its best judgment"})
 		return
 	}
 	a.pending = p
@@ -110,7 +110,7 @@ func (m *Model) openAsk(p *mcp.Pending) {
 	// letting it render underneath is what guarantees nothing is left for a
 	// keystroke to reach but the panel actually on screen.
 	m.queueOpen = false
-	m.appendEntry(entry{kind: eMeta, body: "❓ Claude is asking a question — answer below"})
+	m.appendEntry(entry{kind: eMeta, body: "❓ " + m.agentProse() + " is asking a question — answer below"})
 }
 
 // handleAskKey drives the AskUserQuestion panel. Enter confirms the current
@@ -167,7 +167,7 @@ func (m *Model) expireAsk() {
 		return
 	}
 	alog.Printf("mcp: auto-skip question after countdown")
-	m.appendEntry(entry{kind: eWarn, body: "⏳ no answer in time — telling Claude to use its best judgment"})
+	m.appendEntry(entry{kind: eWarn, body: "⏳ no answer in time — telling " + m.agentProse() + " to use its best judgment"})
 	m.submitAsk(true)
 }
 
