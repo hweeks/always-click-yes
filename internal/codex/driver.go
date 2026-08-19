@@ -48,14 +48,19 @@ type Options struct {
 	Bin string // path/name of the codex binary (default "codex")
 	Cwd string // working directory for both the process and the thread
 
-	Model                 string          // ThreadStartParams.model
-	Sandbox               string          // ThreadStartParams.sandbox: readOnly, workspaceWrite, dangerFullAccess
-	ApprovalPolicy        string          // ThreadStartParams.approvalPolicy: untrusted, on-request, never
-	DeveloperInstructions string          // ThreadStartParams.developerInstructions (developer-role, additive)
-	Config                map[string]any  // ThreadStartParams.config: raw per-thread overlay (e.g. mcp_servers)
-	OutputSchema          json.RawMessage // TurnStartParams.outputSchema, attached to every turn/start
-	Effort                string          // ThreadStartParams.effort (model-specific; no fixed enum)
-	ResumeID              string          // when set, thread/resume is used instead of thread/start
+	Model                 string         // ThreadStartParams.model
+	Sandbox               string         // ThreadStartParams.sandbox: readOnly, workspaceWrite, dangerFullAccess
+	ApprovalPolicy        string         // ThreadStartParams.approvalPolicy: untrusted, on-request, never
+	DeveloperInstructions string         // ThreadStartParams.developerInstructions (developer-role, additive)
+	Config                map[string]any // ThreadStartParams.config: raw per-thread overlay (e.g. mcp_servers)
+	// IsolateMCP disables every MCP server inherited from the user's Codex
+	// configuration unless Config explicitly selects it. app-server merges a
+	// thread's config overlay with ~/.codex/config.toml, so supplying only acy's
+	// server is not isolation by itself.
+	IsolateMCP   bool
+	OutputSchema json.RawMessage // TurnStartParams.outputSchema, attached to every turn/start
+	Effort       string          // ThreadStartParams.effort (model-specific; no fixed enum)
+	ResumeID     string          // when set, thread/resume is used instead of thread/start
 
 	// Env overlays variables for the codex process. Env keys present here win
 	// over an inherited value with the same name.
@@ -238,7 +243,15 @@ func (d *Driver) Start(ctx context.Context) error {
 		close(d.exited)
 	}()
 
-	return d.handshake(ctx)
+	if err := d.handshake(ctx); err != nil {
+		// A failed initialize/thread-start leaves a live app-server (and any
+		// MCP children it started) behind unless we tear down the process group
+		// before returning the error to the caller.
+		d.Stop()
+		_ = d.Wait()
+		return err
+	}
+	return nil
 }
 
 // handshake sends initialize, then thread/start (or thread/resume when
@@ -249,6 +262,11 @@ func (d *Driver) Start(ctx context.Context) error {
 func (d *Driver) handshake(ctx context.Context) error {
 	if _, err := d.call(ctx, "initialize", d.initializeParams(), kindGeneric); err != nil {
 		return fmt.Errorf("codex: initialize: %w", err)
+	}
+	if d.opts.IsolateMCP {
+		if err := d.disableInheritedMCP(ctx); err != nil {
+			return fmt.Errorf("codex: isolate MCP servers: %w", err)
+		}
 	}
 
 	method := "thread/start"
@@ -270,6 +288,49 @@ func (d *Driver) handshake(ctx context.Context) error {
 		return fmt.Errorf("codex: %s response carried no thread id", method)
 	}
 	return nil
+}
+
+// disableInheritedMCP reads the effective config before a thread exists and
+// overlays enabled=false for every inherited server not explicitly selected
+// by this Driver. This preserves Codex's normal auth/config home while making
+// the tool registry deterministic; changing CODEX_HOME would isolate config
+// too, but also isolates auth.json and breaks subscription-backed logins.
+func (d *Driver) disableInheritedMCP(ctx context.Context) error {
+	raw, err := d.call(ctx, "config/read", map[string]any{
+		"cwd":           d.opts.Cwd,
+		"includeLayers": false,
+	}, kindGeneric)
+	if err != nil {
+		return err
+	}
+	var response struct {
+		Config struct {
+			MCPServers map[string]json.RawMessage `json:"mcp_servers"`
+		} `json:"config"`
+	}
+	if err := json.Unmarshal(raw, &response); err != nil {
+		return fmt.Errorf("decode config/read response: %w", err)
+	}
+
+	d.opts.Config = isolateMCPConfig(d.opts.Config, response.Config.MCPServers)
+	return nil
+}
+
+func isolateMCPConfig(config map[string]any, inherited map[string]json.RawMessage) map[string]any {
+	servers, _ := config["mcp_servers"].(map[string]any)
+	if servers == nil {
+		servers = make(map[string]any)
+		if config == nil {
+			config = make(map[string]any)
+		}
+		config["mcp_servers"] = servers
+	}
+	for name := range inherited {
+		if _, selected := servers[name]; !selected {
+			servers[name] = map[string]any{"enabled": false}
+		}
+	}
+	return config
 }
 
 // initializeParams builds the "initialize" request's params.
@@ -448,6 +509,7 @@ func (d *Driver) Stop() {
 // size (large tool payloads, e.g. aggregatedOutput on a busy commandExecution).
 func (d *Driver) readLoop(r io.Reader) {
 	defer close(d.events)
+	defer close(d.approvals)
 	defer alog.Recover("codex.readLoop")
 	br := bufio.NewReaderSize(r, 1<<20)
 	for {

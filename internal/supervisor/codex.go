@@ -89,15 +89,26 @@ func assertCodexParentSafe(opts codex.Options) error {
 // generates for claude's --mcp-config file — config.MCPServerArgv is the one
 // shared construction, so the two paths can never drift into invoking acy's
 // own MCP server two different ways.
-func codexMCPServerConfig(exe, socketPath string, role mcp.Role) map[string]any {
+func codexMCPServerConfig(exe, socketPath string, role mcp.Role, extra ...config.ExtraMCPServer) map[string]any {
 	command, args := config.MCPServerArgv(exe, socketPath, role)
-	return map[string]any{
-		"mcp_servers": map[string]any{
-			mcp.ServerName: map[string]any{
-				"command": command,
-				"args":    args,
-			},
+	servers := map[string]any{
+		mcp.ServerName: map[string]any{
+			"command": command,
+			"args":    args,
 		},
+	}
+	for _, server := range extra {
+		entry := map[string]any{
+			"command": server.Command,
+			"args":    server.Args,
+		}
+		if len(server.Env) > 0 {
+			entry["env"] = server.Env
+		}
+		servers[server.Name] = entry
+	}
+	return map[string]any{
+		"mcp_servers": servers,
 	}
 }
 
@@ -111,12 +122,13 @@ func codexParentOptions(f Flags, exe, mcpSocket string, parentRole mcp.Role, par
 		model = f.Model
 	}
 	return codex.Options{
-		Bin:      f.CodexBin,
-		Cwd:      f.Cwd,
-		Model:    model,
-		ResumeID: spec.ResumeID,
-		Env:      env,
-		StripEnv: stripEnv,
+		Bin:        f.CodexBin,
+		Cwd:        f.Cwd,
+		Model:      model,
+		ResumeID:   spec.ResumeID,
+		Env:        env,
+		StripEnv:   stripEnv,
+		IsolateMCP: true,
 
 		// Always read-only, with no knob to change it. Codex has no way to
 		// remove the shell tool from the model's registry at all
@@ -141,7 +153,7 @@ func codexParentOptions(f Flags, exe, mcpSocket string, parentRole mcp.Role, par
 		// mcp__acy__Dispatch/Finish/AskUserQuestion/PresentPlan — live-
 		// verified to work with no file and no write to the user's own
 		// ~/.codex/config.toml (docs/codex-cli-findings.md §5).
-		Config: codexMCPServerConfig(exe, mcpSocket, parentRole),
+		Config: codexMCPServerConfig(exe, mcpSocket, parentRole, jiraExtraServers(f)...),
 	}
 }
 
@@ -162,11 +174,12 @@ func codexChildOptions(f Flags, exe, mcpSocket string, env map[string]string, st
 		childModel = f.Model
 	}
 	opts := codex.Options{
-		Bin:      f.CodexBin,
-		Cwd:      f.Cwd,
-		Model:    childModel,
-		Env:      env,
-		StripEnv: stripEnv,
+		Bin:        f.CodexBin,
+		Cwd:        f.Cwd,
+		Model:      childModel,
+		Env:        env,
+		StripEnv:   stripEnv,
+		IsolateMCP: true,
 
 		// Writable — the deliberate asymmetry with the parent's read-only
 		// sandbox above. A child's whole job is to edit; wrapping it in a

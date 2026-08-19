@@ -18,8 +18,14 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { findClaude, prependDir, type ResolvedClaude } from './claude';
-import { buildConfigSeed, renderConfigSeed, type Defaults } from './config';
+import { findClaude, findCodex, prependDir, type ResolvedAgent } from './claude';
+import {
+  buildConfigSeed,
+  renderConfigSeed,
+  selectAgent,
+  type AgentName,
+  type Defaults,
+} from './config';
 import { serveArgs } from './endpoint';
 import { needsChmod, resolveBinary, runArgs } from './launch';
 import { PANEL_VIEW_TYPE, PanelHost, panelSerializer } from './panel';
@@ -28,8 +34,10 @@ import { ServeManager, type ServeSpec } from './serve';
 const TERMINAL_NAME = 'acy';
 const RELEASES_URL = 'https://github.com/hweeks/always-click-yes/releases/latest';
 const CLAUDE_SETUP_URL = 'https://docs.claude.com/en/docs/claude-code/setup';
-const CLAUDE_MUTED_KEY = 'acy.claudeMissingMuted';
+const CODEX_SETUP_URL = 'https://developers.openai.com/codex/cli';
+const AGENT_MUTED_KEY = 'acy.agentMissingMuted';
 const INSTALL_CLAUDE = 'Install Claude Code';
+const INSTALL_CODEX = 'Install Codex CLI';
 
 let terminal: vscode.Terminal | undefined;
 let servers: ServeManager | undefined;
@@ -61,7 +69,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   const statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 0);
   statusBar.text = '$(check-all) acy';
-  statusBar.tooltip = 'acy: supervise a Claude Code task';
+  statusBar.tooltip = 'acy: supervise a coding-agent task';
   statusBar.command = 'acy.start';
   statusBar.show();
 
@@ -85,7 +93,7 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
   );
 
-  void checkClaudeOnStartup(context);
+  void checkAgentOnStartup(context);
 }
 
 export function deactivate(): void {
@@ -250,17 +258,19 @@ async function resolveLaunchable(
     return undefined;
   }
 
-  // acy has nothing to supervise without claude, and since it is spawned with
-  // no shell the failure would surface as a dead terminal, not a message.
-  const claude = await resolveClaude(folder);
-  if (!claude) {
+  // acy has nothing to supervise without the selected agent, and since it is
+  // spawned with no shell the failure would surface as a dead terminal, not a message.
+  const agent = await selectedAgent(folder);
+  const executable = await resolveAgent(folder, agent);
+  if (!executable) {
+    const install = agent === 'codex' ? INSTALL_CODEX : INSTALL_CLAUDE;
     const pick = await vscode.window.showWarningMessage(
-      'acy supervises a `claude` session, and the Claude Code CLI was not found on your PATH.',
-      INSTALL_CLAUDE,
+      `acy is configured for \`${agent}\`, but that CLI was not found on your PATH.`,
+      install,
       'Run anyway',
     );
-    if (pick === INSTALL_CLAUDE) {
-      void vscode.env.openExternal(vscode.Uri.parse(CLAUDE_SETUP_URL));
+    if (pick === install) {
+      void vscode.env.openExternal(vscode.Uri.parse(agentSetupURL(agent)));
       return undefined;
     }
     if (pick !== 'Run anyway') {
@@ -274,8 +284,8 @@ async function resolveLaunchable(
     // acy inherits verbatim — without this it could not exec claude either.
     // No --claude-bin flag: .acy.json is the source of truth for run settings.
     pathOverride:
-      claude?.source === 'wellKnown'
-        ? prependDir(process.env.PATH, path.dirname(claude.path), process.platform)
+      executable?.source === 'wellKnown'
+        ? prependDir(process.env.PATH, path.dirname(executable.path), process.platform)
         : undefined,
   };
 }
@@ -301,15 +311,21 @@ function ensureExecutable(binPath: string): boolean {
 }
 
 /**
- * Resolves claude for one folder: its .acy.json, then the settings default,
- * then PATH and the well-known install dirs.
+ * Resolves the selected agent for one folder: .acy.json, settings default,
+ * PATH, then the well-known install dirs.
  */
-async function resolveClaude(
+async function resolveAgent(
   folder: vscode.WorkspaceFolder | undefined,
-): Promise<ResolvedClaude | undefined> {
-  return findClaude({
-    configPath: folder ? await readConfiguredClaudeBin(folder) : undefined,
-    settingPath: vscode.workspace.getConfiguration('acy').get<Defaults>('defaults')?.claudeBin,
+  agent: AgentName,
+): Promise<ResolvedAgent | undefined> {
+  const project: ProjectAgentConfig = folder
+    ? await readProjectAgentConfig(folder)
+    : { exists: false };
+  const defaults = vscode.workspace.getConfiguration('acy').get<Defaults>('defaults');
+  const find = agent === 'codex' ? findCodex : findClaude;
+  return find({
+    configPath: agent === 'codex' ? project.codexBin : project.claudeBin,
+    settingPath: agent === 'codex' ? defaults?.codexBin : defaults?.claudeBin,
     platform: process.platform,
     envPath: process.env.PATH,
     home: os.homedir(),
@@ -324,38 +340,69 @@ async function resolveClaude(
   });
 }
 
-/** claudeBin from the folder's .acy.json. Missing or malformed means "unset". */
-async function readConfiguredClaudeBin(folder: vscode.WorkspaceFolder): Promise<string | undefined> {
+interface ProjectAgentConfig {
+  exists: boolean;
+  agent?: AgentName;
+  claudeBin?: string;
+  codexBin?: string;
+}
+
+/** Agent selection and binary paths from .acy.json. Malformed values are unset. */
+async function readProjectAgentConfig(folder: vscode.WorkspaceFolder): Promise<ProjectAgentConfig> {
+  let raw: Uint8Array;
   try {
-    const raw = await vscode.workspace.fs.readFile(vscode.Uri.joinPath(folder.uri, '.acy.json'));
-    const parsed: unknown = JSON.parse(Buffer.from(raw).toString('utf8'));
-    const bin = (parsed as { claudeBin?: unknown })?.claudeBin;
-    return typeof bin === 'string' ? bin : undefined;
+    raw = await vscode.workspace.fs.readFile(vscode.Uri.joinPath(folder.uri, '.acy.json'));
   } catch {
-    return undefined;
+    return { exists: false };
+  }
+  try {
+    const parsed: unknown = JSON.parse(Buffer.from(raw).toString('utf8'));
+    const cfg = parsed as { agent?: unknown; claudeBin?: unknown; codexBin?: unknown };
+    return {
+      exists: true,
+      agent: cfg.agent === 'codex' || cfg.agent === 'claude' ? cfg.agent : undefined,
+      claudeBin: typeof cfg.claudeBin === 'string' ? cfg.claudeBin : undefined,
+      codexBin: typeof cfg.codexBin === 'string' ? cfg.codexBin : undefined,
+    };
+  } catch {
+    return { exists: true };
   }
 }
 
+async function selectedAgent(folder: vscode.WorkspaceFolder | undefined): Promise<AgentName> {
+  const project = folder ? await readProjectAgentConfig(folder) : { exists: false };
+  const defaultAgent = vscode.workspace.getConfiguration('acy').get<Defaults>('defaults')?.agent;
+  return selectAgent(project.agent, project.exists, defaultAgent);
+}
+
+function agentSetupURL(agent: AgentName): string {
+  return agent === 'codex' ? CODEX_SETUP_URL : CLAUDE_SETUP_URL;
+}
+
 /**
- * Warns once per install if claude is missing, so the first run isn't the
+ * Warns once per agent if its CLI is missing, so the first run isn't the
  * discovery. Never blocks activation — the launcher works regardless.
  */
-async function checkClaudeOnStartup(context: vscode.ExtensionContext): Promise<void> {
-  if (context.globalState.get<boolean>(CLAUDE_MUTED_KEY)) {
+async function checkAgentOnStartup(context: vscode.ExtensionContext): Promise<void> {
+  const folder = vscode.workspace.workspaceFolders?.[0];
+  const agent = await selectedAgent(folder);
+  const mutedKey = `${AGENT_MUTED_KEY}.${agent}`;
+  if (context.globalState.get<boolean>(mutedKey)) {
     return;
   }
-  if (await resolveClaude(vscode.workspace.workspaceFolders?.[0])) {
+  if (await resolveAgent(folder, agent)) {
     return;
   }
+  const install = agent === 'codex' ? INSTALL_CODEX : INSTALL_CLAUDE;
   const pick = await vscode.window.showWarningMessage(
-    'acy supervises a `claude` session and cannot run without the Claude Code CLI, which was not found.',
-    INSTALL_CLAUDE,
+    `acy is configured for \`${agent}\` and cannot run without that CLI, which was not found.`,
+    install,
     "Don't show again",
   );
-  if (pick === INSTALL_CLAUDE) {
-    void vscode.env.openExternal(vscode.Uri.parse(CLAUDE_SETUP_URL));
+  if (pick === install) {
+    void vscode.env.openExternal(vscode.Uri.parse(agentSetupURL(agent)));
   } else if (pick === "Don't show again") {
-    await context.globalState.update(CLAUDE_MUTED_KEY, true);
+    await context.globalState.update(mutedKey, true);
   }
 }
 

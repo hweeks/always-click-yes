@@ -130,6 +130,38 @@ func TestWireThreadStartOmitsUnsetFields(t *testing.T) {
 	}
 }
 
+func TestIsolateMCPConfigDisablesOnlyInheritedServers(t *testing.T) {
+	config := map[string]any{"mcp_servers": map[string]any{
+		"acy":  map[string]any{"command": "/bin/acy"},
+		"jira": map[string]any{"command": "/bin/jira"},
+	}}
+	got := isolateMCPConfig(config, map[string]json.RawMessage{
+		"personal": json.RawMessage(`{"command":"personal"}`),
+		"jira":     json.RawMessage(`{"command":"old-jira"}`),
+	})
+	servers := got["mcp_servers"].(map[string]any)
+	if disabled := servers["personal"].(map[string]any)["enabled"]; disabled != false {
+		t.Errorf("inherited personal server enabled = %v, want false", disabled)
+	}
+	if gotJira := servers["jira"].(map[string]any)["command"]; gotJira != "/bin/jira" {
+		t.Errorf("selected Jira config = %v, want acy's explicit server", servers["jira"])
+	}
+	if gotAcy := servers["acy"].(map[string]any)["command"]; gotAcy != "/bin/acy" {
+		t.Errorf("selected acy config = %v", servers["acy"])
+	}
+}
+
+func TestReadLoopClosesEventsAndApprovals(t *testing.T) {
+	d := New(Options{})
+	d.readLoop(bytes.NewReader(nil))
+	if _, ok := <-d.Events(); ok {
+		t.Error("Events remained open after stdout EOF")
+	}
+	if _, ok := <-d.Approvals(); ok {
+		t.Error("Approvals remained open after stdout EOF")
+	}
+}
+
 func TestWireTurnStart(t *testing.T) {
 	var tx bytes.Buffer
 	d := NewWithWriter(Options{OutputSchema: json.RawMessage(`{"type":"object"}`)}, nopWriteCloser{&tx})

@@ -1,7 +1,7 @@
 {
   "name": "always-click-yes",
   "displayName": "Always Click Yes (acy)",
-  "description": "Supervise long-running Claude Code tasks: plan, arm, and let acy approve each permission prompt on a countdown — right in a VS Code terminal.",
+  "description": "Supervise long-running Claude Code or Codex tasks: plan, arm, and let acy approve each permission prompt on a countdown — right in VS Code.",
   "version": "0.0.0",
   "publisher": "hweeks",
   "license": "WTFPL",
@@ -20,6 +20,7 @@
   "keywords": [
     "claude",
     "claude-code",
+    "codex",
     "agent",
     "supervisor",
     "acy"
@@ -75,7 +76,7 @@
         },
         "acy.defaults": {
           "type": "object",
-          "markdownDescription": "Seed values for **ACY: Create .acy.json**. Only values set here make it into the file — and once the file exists, *it* is the source of truth: these settings are never consulted at launch.",
+          "markdownDescription": "Seed values for **ACY: Create .acy.json**. Agent and binary paths also guide CLI discovery until the project file selects them; once present, `.acy.json` is the source of truth.",
           "additionalProperties": false,
           "properties": {
             "model": {

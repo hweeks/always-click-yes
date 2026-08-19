@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import * as path from 'path';
-import { claudeExeNames, findClaude, prependDir, wellKnownDirs } from '../claude';
+import { claudeExeNames, codexExeNames, findClaude, findCodex, prependDir, wellKnownDirs } from '../claude';
 
 const never = (_p: string) => false;
 
@@ -9,6 +9,19 @@ test('windows gets the shim names the two installers write', () => {
   assert.deepEqual(claudeExeNames('darwin'), ['claude']);
   assert.deepEqual(claudeExeNames('linux'), ['claude']);
   assert.deepEqual(claudeExeNames('win32'), ['claude.exe', 'claude.cmd', 'claude.bat']);
+});
+
+test('codex discovery uses codex executable names and ignores Claude-only install dirs', () => {
+	assert.deepEqual(codexExeNames('darwin'), ['codex']);
+	assert.deepEqual(codexExeNames('win32'), ['codex.exe', 'codex.cmd', 'codex.bat']);
+	const hit = path.join('/Users/x', '.local', 'bin', 'codex');
+	const r = findCodex({
+		platform: 'darwin',
+		envPath: '/usr/bin',
+		home: '/Users/x',
+		isFile: (p) => p === hit || p === path.join('/Users/x', '.claude', 'local', 'codex'),
+	});
+	assert.deepEqual(r, { path: hit, source: 'wellKnown' });
 });
 
 test('wellKnownDirs skips entries whose base dir is unknown', () => {

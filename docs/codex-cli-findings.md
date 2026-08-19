@@ -399,6 +399,16 @@ schema-only (not live-exercised) for the approval-passthrough question.
    *persistent*, global alternative — it does write to `~/.codex/config.toml`. Deliberately
    not run in this recon, to honor "don't touch the user's real config."
 
+**The thread overlay merges with inherited config; it does not replace it.** A follow-up
+live probe against app-server 0.147.0 called `config/read` immediately after `initialize`
+and received the effective `config.mcp_servers` map from the user's normal Codex config.
+Consequently, sending only `config.mcp_servers.acy` at `thread/start` leaves every unrelated
+user server available too. acy's driver now reads that effective map before starting the
+thread and adds `{enabled:false}` for every inherited name that acy did not explicitly
+select. This keeps the user's normal `CODEX_HOME` (and therefore subscription-backed
+`auth.json`) while giving the supervised thread a deterministic MCP registry. `--strict-config`
+is not an isolation flag: its help text says only that it rejects unrecognized config keys.
+
 **A structurally interesting third option, found in the schema, not the CLI:** app-server's
 `thread/start` accepts a `dynamicTools` array (`FunctionDynamicToolSpec`:
 `{type:"function", name, description, inputSchema}`, or a `NamespaceDynamicToolSpec` grouping

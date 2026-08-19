@@ -1,7 +1,5 @@
-// Pure discovery logic for the `claude` CLI. acy is only a supervisor: it
-// spawns claude and has nothing to do without it, so the extension checks for
-// it up front rather than letting a run die on its first turn. Kept vscode-free
-// like launch.ts so it runs under plain `node --test`.
+// Pure discovery logic for the coding-agent CLIs acy can supervise. Kept
+// vscode-free like launch.ts so it runs under plain `node --test`.
 
 import * as path from 'path';
 
@@ -31,12 +29,19 @@ export interface FindClaudeOptions {
   isFile: (p: string) => boolean;
 }
 
+export type ResolvedAgent = ResolvedClaude;
+export type FindAgentOptions = FindClaudeOptions;
+
 /**
  * The CLI's file names on this platform. Windows gets three because the npm
  * install writes a `.cmd` shim and the native installer an `.exe`.
  */
 export function claudeExeNames(platform: NodeJS.Platform): string[] {
   return platform === 'win32' ? ['claude.exe', 'claude.cmd', 'claude.bat'] : ['claude'];
+}
+
+export function codexExeNames(platform: NodeJS.Platform): string[] {
+  return platform === 'win32' ? ['codex.exe', 'codex.cmd', 'codex.bat'] : ['codex'];
 }
 
 /**
@@ -64,10 +69,9 @@ export function wellKnownDirs(
 
 function findInDirs(
   dirs: string[],
-  platform: NodeJS.Platform,
+  names: string[],
   isFile: (p: string) => boolean,
 ): string | undefined {
-  const names = claudeExeNames(platform);
   for (const dir of dirs) {
     if (!dir) {
       continue;
@@ -88,6 +92,22 @@ function findInDirs(
  * probe (network drives, wrappers); the scanned candidates must exist.
  */
 export function findClaude(opts: FindClaudeOptions): ResolvedClaude | undefined {
+  return findAgent(opts, claudeExeNames(opts.platform), wellKnownDirs(opts.platform, opts));
+}
+
+/** Resolves codex with the same precedence as claude. */
+export function findCodex(opts: FindAgentOptions): ResolvedAgent | undefined {
+  const dirs = wellKnownDirs(opts.platform, opts).filter(
+    (dir) => !dir.endsWith(path.join('.claude', 'local')),
+  );
+  return findAgent(opts, codexExeNames(opts.platform), dirs);
+}
+
+function findAgent(
+  opts: FindAgentOptions,
+  exeNames: string[],
+  knownDirs: string[],
+): ResolvedAgent | undefined {
   const configured = opts.configPath?.trim();
   if (configured) {
     return { path: configured, source: 'config' };
@@ -97,15 +117,11 @@ export function findClaude(opts: FindClaudeOptions): ResolvedClaude | undefined 
     return { path: setting, source: 'setting' };
   }
   const sep = opts.platform === 'win32' ? ';' : ':';
-  const onPath = findInDirs((opts.envPath ?? '').split(sep), opts.platform, opts.isFile);
+  const onPath = findInDirs((opts.envPath ?? '').split(sep), exeNames, opts.isFile);
   if (onPath) {
     return { path: onPath, source: 'path' };
   }
-  const wellKnown = findInDirs(
-    wellKnownDirs(opts.platform, { home: opts.home, appData: opts.appData }),
-    opts.platform,
-    opts.isFile,
-  );
+  const wellKnown = findInDirs(knownDirs, exeNames, opts.isFile);
   if (wellKnown) {
     return { path: wellKnown, source: 'wellKnown' };
   }

@@ -38,6 +38,34 @@ func firstBlock(t *testing.T, ev driver.Event) driver.ContentBlock {
 	return blocks[0]
 }
 
+func TestStartReapsProcessWhenHandshakeFails(t *testing.T) {
+	dir := t.TempDir()
+	script := "#!/bin/sh\n" +
+		"IFS= read -r request\n" +
+		"printf '%s\\n' '{\"id\":1,\"error\":{\"code\":-1,\"message\":\"initialize refused\"}}'\n" +
+		"IFS= read -r request\n"
+	if err := os.WriteFile(filepath.Join(dir, "app-server"), []byte(script), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	d := New(Options{Bin: "/bin/sh", Cwd: dir})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := d.Start(ctx)
+	if err == nil || !strings.Contains(err.Error(), "initialize refused") {
+		t.Fatalf("Start error = %v, want initialize refusal", err)
+	}
+	if d.cmd == nil {
+		t.Fatal("failed handshake did not retain the process for cleanup verification")
+	}
+	if d.cmd.ProcessState == nil {
+		t.Fatal("failed handshake returned before reaping the process")
+	}
+	if _, ok := <-d.Approvals(); ok {
+		t.Error("failed handshake left approvals stream open")
+	}
+}
+
 // TestFixtureReplay drives docs/codex-fixtures/app-server-session.ndjson
 // through the Driver's read loop exactly as codex's stdout would, and asserts
 // the full resulting driver.Event sequence. The fixture is a real two-turn

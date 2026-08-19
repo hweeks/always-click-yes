@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/hweeks/always-click-yes/internal/codex"
+	"github.com/hweeks/always-click-yes/internal/config"
 	"github.com/hweeks/always-click-yes/internal/mcp"
 	"github.com/hweeks/always-click-yes/internal/orchestrator"
 	"github.com/hweeks/always-click-yes/internal/ui"
@@ -66,6 +67,9 @@ func TestCodexParentOptionsCarrySafetyInvariants(t *testing.T) {
 	if opts.Model != "gpt-x" {
 		t.Errorf("parent Model = %q, want f.Model", opts.Model)
 	}
+	if !opts.IsolateMCP {
+		t.Error("parent IsolateMCP = false, want inherited MCP servers disabled")
+	}
 
 	args := mcpArgsFor(t, opts.Config)
 	joined := strings.Join(args, " ")
@@ -113,6 +117,9 @@ func TestCodexChildOptionsCarryChildInvariants(t *testing.T) {
 	if opts.Model != "gpt-child" {
 		t.Errorf("child Model = %q, want f.ChildModel", opts.Model)
 	}
+	if !opts.IsolateMCP {
+		t.Error("child IsolateMCP = false, want inherited MCP servers disabled")
+	}
 
 	args := mcpArgsFor(t, opts.Config)
 	joined := strings.Join(args, " ")
@@ -121,6 +128,39 @@ func TestCodexChildOptionsCarryChildInvariants(t *testing.T) {
 	}
 	if strings.Contains(joined, "--role "+string(mcp.RoleParent)) {
 		t.Errorf("args = %v, must never carry the parent role", args)
+	}
+}
+
+func TestCodexArchitectIncludesOnlyConfiguredJiraExtra(t *testing.T) {
+	jira := &config.JiraConfig{
+		Server: "company-jira",
+		MCP: &config.JiraMCP{
+			Command: "/opt/jira-mcp",
+			Args:    []string{"serve"},
+			Env:     map[string]string{"TOKEN": "secret"},
+		},
+	}
+	arch := codexParentOptions(Flags{ArchMode: true, Jira: jira}, "/bin/acy", "/tmp/mcp.sock", mcp.RoleArchitect, "prompt", nil, nil, ui.LaunchSpec{})
+	servers := mcpServersOf(t, arch.Config)
+	entry, ok := servers["company-jira"].(map[string]any)
+	if !ok {
+		t.Fatalf("architect MCP servers = %#v, want configured Jira", servers)
+	}
+	if entry["command"] != "/opt/jira-mcp" {
+		t.Errorf("Jira command = %v, want /opt/jira-mcp", entry["command"])
+	}
+	if got, ok := entry["env"].(map[string]string); !ok || got["TOKEN"] != "secret" {
+		t.Errorf("Jira env = %#v, want configured env", entry["env"])
+	}
+
+	plain := codexParentOptions(Flags{Jira: jira}, "/bin/acy", "/tmp/mcp.sock", mcp.RoleParent, "prompt", nil, nil, ui.LaunchSpec{})
+	if _, leaked := mcpServersOf(t, plain.Config)["company-jira"]; leaked {
+		t.Error("plain Codex parent inherited architect-only Jira MCP server")
+	}
+
+	child := codexChildOptions(Flags{ArchMode: true, Jira: jira}, "/bin/acy", "/tmp/mcp.sock", nil, nil)
+	if _, leaked := mcpServersOf(t, child.Config)["company-jira"]; leaked {
+		t.Error("Codex child inherited architect-only Jira MCP server")
 	}
 }
 
