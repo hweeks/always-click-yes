@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"sync"
 )
 
 // Handler answers a tools/call. name is the *bare* tool name — claude sends
@@ -29,30 +30,84 @@ const maxLine = 1 << 20
 // the caller's --role flag rather than negotiated, so a child cannot talk its
 // way into the parent's toolset.
 //
-// The loop is deliberately serial: handle runs inline, so a second tools/call is
-// not read off stdin until the first has answered. That is load-bearing for
-// Dispatch — it is what makes one task at a time a property of the transport
-// rather than a rule somebody has to remember.
+// tools/call handlers run concurrently. A call may block for minutes (most
+// obviously AskUserQuestion while a human decides), and Codex can issue another
+// MCP call before that first one has returned. If the read loop waits inside the
+// first handler, the later call sits unread in stdin until Codex's tools/call
+// timeout expires. Responses may therefore arrive out of order, as JSON-RPC
+// permits; their ids are the correlation mechanism.
+//
+// Non-call methods remain inline so initialization and tool discovery retain
+// their natural order. Serve waits for in-flight calls before returning, and
+// serializes writes because json.Encoder is not safe for concurrent use.
 func Serve(in io.Reader, out io.Writer, role Role, h Handler) error {
 	br := bufio.NewReaderSize(in, maxLine)
 	enc := json.NewEncoder(out)
+	var writeMu sync.Mutex
+	var calls sync.WaitGroup
+	writeErr := make(chan error, 1)
+
+	write := func(resp response) error {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		return enc.Encode(resp)
+	}
+	waitCalls := func() error {
+		calls.Wait()
+		select {
+		case err := <-writeErr:
+			return err
+		default:
+			return nil
+		}
+	}
 
 	for {
 		line, err := br.ReadBytes('\n')
 		if len(bytes.TrimSpace(line)) > 0 {
-			if resp, ok := handle(line, role, h); ok {
-				if err := enc.Encode(resp); err != nil {
+			if isToolCall(line) {
+				// ReadBytes returns fresh storage today, but own the bytes explicitly:
+				// the handler may outlive this loop iteration.
+				call := append([]byte(nil), line...)
+				calls.Add(1)
+				go func() {
+					defer calls.Done()
+					if resp, ok := handle(call, role, h); ok {
+						if err := write(resp); err != nil {
+							select {
+							case writeErr <- err:
+							default:
+							}
+						}
+					}
+				}()
+			} else if resp, ok := handle(line, role, h); ok {
+				if err := write(resp); err != nil {
+					_ = waitCalls()
 					return err
 				}
 			}
 		}
 		if err != nil {
+			callErr := waitCalls()
 			if errors.Is(err, io.EOF) {
-				return nil
+				return callErr
+			}
+			if callErr != nil {
+				return callErr
 			}
 			return err
 		}
 	}
+}
+
+// isToolCall is intentionally only a routing peek. handle remains the one place
+// that validates the complete envelope and decides whether a response is owed.
+func isToolCall(line []byte) bool {
+	var req struct {
+		Method string `json:"method"`
+	}
+	return json.Unmarshal(bytes.TrimSpace(line), &req) == nil && req.Method == "tools/call"
 }
 
 // handle decodes one message and produces its response. ok is false when the
