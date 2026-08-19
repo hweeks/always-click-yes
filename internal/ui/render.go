@@ -50,6 +50,12 @@ type entry struct {
 	styled bool   // body already carries ANSI (syntax highlighting); render it verbatim
 	task   string // the delegated task this came from ("" = the parent itself)
 
+	// agentTag is the lowercase badge label eClaude wears (Model.agentBadge,
+	// stamped in by stamp()). Entries built directly by literal in tests never
+	// go through stamp and leave this "" — renderEntry treats that the same as
+	// "claude" so every pre-existing test keeps passing unchanged.
+	agentTag string
+
 	// html is this entry rendered for a browser, and is empty unless
 	// Config.RenderHTML asked for it — which `acy run` never does, because the
 	// terminal cannot display it and generating it would be work the run pays for
@@ -149,7 +155,11 @@ func renderEntry(e entry, width, maxLines int) string {
 		return badge("you", colYou) + "\n" + entryBox(body, colYou, width)
 
 	case eClaude:
-		return badge(tag+"claude", colClaude) + "\n" + entryBox(renderMarkdown(e.body, inner), colClaude, width)
+		label := e.agentTag
+		if label == "" {
+			label = "claude"
+		}
+		return badge(tag+label, colClaude) + "\n" + entryBox(renderMarkdown(e.body, inner), colClaude, width)
 
 	case eThinking:
 		label := lipgloss.NewStyle().Foreground(colDim).Italic(true).Render("∴ thinking")

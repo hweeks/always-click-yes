@@ -37,14 +37,15 @@ import (
 	"github.com/hweeks/always-click-yes/internal/ui"
 )
 
-// requireLive skips unless the caller has opted in to spending money.
-func requireLive(t *testing.T) {
+// requireLive skips unless the caller has opted in to spending money, and
+// unless bin (the agent's own CLI — "claude" or "codex") is on PATH.
+func requireLive(t *testing.T, bin string) {
 	t.Helper()
 	if os.Getenv("ACY_LIVE") == "" {
-		t.Skip("set ACY_LIVE=1 to run the live e2e suite (it spends real tokens on your subscription)")
+		t.Skip("set ACY_LIVE=1 to run the live e2e suite (it spends real tokens/usage on your account)")
 	}
-	if _, err := exec.LookPath("claude"); err != nil {
-		t.Skip("no claude binary on PATH")
+	if _, err := exec.LookPath(bin); err != nil {
+		t.Skip("no " + bin + " binary on PATH")
 	}
 }
 
@@ -73,9 +74,10 @@ var acyBinary = sync.OnceValues(func() (string, error) {
 
 // harness is one supervised run, driven without a terminal.
 type harness struct {
-	t   *testing.T
-	sup *supervisor.Supervisor
-	hub *hub.Hub
+	t       *testing.T
+	sup     *supervisor.Supervisor
+	hub     *hub.Hub
+	logPath string // the debug log's path — see options.LogPath
 
 	// crashed makes crash idempotent: a test that kills a run and then hits a
 	// cleanup path must not stop the driver twice.
@@ -90,6 +92,19 @@ type options struct {
 	Countdown  time.Duration // gate countdown; short, so tests don't wait 30s per tool
 	Model      string
 	ChildModel string
+
+	// Agent selects which coding-agent CLI the harness drives: "" (default,
+	// claude) or "codex" — mirrors supervisor.Flags.Agent. CodexBin overrides
+	// the codex binary name/path, "" meaning the default "codex" on PATH.
+	Agent    string
+	CodexBin string
+
+	// LogPath overrides the debug log's location. "" (the default for every
+	// existing caller) keeps the old behavior of a fresh path under a scratch
+	// t.TempDir() that nothing outside newHarness ever names — a caller that
+	// wants to grep the raw wire traffic afterward (a live codex probe,
+	// chiefly) needs a path it can read back itself.
+	LogPath string
 
 	// Ctx parents the supervisor's own context; nil means
 	// context.Background(). A test that needs to simulate a real crash —
@@ -125,7 +140,14 @@ type options struct {
 // that feeds the webview needs exactly the same one.
 func newHarness(t *testing.T, opt options) *harness {
 	t.Helper()
-	requireLive(t)
+	agentBin := "claude"
+	if opt.Agent == "codex" {
+		agentBin = "codex"
+		if opt.CodexBin != "" {
+			agentBin = opt.CodexBin
+		}
+	}
+	requireLive(t, agentBin)
 
 	bin, err := acyBinary()
 	if err != nil {
@@ -154,8 +176,14 @@ func newHarness(t *testing.T, opt options) *harness {
 	ctx, cancel := context.WithCancel(parent)
 	t.Cleanup(cancel)
 
+	logPath := opt.LogPath
+	if logPath == "" {
+		logPath = filepath.Join(t.TempDir(), "acy-debug.log")
+	}
 	sup, err := supervisor.NewSupervisor(ctx, supervisor.Flags{
 		Bin:        "claude",
+		Agent:      opt.Agent,
+		CodexBin:   opt.CodexBin,
 		Cwd:        opt.Cwd,
 		HookBin:    bin,
 		Model:      opt.Model,
@@ -168,7 +196,7 @@ func newHarness(t *testing.T, opt options) *harness {
 		// thing under test: it is what stops the parent doing the work itself
 		// and makes it delegate instead.
 		PlanTools: opt.ParentTools,
-		LogPath:   filepath.Join(t.TempDir(), "acy-debug.log"),
+		LogPath:   logPath,
 		Resume:    opt.Resume,
 		Continue:  opt.Continue,
 		ArchMode:  opt.ArchMode,
@@ -185,7 +213,7 @@ func newHarness(t *testing.T, opt options) *harness {
 	// and then runs the loop. Closed before the supervisor is torn down —
 	// t.Cleanup is LIFO and this registration is the later one — so nothing is
 	// still driving a model whose gate socket has gone away.
-	h := &harness{t: t, sup: sup, hub: hub.New(sup.Model)}
+	h := &harness{t: t, sup: sup, hub: hub.New(sup.Model), logPath: logPath}
 	t.Cleanup(h.hub.Close)
 	return h
 }

@@ -80,6 +80,7 @@ func (m *Model) runCommand(name, args string) tea.Cmd {
 		// other exit path (Esc, an ended stream, a crash) — only an explicit
 		// quit tears them down, alongside fleet.Manager.Close on process exit.
 		m.cancelFleet("the run was quit")
+		m.reportUnsentQueue()
 		if m.drv != nil {
 			m.drv.Stop()
 		}
@@ -165,8 +166,11 @@ func (m Model) queueReport() string {
 		return "nothing queued — with the session idle, Enter sends straight away"
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s · goes out as one turn when the session next falls idle",
-		plural(len(m.queued), "queued message"))
+	delivery := "goes out as one turn when the session next falls idle"
+	if m.queueSendError != "" {
+		delivery = "held unsent · " + m.queueSendError
+	}
+	fmt.Fprintf(&b, "%s · %s", plural(len(m.queued), "queued message"), delivery)
 	for i, q := range m.queued {
 		fmt.Fprintf(&b, "\n%2d. %s", i+1, q.text)
 	}

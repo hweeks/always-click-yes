@@ -89,7 +89,7 @@ func (m Model) queueView() string {
 		return ""
 	}
 	dim := lipgloss.NewStyle().Foreground(colDim)
-	lines := []string{dim.Render(queueSummary(len(m.queued)))}
+	lines := []string{dim.Render(queueSummary(len(m.queued), m.queueSendError != ""))}
 	for i, q := range m.queued {
 		if i == queueMaxShown {
 			lines = append(lines, dim.Faint(true).Render(queueMoreNote(len(m.queued)-queueMaxShown)))
@@ -116,7 +116,7 @@ func (m Model) helpView() string {
 			lipgloss.NewStyle().Foreground(colDim).Render(desc)
 	}
 	lines := []string{lipgloss.NewStyle().Bold(true).Foreground(colClaude).Render(helpTitle)}
-	for _, sec := range helpContent() {
+	for _, sec := range helpContent(m.agentProse()) {
 		// The blank line goes *before* each section, which is what leaves one
 		// under the title and none trailing the last section.
 		lines = append(lines, "", lipgloss.NewStyle().Bold(true).Foreground(colDim).Render(sec.Title))
@@ -314,7 +314,7 @@ func (m Model) inputView() string {
 	// Directly under the box, because it is a statement about what is in the box:
 	// the paths are sitting there as editable text, and this line is the
 	// confirmation that acy read the drag as files rather than as a stray string.
-	if note := attachNote(m.attached, max(m.width-2, 20)); note != "" {
+	if note := attachNote(m.attached, max(m.width-2, 20), m.agentProse()); note != "" {
 		out += "\n" + lipgloss.NewStyle().Foreground(colDim).Render(note)
 	}
 	out += "\n" + hintStyle.Render(hint)

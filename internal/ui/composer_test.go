@@ -1,6 +1,8 @@
 package ui
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -103,6 +105,25 @@ func TestPlainEnterStillSends(t *testing.T) {
 	}
 }
 
+func TestFailedSendLeavesComposerIntact(t *testing.T) {
+	m := sizedModel(t)
+	m.drv = driver.NewWithWriter(driver.Options{}, failingWriteCloser{err: errors.New("broken pipe")})
+	m.input.SetValue("do not lose this")
+
+	tm, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = tm.(Model)
+
+	if got := m.input.Value(); got != "do not lose this" {
+		t.Errorf("composer = %q, want failed message preserved", got)
+	}
+	if m.processing {
+		t.Error("failed send must not begin a turn")
+	}
+	if !strings.Contains(lastBody(&m), "send failed") {
+		t.Errorf("failure was not visible: %q", lastBody(&m))
+	}
+}
+
 // ...and the /command path in handleEnter, which is a different branch entirely
 // and would fail silently by being forwarded to claude as a message.
 func TestPlainEnterStillRunsSlashCommands(t *testing.T) {
@@ -139,14 +160,27 @@ func TestAMultiParagraphMessageSendsWhole(t *testing.T) {
 	tm, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	m = tm.(Model)
 
-	// One stdin line of JSON, so the newlines are escaped rather than literal.
+	// One stdin line of JSON. Decode it before counting: acy's authoritative
+	// runtime envelope has its own newlines and is deliberately not user text.
 	wire := sent.String()
 	for _, para := range []string{"para 0", fmt.Sprintf("para %d", planParagraphs-1), "and finally"} {
 		if !strings.Contains(wire, para) {
 			t.Errorf("%q never reached the driver:\n%s", para, wire)
 		}
 	}
-	if got, want := strings.Count(wire, `\n`), planParagraphs; got != want {
+	var payload struct {
+		Message struct {
+			Content string `json:"content"`
+		} `json:"message"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(wire)), &payload); err != nil {
+		t.Fatalf("decode driver payload: %v", err)
+	}
+	_, userText, ok := strings.Cut(payload.Message.Content, "</acy-runtime>\n\n")
+	if !ok {
+		t.Fatalf("driver payload has no runtime envelope:\n%s", wire)
+	}
+	if got, want := strings.Count(userText, "\n"), planParagraphs; got != want {
 		t.Errorf("the driver saw %d newlines, want %d:\n%s", got, want, wire)
 	}
 }

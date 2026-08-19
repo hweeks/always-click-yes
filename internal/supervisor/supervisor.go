@@ -11,9 +11,11 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/hweeks/always-click-yes/internal/alog"
+	"github.com/hweeks/always-click-yes/internal/codex"
 	"github.com/hweeks/always-click-yes/internal/config"
 	"github.com/hweeks/always-click-yes/internal/driver"
 	"github.com/hweeks/always-click-yes/internal/fleet"
@@ -57,6 +59,18 @@ type Flags struct {
 	Provider   string
 	GatewayBin string
 	GatewayURL string
+
+	// Agent selects which coding-agent CLI acy supervises: "claude" or
+	// "codex". This is deliberately a different axis from Provider above.
+	// Provider selects which *model backend* claude talks to — an
+	// Anthropic-compatible gateway (LiteLLM or vLLM) sitting behind
+	// ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN. Agent selects which *CLI
+	// process* acy drives in the first place. Collapsing the two would make
+	// `--provider openai --agent codex` unreadable — one flag would be
+	// answering two unrelated questions at once. CodexBin is codex's
+	// equivalent of Bin (claude's binary path).
+	Agent    string
+	CodexBin string
 
 	// Child knobs. A dispatched child is a different kind of session from the
 	// supervising one — it does the work, unwatched, and then throws its whole
@@ -180,6 +194,12 @@ func applyFileConfig(f *Flags, c config.File, changed func(string) bool) {
 	}
 	if c.GatewayURL != "" && !changed("gateway-url") {
 		f.GatewayURL = c.GatewayURL
+	}
+	if c.Agent != "" && !changed("agent") {
+		f.Agent = c.Agent
+	}
+	if c.CodexBin != "" && !changed("codex-bin") {
+		f.CodexBin = c.CodexBin
 	}
 	if c.ChildModel != "" && !changed("child-model") {
 		f.ChildModel = c.ChildModel
@@ -369,11 +389,24 @@ func NewSupervisor(ctx context.Context, f Flags) (*Supervisor, error) {
 	// per child. LiteLLM alone inherits the real upstream key; every Claude
 	// process receives only a fresh localhost token, so child Bash commands
 	// cannot exfiltrate OPENAI_API_KEY/CEREBRAS_API_KEY/etc.
+	agent := f.Agent
+	if agent == "" {
+		agent = "claude"
+	}
+	switch agent {
+	case "claude", "codex":
+	default:
+		return fail(fmt.Errorf("unsupported --agent %q (want claude or codex)", agent))
+	}
+
 	claudeEnv := map[string]string(nil)
 	var stripEnv []string
 	provider := f.Provider
 	if provider == "" {
 		provider = "anthropic"
+	}
+	if agent == "codex" && provider != "anthropic" {
+		return fail(fmt.Errorf("--agent codex is incompatible with --provider %q: the provider gateway works by pointing ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN at a sidecar that translates Anthropic Messages API requests, and that is meaningless to a codex process — codex speaks its own protocol to its own backend, not claude's. Use --provider anthropic (the default) with --agent codex, or drop --agent codex", provider))
 	}
 	switch provider {
 	case "anthropic":
@@ -404,44 +437,195 @@ func NewSupervisor(ctx context.Context, f Flags) (*Supervisor, error) {
 		return fail(fmt.Errorf("unsupported --provider %q (want anthropic, openai, cerebras, fireworks, openrouter, or vllm)", provider))
 	}
 
-	// Start the gate server, then generate settings that point claude's
-	// PreToolUse hook at it.
-	srv, err := gate.Listen(tmp)
-	if err != nil {
-		return fail(fmt.Errorf("gate listen: %w", err))
-	}
-	closers = append(closers, func() { _ = srv.Close() })
-
-	settingsPath, err := config.WriteHookSettings(tmp, exe, srv.SocketPath())
-	if err != nil {
-		return fail(fmt.Errorf("write settings: %w", err))
-	}
-
-	// The ask bridge: acy's own MCP server gives claude the two tools `claude -p`
-	// otherwise has no equivalent of — a question picker and a way to hand over a
-	// plan. Its socket is separate from the gate's: a gate answers allow/deny, a
-	// question answers with text, and one channel carrying both would make every
-	// consumer branch on the tool name to know what it was even looking at.
+	// The ask bridge: acy's own MCP server gives the supervising session the
+	// tools neither `claude -p` nor codex has a built-in equivalent of — a
+	// question picker and a way to hand over a plan. Shared by both agents:
+	// codex reaches it the same way claude does, `<self> mcp --socket <path>
+	// --role <role>`, just registered inline on thread/start instead of via a
+	// --mcp-config file (see buildCodexPieces). Its socket is separate from
+	// the gate's: a gate answers allow/deny, a question answers with text,
+	// and one channel carrying both would make every consumer branch on the
+	// tool name to know what it was even looking at.
 	bridge, err := mcp.Listen(tmp)
 	if err != nil {
 		return fail(fmt.Errorf("mcp listen: %w", err))
 	}
 	closers = append(closers, func() { _ = bridge.Close() })
 
+	// The parent's own role varies with ArchMode — RoleArchitect gains the
+	// fleet tools, RoleChild never does — but a child is always RoleChild
+	// regardless, on both agents, so it never sees them either.
+	parentRole, parentPrompt := roleAndPrompt(f.ArchMode, f.StackMode, f.Jira)
+
+	addCloser := func(fn func()) { closers = append(closers, fn) }
+	var pieces agentPieces
+	if agent == "codex" {
+		// Constructed here, not inside buildCodexPieces, so a test can build
+		// its own codex.Bridge and hand it to buildCodexPieces directly —
+		// proving GateReqs really is that bridge's own stream, and that a
+		// driver newCodexDriver builds actually attaches to it — without
+		// starting a real codex process.
+		codexBridge := codex.NewBridge()
+		addCloser(codexBridge.Close)
+		pieces = buildCodexPieces(f, exe, bridge, codexBridge, parentRole, parentPrompt, claudeEnv, stripEnv)
+	} else {
+		pieces, err = buildClaudePieces(f, tmp, exe, bridge, parentRole, parentPrompt, claudeEnv, stripEnv, addCloser)
+		if err != nil {
+			return fail(err)
+		}
+	}
+
+	// One child at a time. See orchestrator.New: acy's MCP server handles
+	// tools/call serially, so a second Dispatch is not even read off stdin until
+	// the first returns — and two children editing one working tree would
+	// corrupt each other regardless.
+	orch := orchestrator.NewWithLimits(pieces.spawn, 1, orchestrator.Limits{
+		DefaultTaskBudgetUSD: f.TaskBudget,
+		RunBudgetUSD:         f.RunBudget,
+	})
+	closers = append(closers, func() { orch.Close() })
+
+	cwd := f.Cwd
+	if cwd == "" {
+		if cwd, err = os.Getwd(); err != nil {
+			return fail(fmt.Errorf("cwd: %w", err))
+		}
+	}
+	resumeID, err := resumeTarget(f, cwd)
+	if err != nil {
+		return fail(err)
+	}
+	if resumeID != "" {
+		alog.Printf("resume: restoring session %s", resumeID)
+		if snap, ok, loadErr := state.Load(resumeID); loadErr != nil {
+			alog.Printf("resume: could not seed child budget: %v", loadErr)
+		} else if ok {
+			// Engineer spend counts against the same run-budget ceiling as
+			// local child dispatches — both are money this run has already
+			// spent, and a resumed run must not forget either half of it.
+			var engineerSpent float64
+			for _, e := range snap.Engineers {
+				engineerSpent += e.CostUSD
+			}
+			orch.SeedSpent(snap.ChildCost + engineerSpent)
+
+			// The fleet's own run-budget ceiling only tracks engineer spend,
+			// so it is seeded with that half alone. fleet.Manager.Resume —
+			// called later, once the ui.Model's own resume flow reaches the
+			// snapshot's engineers — repopulates the ledger with these same
+			// costs; spentLocked takes the higher of the seed and the
+			// ledger sum rather than adding them, so seeding here first
+			// never double-counts once that happens.
+			if fm, ok := f.Fleet.(*fleet.Manager); ok {
+				fm.SeedSpent(engineerSpent)
+			}
+		}
+	}
+
+	// Bound once and shared: the model's picker and any second front end read the
+	// same list of resumable sessions, from the same cwd.
+	//
+	// codex gets sources of its own that honestly report nothing available,
+	// rather than claude's ~/.claude/projects transcripts: those record
+	// claude sessions in an entirely different on-disk shape
+	// (docs/codex-cli-findings.md §7), and listing or replaying them under a
+	// codex run would show the wrong history, not merely an empty one. Real
+	// codex transcript replay is deferred to a follow-up task — see
+	// codexSessionSources.
+	sessions := func() ([]session.Info, error) { return session.List(cwd) }
+	replay := func(id string) ([]driver.Event, error) { return session.Replay(cwd, id) }
+	if agent == "codex" {
+		sessions, replay = codexSessionSources()
+	}
+
+	// Wiring stays exactly as before when no interceptor is set — no extra
+	// goroutine, no channel copy — so a future headless engineer runtime is the
+	// only caller that pays for this.
+	askReqs := bridge.Requests()
+	if f.InterceptAsk != nil {
+		askReqs = filterAskReqs(askReqs, f.InterceptAsk)
+	}
+
+	model := ui.New(nil, ui.Config{
+		Ctx:          ctx,
+		Launcher:     pieces.launcher,
+		GateReqs:     pieces.gateReqs,
+		AskReqs:      askReqs,
+		Countdown:    f.Countdown,
+		LogPath:      logPath,
+		ConfigPath:   f.ConfigPath,
+		Agent:        f.Agent,
+		StartupNote:  f.StartupNote,
+		MaxLines:     f.MaxLines,
+		Cwd:          cwd,
+		RenderHTML:   f.RenderHTML,
+		AltScreen:    f.AltScreen,
+		Resume:       resumeID,
+		Dispatcher:   orch,
+		Fleet:        f.Fleet,
+		Tickets:      f.Tickets,
+		GitRunner:    f.GitRunner,
+		Trunk:        f.Trunk,
+		StackMode:    f.StackMode,
+		LoadState:    state.Load,
+		SaveState:    state.Save,
+		Replay:       replay,
+		Sessions:     sessions,
+		Branch:       func() (string, error) { return gitops.CurrentBranch(ctx, gitops.DefaultRunner, cwd) },
+		ParentNoExec: pieces.parentNoExec,
+	})
+
+	return &Supervisor{
+		Model:     model,
+		Close:     closeAll,
+		Sessions:  sessions,
+		LoadState: state.Load,
+	}, nil
+}
+
+// agentPieces is what each agent's path builds: the gate request stream
+// ui.Config.GateReqs reads from, whether the parent must be denied exec
+// (ui.Config.ParentNoExec — claude never sets this; see its own doc comment
+// for why codex must), and the launcher/spawn closures wired into the model
+// and the orchestrator.
+type agentPieces struct {
+	gateReqs     <-chan *gate.Pending
+	parentNoExec bool
+	launcher     ui.Launcher
+	spawn        orchestrator.Spawn
+}
+
+// buildClaudePieces wires the claude path exactly as NewSupervisor always
+// has: the gate server, the generated hook settings, the two --mcp-config
+// files (parent and child roles), and the launcher/spawn closures that close
+// over them. Kept as its own function, its body unchanged from what used to
+// sit inline in NewSupervisor, so the codex path beside it (buildCodexPieces)
+// can never accidentally tangle with this one's comments or behavior.
+func buildClaudePieces(f Flags, tmp, exe string, bridge *mcp.Bridge, parentRole mcp.Role, parentPrompt string, claudeEnv map[string]string, stripEnv []string, addCloser func(func())) (agentPieces, error) {
+	// Start the gate server, then generate settings that point claude's
+	// PreToolUse hook at it.
+	srv, err := gate.Listen(tmp)
+	if err != nil {
+		return agentPieces{}, fmt.Errorf("gate listen: %w", err)
+	}
+	addCloser(func() { _ = srv.Close() })
+
+	settingsPath, err := config.WriteHookSettings(tmp, exe, srv.SocketPath())
+	if err != nil {
+		return agentPieces{}, fmt.Errorf("write settings: %w", err)
+	}
+
 	// Two configs, differing only in --role. A child is launched with the child
 	// one, so it never sees Dispatch: without that split it would inherit the
 	// parent's config, gain the ability to delegate, and spawn an unbounded tree
-	// of unsupervised processes. The parent's own role varies with ArchMode —
-	// RoleArchitect gains the fleet tools, RoleChild never does — but a child is
-	// always RoleChild regardless, so it never sees them either.
-	parentRole, parentPrompt := roleAndPrompt(f.ArchMode, f.StackMode, f.Jira)
+	// of unsupervised processes.
 	mcpConfigPath, err := config.WriteMCPConfig(tmp, exe, bridge.SocketPath(), parentRole, jiraExtraServers(f)...)
 	if err != nil {
-		return fail(fmt.Errorf("write mcp config: %w", err))
+		return agentPieces{}, fmt.Errorf("write mcp config: %w", err)
 	}
 	mcpChildConfigPath, err := config.WriteMCPConfig(tmp, exe, bridge.SocketPath(), mcp.RoleChild)
 	if err != nil {
-		return fail(fmt.Errorf("write child mcp config: %w", err))
+		return agentPieces{}, fmt.Errorf("write child mcp config: %w", err)
 	}
 
 	// launcher starts a claude driver appropriate to each phase. Both get the
@@ -454,7 +638,7 @@ func NewSupervisor(ctx context.Context, f Flags) (*Supervisor, error) {
 	// in `default` mode over a read-only --tools registry instead: Write and Edit are
 	// not merely denied there, they do not exist, which is the stronger guarantee.
 	// The planning contract plan mode used to inject is carried by the system prompt.
-	launcher := func(ctx context.Context, spec ui.LaunchSpec) (*driver.Driver, error) {
+	launcher := func(ctx context.Context, spec ui.LaunchSpec) (ui.Agent, error) {
 		model := spec.Model
 		if model == "" {
 			model = f.Model
@@ -540,98 +724,71 @@ func NewSupervisor(ctx context.Context, f Flags) (*Supervisor, error) {
 		return d, nil
 	}
 
-	// One child at a time. See orchestrator.New: acy's MCP server handles
-	// tools/call serially, so a second Dispatch is not even read off stdin until
-	// the first returns — and two children editing one working tree would
-	// corrupt each other regardless.
-	orch := orchestrator.NewWithLimits(spawn, 1, orchestrator.Limits{
-		DefaultTaskBudgetUSD: f.TaskBudget,
-		RunBudgetUSD:         f.RunBudget,
-	})
-	closers = append(closers, func() { orch.Close() })
+	return agentPieces{gateReqs: srv.Requests(), parentNoExec: false, launcher: launcher, spawn: spawn}, nil
+}
 
-	cwd := f.Cwd
-	if cwd == "" {
-		if cwd, err = os.Getwd(); err != nil {
-			return fail(fmt.Errorf("cwd: %w", err))
+// buildCodexPieces wires the codex path beside buildClaudePieces: no gate
+// server and no hook settings file — codex's approval requests arrive
+// in-band on the driver's own connection, so codexBridge is the entire gate
+// mechanism this path needs (see the codex package's doc comment).
+// ui.Config.GateReqs is wired to the Bridge's fan-in stream rather than a
+// unix-socket server's, and ParentNoExec is true unconditionally: see
+// ui.Config.ParentNoExec's own doc comment for why codex needs it and
+// claude never does. codexBridge is built and its Close registered by the
+// caller (not here) so a test can hand in its own bridge and observe
+// attachment directly — see NewSupervisor's own comment on this call.
+func buildCodexPieces(f Flags, exe string, bridge *mcp.Bridge, codexBridge *codex.Bridge, parentRole mcp.Role, parentPrompt string, codexEnv map[string]string, stripEnv []string) agentPieces {
+	launcher := func(ctx context.Context, spec ui.LaunchSpec) (ui.Agent, error) {
+		opts := codexParentOptions(f, exe, bridge.SocketPath(), parentRole, parentPrompt, codexEnv, stripEnv, spec)
+		// Safety assertion — see assertCodexParentSafe's own comment: a
+		// future edit that loosens the sandbox or the approval policy above
+		// must fail loudly here rather than quietly launching an
+		// unsandboxed, ungated supervising session.
+		if err := assertCodexParentSafe(opts); err != nil {
+			return nil, err
 		}
-	}
-	resumeID, err := resumeTarget(f, cwd)
-	if err != nil {
-		return fail(err)
-	}
-	if resumeID != "" {
-		alog.Printf("resume: restoring session %s", resumeID)
-		if snap, ok, loadErr := state.Load(resumeID); loadErr != nil {
-			alog.Printf("resume: could not seed child budget: %v", loadErr)
-		} else if ok {
-			// Engineer spend counts against the same run-budget ceiling as
-			// local child dispatches — both are money this run has already
-			// spent, and a resumed run must not forget either half of it.
-			var engineerSpent float64
-			for _, e := range snap.Engineers {
-				engineerSpent += e.CostUSD
-			}
-			orch.SeedSpent(snap.ChildCost + engineerSpent)
-
-			// The fleet's own run-budget ceiling only tracks engineer spend,
-			// so it is seeded with that half alone. fleet.Manager.Resume —
-			// called later, once the ui.Model's own resume flow reaches the
-			// snapshot's engineers — repopulates the ledger with these same
-			// costs; spentLocked takes the higher of the seed and the
-			// ledger sum rather than adding them, so seeding here first
-			// never double-counts once that happens.
-			if fm, ok := f.Fleet.(*fleet.Manager); ok {
-				fm.SeedSpent(engineerSpent)
-			}
+		d := newCodexDriver(opts, codexBridge)
+		if err := d.Start(ctx); err != nil {
+			return nil, err
 		}
+		return d, nil
 	}
 
-	// Bound once and shared: the model's picker and any second front end read the
-	// same list of resumable sessions, from the same cwd.
-	sessions := func() ([]session.Info, error) { return session.List(cwd) }
-
-	// Wiring stays exactly as before when no interceptor is set — no extra
-	// goroutine, no channel copy — so a future headless engineer runtime is the
-	// only caller that pays for this.
-	askReqs := bridge.Requests()
-	if f.InterceptAsk != nil {
-		askReqs = filterAskReqs(askReqs, f.InterceptAsk)
+	spawn := func(ctx context.Context, t orchestrator.Task) (orchestrator.Child, error) {
+		opts := codexChildOptions(f, exe, bridge.SocketPath(), codexEnv, stripEnv)
+		d := newCodexDriver(opts, codexBridge)
+		if err := d.Start(ctx); err != nil {
+			return nil, err
+		}
+		return d, nil
 	}
 
-	model := ui.New(nil, ui.Config{
-		Ctx:         ctx,
-		Launcher:    launcher,
-		GateReqs:    srv.Requests(),
-		AskReqs:     askReqs,
-		Countdown:   f.Countdown,
-		LogPath:     logPath,
-		ConfigPath:  f.ConfigPath,
-		StartupNote: f.StartupNote,
-		MaxLines:    f.MaxLines,
-		Cwd:         cwd,
-		RenderHTML:  f.RenderHTML,
-		AltScreen:   f.AltScreen,
-		Resume:      resumeID,
-		Dispatcher:  orch,
-		Fleet:       f.Fleet,
-		Tickets:     f.Tickets,
-		GitRunner:   f.GitRunner,
-		Trunk:       f.Trunk,
-		StackMode:   f.StackMode,
-		LoadState:   state.Load,
-		SaveState:   state.Save,
-		Replay:      func(id string) ([]driver.Event, error) { return session.Replay(cwd, id) },
-		Sessions:    sessions,
-		Branch:      func() (string, error) { return gitops.CurrentBranch(ctx, gitops.DefaultRunner, cwd) },
-	})
+	return agentPieces{gateReqs: codexBridge.Requests(), parentNoExec: true, launcher: launcher, spawn: spawn}
+}
 
-	return &Supervisor{
-		Model:     model,
-		Close:     closeAll,
-		Sessions:  sessions,
-		LoadState: state.Load,
-	}, nil
+// codexInertNote lists the explicitly-set, claude-specific flags that codex
+// cannot honor, or "" if --agent isn't codex or none of them were actually
+// set. changed is the same predicate applyFileConfig uses, so a flag left at
+// its default never produces noise — only a flag the user actually typed is
+// worth a notice.
+func codexInertNote(f Flags, changed func(string) bool) string {
+	if f.Agent != "codex" {
+		return ""
+	}
+	var notes []string
+	if changed("plan-tools") {
+		notes = append(notes, "--plan-tools has no effect under --agent codex: codex has no way to remove a tool from the model's registry at all (docs/codex-cli-findings.md §4). acy compensates by denying the supervising session's non-read-only calls at the gate instead (ParentNoExec).")
+	}
+	if changed("use-api-key") {
+		notes = append(notes, "--use-api-key has no effect under --agent codex: ANTHROPIC_API_KEY has no meaning for a codex process.")
+	}
+	if changed("task-budget") || changed("run-budget") {
+		notes = append(notes, "--task-budget/--run-budget cannot be enforced under --agent codex: codex reports no dollar figure anywhere and has no --max-budget-usd analog (docs/codex-cli-findings.md §9). Spend limiting on codex is token-based, not dollar-based.")
+	}
+	if len(notes) == 0 {
+		return ""
+	}
+	return strings.Join(notes, "\n")
 }
 
 // OverlayFileConfig applies the project's .acy.json to f.
@@ -652,6 +809,13 @@ func OverlayFileConfig(f *Flags, changed func(string) bool) error {
 		return err
 	} else if found {
 		applyFileConfig(f, file, changed)
+	}
+	if note := codexInertNote(*f, changed); note != "" {
+		if f.StartupNote == "" {
+			f.StartupNote = note
+		} else {
+			f.StartupNote += "\n" + note
+		}
 	}
 	return nil
 }

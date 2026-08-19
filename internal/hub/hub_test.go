@@ -4,12 +4,19 @@ import (
 	"encoding/json"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/hweeks/always-click-yes/internal/gate"
 	"github.com/hweeks/always-click-yes/internal/ui"
 )
+
+func (h *Hub) buildCount() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.frameBuilds
+}
 
 // The models here are built the way internal/ui's own tests build them: no
 // driver, no launcher, only injected fakes. Nothing can reach a claude process,
@@ -23,8 +30,8 @@ const (
 	// timeout here would be indistinguishable from the bug it is meant to catch.
 	settle = 5 * time.Second
 
-	// quiet is how long a test watches a stream that must stay silent. The model
-	// ticks every 120ms, so this is ~8 Updates that had better produce nothing.
+	// quiet is how long a test watches a stream that must stay silent. It spans
+	// several active 120ms ticks and is long enough to catch an idle timer leak.
 	quiet = time.Second
 )
 
@@ -92,12 +99,9 @@ func bashPending(id, cmd string) (*gate.Pending, <-chan gate.Decision) {
 
 // The property this whole package exists to preserve.
 //
-// The model ticks every 120ms for its countdowns and its spinner, so Update runs
-// constantly whether or not anything happened. ui.Frame carries no "now" for
-// exactly this reason, and the Hub compares marshalled bytes — so an idle run
-// must produce the frame it starts with and then nothing at all, forever. Get
-// this wrong and the webview is handed eight frames a second for the lifetime of
-// a run that is sitting there doing nothing.
+// An idle model schedules no tick and ui.Frame carries no "now", so an idle run
+// must produce the frame it starts with and then nothing at all. Get this wrong
+// and the webview is handed repeated frames for a run doing nothing.
 //
 // The gate at the end is the control. It is not decoration: a Hub whose loop had
 // died would also emit no frames, and a countdown can only expire inside a
@@ -135,10 +139,68 @@ func TestIdleRunEmitsNoFramesButKeepsTicking(t *testing.T) {
 	}
 }
 
+func TestCountdownTicksDoNotBuildUnchangedFrames(t *testing.T) {
+	gates := make(chan *gate.Pending, 1)
+	h := testHub(t, ui.Config{GateReqs: gates, Countdown: 5 * time.Second})
+	frames, unsub := h.Subscribe()
+	defer unsub()
+	recvFrame(t, frames, "the opening frame")
+
+	p, _ := bashPending("toolu_cosmetic", "echo hi")
+	gates <- p
+	recvFrame(t, frames, "the pending gate")
+	before := h.buildCount()
+
+	time.Sleep(4 * 120 * time.Millisecond)
+	if got := h.buildCount(); got != before {
+		t.Errorf("frame builds = %d, want unchanged %d across cosmetic ticks", got, before)
+	}
+	if res := h.Do(ui.GateDeny("toolu_cosmetic")); !res.Accepted {
+		t.Fatalf("cleanup deny failed: %s", res.Reason)
+	}
+}
+
+func TestIdleCursorBlinkDoesNotBuildFrames(t *testing.T) {
+	h := testHub(t, ui.Config{})
+	frames, unsub := h.Subscribe()
+	defer unsub()
+	recvFrame(t, frames, "the opening frame")
+
+	// Let the private initial cursor message settle; recurring BlinkMsg values
+	// after this are the behavior under test.
+	time.Sleep(100 * time.Millisecond)
+	before := h.buildCount()
+	time.Sleep(1200 * time.Millisecond)
+	if got := h.buildCount(); got != before {
+		t.Errorf("frame builds = %d, want unchanged %d across cursor blinks", got, before)
+	}
+}
+
+func TestBranchIsResolvedAtStartupWithoutIdlePolling(t *testing.T) {
+	var calls atomic.Int64
+	h := testHub(t, ui.Config{Branch: func() (string, error) {
+		calls.Add(1)
+		return "main", nil
+	}})
+	_ = h
+
+	deadline := time.Now().Add(settle)
+	for calls.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("startup branch resolutions = %d, want 1", calls.Load())
+	}
+	time.Sleep(2200 * time.Millisecond)
+	if got := calls.Load(); got != 1 {
+		t.Errorf("branch resolver ran %d times while idle, want once", got)
+	}
+}
+
 // The other half of that bargain: a run nobody is watching does not build a
 // frame at all.
 //
-// Update runs at least every 120ms, and building a Frame means copying the whole
+// Active work updates every 120ms, and building a Frame means copying the whole
 // transcript and marshalling it. The silence test above proves nothing is
 // *sent*; this proves nothing is *made*. Rev is the instrument, since it only
 // moves when a frame is actually built: three changes with nobody subscribed,

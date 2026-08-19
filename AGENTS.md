@@ -114,9 +114,9 @@ and let the interface enforce the rest.
   needs no TTY, so this is everything `tea.NewProgram` gives the terminal, minus the
   terminal. Anything that is not the TUI drives the model through it — the live e2e
   harness today, the HTTP server behind the webview next. It also owns frame delivery:
-  after every `Update` it marshals `Model.Frame()` once, and **emits nothing if the bytes
-  are unchanged**. That is what keeps an idle run silent (the model ticks every 120ms and
-  `Frame` deliberately carries no clock), and each subscriber's mailbox is one deep — a new
+  after semantic updates it marshals `Model.Frame()` once, and **emits nothing if the bytes
+  are unchanged**. Idle models schedule no tick; active cosmetic ticks are filtered before
+  frame construction, and `Frame` deliberately carries no clock. Each subscriber's mailbox is one deep — a new
   frame replaces an undelivered one, so a slow client can miss the middle of a story but
   never its ending.
 - `internal/server` — the HTTP transport in front of the Hub, and what `acy serve`
@@ -318,8 +318,8 @@ The rules a future agent will otherwise break:
   by question index for the same reason.
 - **`Frame` deliberately contains no "now".** Change detection in `internal/hub` compares
   the marshalled bytes, so a clock anywhere in the frame would make every one of the
-  model's 120 ms ticks look like news and push eight frames a second at an idle run
-  forever. Countdowns travel as an **absolute deadline** (`deadlineUnixMs`), or as a frozen
+  active countdown/animation ticks look like semantic news and waste a full frame build.
+  Countdowns travel as an **absolute deadline** (`deadlineUnixMs`), or as a frozen
   `remainingMs` once `paused` is set — exactly one of the two is ever non-zero — and the
   client animates from its own clock. `turnStartUnixMs` is absolute for the same reason.
   Do not add a `now`, a `renderedAt`, a sequence stamp, or anything else that changes on

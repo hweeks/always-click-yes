@@ -204,13 +204,13 @@ func TestFormatPathsQuotesSpaces(t *testing.T) {
 // Past two paths the note counts rather than lists, so it cannot wrap and grow
 // the footer layout() measures.
 func TestAttachNoteCountsPastTwoPaths(t *testing.T) {
-	if got := attachNote(nil, 80); got != "" {
+	if got := attachNote(nil, 80, "Claude"); got != "" {
 		t.Errorf("attachNote(nil) = %q, want empty", got)
 	}
-	if got := attachNote([]string{"/tmp/a.md"}, 80); !strings.Contains(got, "/tmp/a.md") {
+	if got := attachNote([]string{"/tmp/a.md"}, 80, "Claude"); !strings.Contains(got, "/tmp/a.md") {
 		t.Errorf("attachNote does not name the single path: %q", got)
 	}
-	got := attachNote([]string{"/tmp/a.md", "/tmp/b.md", "/tmp/c.md"}, 80)
+	got := attachNote([]string{"/tmp/a.md", "/tmp/b.md", "/tmp/c.md"}, 80, "Claude")
 	if !strings.Contains(got, "3 paths") || strings.Contains(got, "/tmp/a.md") {
 		t.Errorf("attachNote = %q, want a count rather than a list", got)
 	}
@@ -223,7 +223,7 @@ func TestAttachNoteElidesALongPathAndStaysOneRow(t *testing.T) {
 	const width = 60
 	long := "/Users/someone/very/deeply/nested/project/dir/internal/ui/view.go"
 
-	got := attachNote([]string{long}, width)
+	got := attachNote([]string{long}, width, "Claude")
 	if lipgloss.Width(got) > width {
 		t.Errorf("note is %d cells wide, want <= %d: %q", lipgloss.Width(got), width, got)
 	}

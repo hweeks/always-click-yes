@@ -77,7 +77,7 @@ When you are armed, follow this sequence exactly:
 // gone), update the board, and finish once the human (this test) merges the
 // PR — all without ever launching a second engineer.
 func TestE2EArchResumeRecoversEngineer(t *testing.T) {
-	requireLive(t)
+	requireLive(t, "claude")
 
 	acyBin, err := acyBinary()
 	if err != nil {

@@ -220,7 +220,11 @@ func gateQueuedNote(behind int) string {
 // queueSummary is the queue panel's headline. It is the answer to "did that
 // Enter do anything?", which used to be "no" — and it names the moment the
 // messages leave, because "queued" alone does not say what releases them.
-func queueSummary(n int) string {
+
+func queueSummary(n int, held bool) string {
+	if held {
+		return fmt.Sprintf("⚠ %d queued · held unsent · /queue to review", n)
+	}
 	return fmt.Sprintf("⏳ %d queued · sends when this turn ends", n)
 }
 
@@ -249,8 +253,9 @@ const helpTitle = "always-click-yes · help"
 
 // helpContent is everything the /help overlay says, as structure rather than as
 // pre-styled lines. helpView renders it; a webview can render the same rows into
-// a table without parsing ANSI back out of a string.
-func helpContent() []HelpSection {
+// a table without parsing ANSI back out of a string. agent is the capitalized
+// name (Model.agentProse) the two agent-specific rows below should read.
+func helpContent(agent string) []HelpSection {
 	return []HelpSection{{
 		Title: "commands",
 		Rows: []HelpRow{
@@ -271,7 +276,7 @@ func helpContent() []HelpSection {
 			{"/quit", "quit (same as Ctrl+C)"},
 		},
 	}, {
-		Title: "while Claude is working",
+		Title: "while " + agent + " is working",
 		Rows: []HelpRow{
 			{"Enter", "queues the message; the whole queue goes out as ONE turn when the"},
 			{"", "turn ends — one turn, because each one re-bills the whole context"},
@@ -291,7 +296,7 @@ func helpContent() []HelpSection {
 			{"", "is indistinguishable from Enter and simply sends — use Ctrl+J"},
 			{"paste", "a multi-line paste arrives whole; it never sends"},
 			{"drag a file", "dropping or pasting a file path attaches it as an absolute path —"},
-			{"", "Claude reads it with its own Read tool, so nothing is sent until it does"},
+			{"", agent + " reads it with its own Read tool, so nothing is sent until it does"},
 			{"Ctrl+G", "arm the plan (start auto-run)"},
 			{"Esc", "interject / interrupt the current turn"},
 			{"↑/↓ PgUp/PgDn", "scroll the transcript"},
@@ -315,7 +320,7 @@ func helpContent() []HelpSection {
 			{"Esc", "close without changing anything"},
 		},
 	}, {
-		Title: "while Claude is asking a question",
+		Title: "while " + agent + " is asking a question",
 		Rows: []HelpRow{
 			{"↑/↓ j/k", "move between options"},
 			{"Space", "toggle a choice (multi-select only)"},

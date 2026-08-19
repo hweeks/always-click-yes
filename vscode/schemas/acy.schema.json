@@ -51,6 +51,15 @@
       "type": "string",
       "description": "Anthropic Messages endpoint for provider vllm. Unset = http://127.0.0.1:8000."
     },
+    "agent": {
+      "type": "string",
+      "enum": ["claude", "codex"],
+      "description": "Which coding-agent CLI acy supervises. This is a different axis from \"provider\": provider selects which model backend claude talks to, while agent selects which CLI process acy drives in the first place. Unset = \"claude\"."
+    },
+    "codexBin": {
+      "type": "string",
+      "description": "Path to the codex binary. Unset = \"codex\" from PATH."
+    },
     "childModel": {
       "type": "string",
       "description": "Model for dispatched children. Unset = sonnet."

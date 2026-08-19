@@ -216,16 +216,17 @@ func formatPaths(paths []string) string {
 // truncating from the tail like everything else here would cut off the word
 // "attached" and leave a bare path with no explanation of why it is there.
 //
-// width <= 0 means "don't measure" — the note comes back whole.
-func attachNote(paths []string, width int) string {
+// width <= 0 means "don't measure" — the note comes back whole. agent is the
+// capitalized name (Model.agentProse) naming who will read the attachment.
+func attachNote(paths []string, width int, agent string) string {
 	if len(paths) == 0 {
 		return ""
 	}
 	const prefix = "📎 "
 	if len(paths) > 2 {
-		return prefix + plural(len(paths), "path") + " attached — Claude will read them"
+		return prefix + plural(len(paths), "path") + " attached — " + agent + " will read them"
 	}
-	suffix := " attached — Claude will read it"
+	suffix := " attached — " + agent + " will read it"
 	list := strings.Join(paths, ", ")
 	if avail := width - lipgloss.Width(prefix) - lipgloss.Width(suffix); width > 0 && lipgloss.Width(list) > avail {
 		// Split what is left evenly and keep each path's tail: the file name is the

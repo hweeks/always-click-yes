@@ -399,10 +399,12 @@ func (m *Model) armAction() ActionResult {
 		// A resume knows its session id before the process exists. arm() refuses
 		// this itself and says so in the transcript; call it so that sentence comes
 		// from the one place that has ever printed it.
-		m.arm()
+		_ = m.arm()
 		return rejected("no session is running")
 	}
-	m.arm()
+	if err := m.arm(); err != nil {
+		return rejected("could not arm: " + err.Error())
+	}
 	return accepted("armed")
 }
 

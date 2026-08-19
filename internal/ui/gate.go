@@ -49,8 +49,8 @@ func waitAsk(ch <-chan *mcp.Pending) tea.Cmd {
 	}
 }
 
-// tickInterval drives both the gate countdown and the working spinner; keep it
-// brisk enough for smooth spinner motion.
+// tickInterval drives both the gate countdown and the working spinner while one
+// is live; idle models do not schedule it. Keep it brisk enough for animation.
 const tickInterval = 120 * time.Millisecond
 
 func tickCmd() tea.Cmd {
@@ -112,6 +112,24 @@ func (m *Model) enqueue(p *gate.Pending) {
 	if !fromChild && readOnlyParentTools[tool] {
 		p.Resolve(gate.Decision{Behavior: gate.Allow, Reason: "read-only tool in the supervising session"})
 		alog.Printf("gate: pass-through tool=%s (parent, read-only)", p.Input.ToolName)
+		return
+	}
+	// ParentNoExec stands in, on codex, for a guarantee claude gets for free:
+	// the supervising session's --tools registry simply has no Bash in it, so
+	// on claude this branch is unreachable — there is nothing to deny because
+	// there is nothing to call. Codex has no such registry filter (only
+	// sandbox/approval policy wrapping an ever-present shell tool, per
+	// Config.ParentNoExec's doc comment), so on a codex run the parent really
+	// can ask to run one, and this is the only thing left to say no. That
+	// makes it weaker in kind, not just in degree: a bug here removes a
+	// constraint, where the same bug on claude's side would have nothing to
+	// remove. A deny here must never become a countdown, exactly like the
+	// merge guard's deny above — and it must never fire for a child, who is
+	// meant to write.
+	if !fromChild && m.parentNoExec {
+		p.Resolve(gate.Decision{Behavior: gate.Deny, Reason: "the supervising session may only read"})
+		alog.Printf("gate: deny tool=%s (parent, no-exec)", p.Input.ToolName)
+		m.appendEntry(entry{kind: eWarn, title: p.Input.ToolName, body: "⛔ denied · the supervising session may only read"})
 		return
 	}
 	it := &gateItem{p: p, task: taskID}

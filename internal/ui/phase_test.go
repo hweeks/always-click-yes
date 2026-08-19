@@ -2,6 +2,7 @@ package ui
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -227,6 +228,58 @@ func TestArmFlipsPhaseInPlace(t *testing.T) {
 	}
 }
 
+func TestArmSendsAuthoritativeAutoRunPhase(t *testing.T) {
+	sent := &strings.Builder{}
+	m := New(nil, Config{Countdown: 30 * time.Second})
+	m.sessionID = "s1"
+	m.drv = driver.NewWithWriter(driver.Options{}, nopCloser{sent})
+
+	if err := m.arm(); err != nil {
+		t.Fatalf("arm: %v", err)
+	}
+	if wire := sent.String(); !strings.Contains(wire, `phase=\"AUTO-RUN\"`) ||
+		!strings.Contains(wire, "do not ask for planning approval") {
+		t.Errorf("kickoff lacks authoritative AUTO-RUN context:\n%s", wire)
+	}
+}
+
+func TestFailedArmRollsBackToPlan(t *testing.T) {
+	m := New(nil, Config{Countdown: 30 * time.Second})
+	m.sessionID = "s1"
+	m.planReady = true
+	m.drv = driver.NewWithWriter(driver.Options{}, failingWriteCloser{err: errors.New("broken pipe")})
+
+	if err := m.arm(); err == nil {
+		t.Fatal("arm succeeded despite a failed send")
+	}
+	if m.phase != PhasePlan || m.processing {
+		t.Fatalf("phase=%v processing=%v, want rolled-back PLAN", m.phase, m.processing)
+	}
+	if !m.planReady {
+		t.Error("failed arm cleared the ready plan")
+	}
+}
+
+func TestCompleteFollowupStartsANewPlan(t *testing.T) {
+	sent := &strings.Builder{}
+	m := New(nil, Config{})
+	m.phase = PhaseComplete
+	m.finishOutcome = "completed"
+	m.finishSummary = "old work"
+	m.drv = driver.NewWithWriter(driver.Options{}, nopCloser{sent})
+
+	res := m.submitText("one more change")
+	if !res.Accepted {
+		t.Fatalf("follow-up rejected: %s", res.Reason)
+	}
+	if m.phase != PhasePlan || m.finishOutcome != "" || m.finishSummary != "" {
+		t.Fatalf("phase=%v outcome=%q summary=%q, want fresh PLAN", m.phase, m.finishOutcome, m.finishSummary)
+	}
+	if wire := sent.String(); !strings.Contains(wire, `phase=\"PLAN\"`) {
+		t.Errorf("follow-up lacks PLAN phase:\n%s", wire)
+	}
+}
+
 // kickoffPrompt's "dispatch the work one task at a time" names the wrong tool
 // once the session has a fleet: TestArmFlipsPhaseInPlace already proves a
 // fleet-less run still gets that wording, so this covers the fork itself.
@@ -299,6 +352,28 @@ func TestFinishIsIdempotent(t *testing.T) {
 	m.ingestToolUse(finishEvent("completed", "second"))
 	if len(m.entries) != n {
 		t.Error("a second Finish should be ignored, not re-announced")
+	}
+}
+
+// A real run showed the model skipping straight to Dispatch instead of
+// presenting a plan first — Dispatch refused, and a turn was lost before the
+// human ever saw a plan. Both prompts must say the job plainly instead of
+// leaving it to be discovered by a refusal.
+func TestPromptsTellTheModelToPresentAPlanAndStop(t *testing.T) {
+	for name, prompt := range map[string]string{
+		"ParentSystemPrompt":  ParentSystemPrompt,
+		"ArchSystemPromptFor": ArchSystemPromptFor("off", nil),
+	} {
+		if !strings.Contains(prompt, mcp.Qualified(mcp.ToolPlan)) {
+			t.Errorf("%s: should name %s", name, mcp.Qualified(mcp.ToolPlan))
+		}
+		lower := strings.ToLower(prompt)
+		if !strings.Contains(lower, "stop") {
+			t.Errorf("%s: should tell the model to stop once the plan is presented", name)
+		}
+		if !strings.Contains(lower, "arm") {
+			t.Errorf("%s: should tie that instruction to the run not yet being armed", name)
+		}
 	}
 }
 

@@ -163,3 +163,22 @@ func TestTaskBudgetZeroIsExplicit(t *testing.T) {
 		t.Errorf("TaskBudget = %v, want 0", *got.TaskBudget)
 	}
 }
+
+// agent/codexBin are a distinct axis from provider/gatewayBin — which CLI
+// process acy drives, not which model backend claude talks to — so they get
+// their own test rather than folding into TestLoadFileReadsChildKnobs.
+func TestLoadFileReadsAgentAndCodexBin(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, `{"agent":"codex","codexBin":"/opt/codex"}`)
+
+	got, found, err := LoadFile(dir)
+	if err != nil || !found {
+		t.Fatalf("LoadFile: found=%v err=%v", found, err)
+	}
+	if got.Agent != "codex" {
+		t.Errorf("Agent = %q, want codex", got.Agent)
+	}
+	if got.CodexBin != "/opt/codex" {
+		t.Errorf("CodexBin = %q, want /opt/codex", got.CodexBin)
+	}
+}

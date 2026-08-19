@@ -22,10 +22,9 @@ import (
 //     request landed, which after an auto-approve is the wrong tool.
 //
 //   - Countdowns travel as an absolute deadline, and there is deliberately no
-//     "now" anywhere in Frame. The tick fires every 120ms; a frame carrying the
-//     current time would differ on every one of them, so change detection would
-//     degenerate into "always changed" and the server would push eight frames a
-//     second forever. A client animates the countdown from its own clock.
+//     "now" anywhere in Frame. While work is active the tick fires every 120ms;
+//     a current-time field would make every cosmetic pass look semantic. A
+//     client animates the countdown from its own clock.
 //
 // The documented contract is docs/webui-protocol.md. Change one, change both.
 type Frame struct {
@@ -291,6 +290,13 @@ type SessionRow struct {
 // entryKinds maps the internal styling enum to the wire names. A table rather
 // than a String() method on ekind, because these strings are protocol: renaming
 // an ekind constant must not silently rename a JSON value a client switches on.
+//
+// eClaude's "claude" is one of those wire names, not a label: it is a
+// structural discriminator the webview switches its entry-kind union and CSS
+// class on (see vscode/webview/protocol.ts), and the webview never prints it
+// as a badge. It deliberately does not follow Model.agentBadge — a codex run
+// still ships "claude" here — because renaming it would be a breaking wire
+// change for no visible difference. Do not "fix" it to track the agent name.
 var entryKinds = map[ekind]string{
 	eMeta:     "meta",
 	eYou:      "you",

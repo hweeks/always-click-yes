@@ -70,7 +70,7 @@ When you are armed, follow this sequence exactly:
 // answers from a small state file this test edits directly to simulate a
 // human merging a PR, rather than a fixed canned reply.
 func TestE2EArchMergeLoopUnderPRCap(t *testing.T) {
-	requireLive(t)
+	requireLive(t, "claude")
 
 	acyBin, err := acyBinary()
 	if err != nil {

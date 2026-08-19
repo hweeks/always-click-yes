@@ -1,9 +1,13 @@
 // Seeding logic for `ACY: Create .acy.json` — pure, vscode-free, node-testable.
 
+export type AgentName = 'claude' | 'codex';
+
 /** The acy.defaults.* settings, as read from VS Code configuration. */
 export interface Defaults {
+  agent?: string;
   model?: string;
   claudeBin?: string;
+  codexBin?: string;
   countdown?: string;
   log?: string;
   maxLines?: number;
@@ -25,11 +29,17 @@ export interface Defaults {
  */
 export function buildConfigSeed(d: Defaults): Record<string, unknown> {
   const seed: Record<string, unknown> = {};
+  if (d.agent === 'claude' || d.agent === 'codex') {
+    seed.agent = d.agent;
+  }
   if (d.model?.trim()) {
     seed.model = d.model.trim();
   }
   if (d.claudeBin?.trim()) {
     seed.claudeBin = d.claudeBin.trim();
+  }
+  if (d.codexBin?.trim()) {
+    seed.codexBin = d.codexBin.trim();
   }
   if (d.countdown?.trim()) {
     seed.countdown = d.countdown.trim();
@@ -64,4 +74,19 @@ export function buildConfigSeed(d: Defaults): Record<string, unknown> {
 /** Renders the seed the way a human would have typed it. */
 export function renderConfigSeed(seed: Record<string, unknown>): string {
   return JSON.stringify(seed, null, 2) + '\n';
+}
+
+/** Mirrors the CLI default: an existing project config without agent is Claude. */
+export function selectAgent(
+  projectAgent: unknown,
+  projectConfigExists: boolean,
+  defaultAgent: unknown,
+): AgentName {
+  if (projectAgent === 'claude' || projectAgent === 'codex') {
+    return projectAgent;
+  }
+  if (projectConfigExists) {
+    return 'claude';
+  }
+  return defaultAgent === 'codex' ? 'codex' : 'claude';
 }

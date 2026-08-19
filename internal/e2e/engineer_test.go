@@ -38,7 +38,7 @@ const pidCleanupTimeout = 30 * time.Second
 // opens a PR through a stub `gh` — proving the PR step fires with no real
 // GitHub involved. No GitHub, no network beyond claude.
 func TestE2EEngineerDetachedRunSurvivesReattach(t *testing.T) {
-	requireLive(t)
+	requireLive(t, "claude")
 
 	acyBin, err := acyBinary()
 	if err != nil {
