@@ -2,6 +2,7 @@ package ui
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -224,6 +225,58 @@ func TestArmFlipsPhaseInPlace(t *testing.T) {
 	}
 	if m.planBody != "here is the plan" {
 		t.Errorf("planBody = %q, want the last assistant turn captured", m.planBody)
+	}
+}
+
+func TestArmSendsAuthoritativeAutoRunPhase(t *testing.T) {
+	sent := &strings.Builder{}
+	m := New(nil, Config{Countdown: 30 * time.Second})
+	m.sessionID = "s1"
+	m.drv = driver.NewWithWriter(driver.Options{}, nopCloser{sent})
+
+	if err := m.arm(); err != nil {
+		t.Fatalf("arm: %v", err)
+	}
+	if wire := sent.String(); !strings.Contains(wire, `phase=\"AUTO-RUN\"`) ||
+		!strings.Contains(wire, "do not ask for planning approval") {
+		t.Errorf("kickoff lacks authoritative AUTO-RUN context:\n%s", wire)
+	}
+}
+
+func TestFailedArmRollsBackToPlan(t *testing.T) {
+	m := New(nil, Config{Countdown: 30 * time.Second})
+	m.sessionID = "s1"
+	m.planReady = true
+	m.drv = driver.NewWithWriter(driver.Options{}, failingWriteCloser{err: errors.New("broken pipe")})
+
+	if err := m.arm(); err == nil {
+		t.Fatal("arm succeeded despite a failed send")
+	}
+	if m.phase != PhasePlan || m.processing {
+		t.Fatalf("phase=%v processing=%v, want rolled-back PLAN", m.phase, m.processing)
+	}
+	if !m.planReady {
+		t.Error("failed arm cleared the ready plan")
+	}
+}
+
+func TestCompleteFollowupStartsANewPlan(t *testing.T) {
+	sent := &strings.Builder{}
+	m := New(nil, Config{})
+	m.phase = PhaseComplete
+	m.finishOutcome = "completed"
+	m.finishSummary = "old work"
+	m.drv = driver.NewWithWriter(driver.Options{}, nopCloser{sent})
+
+	res := m.submitText("one more change")
+	if !res.Accepted {
+		t.Fatalf("follow-up rejected: %s", res.Reason)
+	}
+	if m.phase != PhasePlan || m.finishOutcome != "" || m.finishSummary != "" {
+		t.Fatalf("phase=%v outcome=%q summary=%q, want fresh PLAN", m.phase, m.finishOutcome, m.finishSummary)
+	}
+	if wire := sent.String(); !strings.Contains(wire, `phase=\"PLAN\"`) {
+		t.Errorf("follow-up lacks PLAN phase:\n%s", wire)
 	}
 }
 

@@ -49,8 +49,8 @@ func waitAsk(ch <-chan *mcp.Pending) tea.Cmd {
 	}
 }
 
-// tickInterval drives both the gate countdown and the working spinner; keep it
-// brisk enough for smooth spinner motion.
+// tickInterval drives both the gate countdown and the working spinner while one
+// is live; idle models do not schedule it. Keep it brisk enough for animation.
 const tickInterval = 120 * time.Millisecond
 
 func tickCmd() tea.Cmd {

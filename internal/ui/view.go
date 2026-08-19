@@ -89,7 +89,7 @@ func (m Model) queueView() string {
 		return ""
 	}
 	dim := lipgloss.NewStyle().Foreground(colDim)
-	lines := []string{dim.Render(queueSummary(len(m.queued)))}
+	lines := []string{dim.Render(queueSummary(len(m.queued), m.queueSendError != ""))}
 	for i, q := range m.queued {
 		if i == queueMaxShown {
 			lines = append(lines, dim.Faint(true).Render(queueMoreNote(len(m.queued)-queueMaxShown)))

@@ -97,3 +97,59 @@ func TestRebuildWidthChangeInvalidates(t *testing.T) {
 		t.Error("expected the rendered content to change after a width change")
 	}
 }
+
+func TestRebuildPreservesScrollbackOnNewOutput(t *testing.T) {
+	m := sizedModel(t)
+	for i := range 40 {
+		m.appendEntry(entry{kind: eClaude, body: "history line " + strconv.Itoa(i)})
+	}
+	m.rebuild()
+	m.vp.GotoTop()
+	m.vp.ScrollDown(5)
+	before := m.vp.YOffset()
+	if before == 0 || m.vp.AtBottom() {
+		t.Fatalf("setup: offset=%d atBottom=%v, want scrolled into history", before, m.vp.AtBottom())
+	}
+
+	m.appendEntry(entry{kind: eClaude, body: "new output"})
+	m.rebuild()
+
+	if got := m.vp.YOffset(); got != before {
+		t.Errorf("offset = %d, want preserved %d after new output", got, before)
+	}
+}
+
+func TestRebuildFollowsNewOutputWhenAlreadyAtBottom(t *testing.T) {
+	m := sizedModel(t)
+	for i := range 40 {
+		m.appendEntry(entry{kind: eClaude, body: "history line " + strconv.Itoa(i)})
+	}
+	m.rebuild()
+	if !m.vp.AtBottom() {
+		t.Fatal("setup: rebuild should initially follow the bottom")
+	}
+
+	m.appendEntry(entry{kind: eClaude, body: strings.Repeat("new output ", 20)})
+	m.rebuild()
+
+	if !m.vp.AtBottom() {
+		t.Errorf("new output stopped following while viewport was pinned; offset=%d", m.vp.YOffset())
+	}
+}
+
+func TestNoopRebuildDoesNotMoveScrollback(t *testing.T) {
+	m := sizedModel(t)
+	for i := range 40 {
+		m.appendEntry(entry{kind: eClaude, body: "history line " + strconv.Itoa(i)})
+	}
+	m.rebuild()
+	m.vp.GotoTop()
+	m.vp.ScrollDown(4)
+	before := m.vp.YOffset()
+
+	m.rebuild()
+
+	if got := m.vp.YOffset(); got != before {
+		t.Errorf("offset = %d, want %d after no-op rebuild", got, before)
+	}
+}

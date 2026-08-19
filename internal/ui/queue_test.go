@@ -2,6 +2,8 @@ package ui
 
 import (
 	"encoding/json"
+	"errors"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +14,13 @@ import (
 	"github.com/hweeks/always-click-yes/internal/orchestrator"
 	"github.com/hweeks/always-click-yes/internal/state"
 )
+
+type failingWriteCloser struct{ err error }
+
+func (w failingWriteCloser) Write([]byte) (int, error) { return 0, w.err }
+func (failingWriteCloser) Close() error                { return nil }
+
+var _ io.WriteCloser = failingWriteCloser{}
 
 // busyModel is the state that used to eat every keystroke: a turn in flight on a
 // driver whose stdin a test can read back.
@@ -87,6 +96,81 @@ func TestResultEventFlushesTheQueueAsOneTurn(t *testing.T) {
 	}
 	if !m.processing {
 		t.Error("a flush starts a turn")
+	}
+}
+
+func TestFailedQueueFlushRetainsEveryMessage(t *testing.T) {
+	m := sizedModel(t)
+	m.drv = driver.NewWithWriter(driver.Options{}, failingWriteCloser{err: errors.New("broken pipe")})
+	m.phase = PhaseAutoRun
+	m.processing = true
+	m = typeAndSend(t, m, "first thought")
+	m = typeAndSend(t, m, "second thought")
+
+	tm, _ := m.Update(resultMsg(m))
+	m = tm.(Model)
+
+	if len(m.queued) != 2 || m.queued[0].text != "first thought" || m.queued[1].text != "second thought" {
+		t.Fatalf("failed flush changed queue: %+v", m.queued)
+	}
+	if m.processing {
+		t.Error("a failed flush must not invent an in-flight turn")
+	}
+	if !strings.Contains(lastBody(&m), "queued messages remain unsent") {
+		t.Errorf("failure was not surfaced: %q", lastBody(&m))
+	}
+}
+
+func TestQueuedFollowupAfterFinishReturnsToPlanBeforeSending(t *testing.T) {
+	m, sent := busyModel(t)
+	m = typeAndSend(t, m, "also fix the follow-up")
+	m.finish("completed", "done")
+
+	tm, _ := m.Update(resultMsg(m))
+	m = tm.(Model)
+
+	if m.phase != PhasePlan {
+		t.Fatalf("phase = %v, want PLAN for the follow-up", m.phase)
+	}
+	if len(m.queued) != 0 || !m.processing {
+		t.Fatalf("queue=%+v processing=%v, want successful PLAN turn", m.queued, m.processing)
+	}
+	wire := sent.String()
+	if !strings.Contains(wire, `phase=\"PLAN\"`) || strings.Contains(wire, `phase=\"AUTO-RUN\"`) {
+		t.Errorf("follow-up did not carry authoritative PLAN phase:\n%s", wire)
+	}
+}
+
+func TestQueueFromAnotherDriverGenerationNeverFlushes(t *testing.T) {
+	m, sent := busyModel(t)
+	m = typeAndSend(t, m, "do not leak this")
+	m.gen++
+	m.processing = false
+
+	if m.flushQueue() {
+		t.Fatal("queue from an old driver generation was sent")
+	}
+	if sent.String() != "" || len(m.queued) != 1 {
+		t.Fatalf("sent=%q queue=%+v, want held intact", sent.String(), m.queued)
+	}
+}
+
+func TestFullQueueRejectsWithoutClearingComposer(t *testing.T) {
+	m, _ := busyModel(t)
+	for i := 0; i < maxQueuedMessages; i++ {
+		m.queueSeq++
+		m.queued = append(m.queued, queuedMsg{id: m.queueSeq, text: "held"})
+	}
+	m.input.SetValue("keep this visible")
+
+	tm, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = tm.(Model)
+
+	if len(m.queued) != maxQueuedMessages {
+		t.Fatalf("queue length = %d, want capped %d", len(m.queued), maxQueuedMessages)
+	}
+	if got := m.input.Value(); got != "keep this visible" {
+		t.Errorf("composer = %q, want rejected message preserved", got)
 	}
 }
 

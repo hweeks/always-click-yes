@@ -353,6 +353,9 @@ type Model struct {
 	// surviving a crash to be delivered into a different phase is worse than one
 	// that was lost.
 	queued []queuedMsg
+	// queueSendError suppresses duplicate warnings when several idle-producing
+	// events all retry the same failed or phase-incompatible queue.
+	queueSendError string
 	// queueSeq mints each queuedMsg's id: monotonic, never reused, the same rule
 	// entry.seq follows for the transcript.
 	queueSeq int
@@ -370,6 +373,7 @@ type Model struct {
 	interrupted   bool      // user interrupted the current turn; don't auto-nudge
 	spinFrame     int       // advances every tick to animate the "working…" spinner
 	turnStart     time.Time // when the in-flight turn began, for the elapsed display
+	tickScheduled bool      // exactly one animation/countdown tick is outstanding
 }
 
 // New builds the initial model bound to a started driver.
@@ -386,7 +390,6 @@ func New(drv Agent, cfg Config) Model {
 	// layout), and a textinput is single-line by construction — it scrolls
 	// sideways and can only ever be one row tall.
 	ta := textarea.New()
-	ta.Placeholder = "type a message for Claude, Enter to send, Ctrl+J for a newline"
 	ta.Prompt = "▸ "
 	ta.ShowLineNumbers = false
 	ta.CharLimit = 0
@@ -458,12 +461,14 @@ func New(drv Agent, cfg Config) Model {
 
 		branchResolver: cfg.Branch,
 		parentNoExec:   cfg.ParentNoExec,
+		now:            time.Now(),
 	}
+	m.input.Placeholder = "type a message for " + m.agentProse() + ", Enter to send, Ctrl+J for a newline"
 	if m.resumeID != "" {
 		m.status = "resuming…"
 		m.appendEntry(entry{kind: eMeta, body: "↩ restoring session " + short(m.resumeID) + " …"})
 	} else {
-		m.appendEntry(entry{kind: eMeta, body: "Plan your task with Claude below. When the plan is ready, press Ctrl+G"})
+		m.appendEntry(entry{kind: eMeta, body: "Plan your task with " + m.agentProse() + " below. When the plan is ready, press Ctrl+G"})
 		m.appendEntry(entry{kind: eMeta, body: "to arm — auto-run then approves each step after a countdown."})
 	}
 	if cfg.ConfigPath != "" {
@@ -507,8 +512,8 @@ func waitEvent(ch <-chan driver.Event, gen int) tea.Cmd {
 
 func (m Model) Init() tea.Cmd {
 	cmds := []tea.Cmd{
-		textarea.Blink, waitGate(m.gateReqs), waitAsk(m.askReqs), tickCmd(),
-		branchTickCmd(), resolveBranchCmd(m.branchResolver),
+		textarea.Blink, waitGate(m.gateReqs), waitAsk(m.askReqs),
+		resolveBranchCmd(m.branchResolver),
 	}
 	if m.dispatcher != nil {
 		cmds = append(cmds, waitChild(m.dispatcher.Events()))

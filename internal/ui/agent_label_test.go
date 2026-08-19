@@ -69,3 +69,13 @@ func TestAgentLabelDefaultsToClaude(t *testing.T) {
 		t.Errorf("rate-limit notice should default to Claude, got transcript:\n%s", m.transcript())
 	}
 }
+
+func TestComposerAndStartupUseConfiguredAgentName(t *testing.T) {
+	m := New(nil, Config{Agent: "codex"})
+	if !strings.Contains(m.input.Placeholder, "Codex") || strings.Contains(m.input.Placeholder, "Claude") {
+		t.Errorf("placeholder = %q, want configured agent", m.input.Placeholder)
+	}
+	if got := m.entries[0].body; !strings.Contains(got, "Codex") || strings.Contains(got, "Claude") {
+		t.Errorf("startup = %q, want configured agent", got)
+	}
+}

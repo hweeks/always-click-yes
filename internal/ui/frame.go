@@ -22,10 +22,9 @@ import (
 //     request landed, which after an auto-approve is the wrong tool.
 //
 //   - Countdowns travel as an absolute deadline, and there is deliberately no
-//     "now" anywhere in Frame. The tick fires every 120ms; a frame carrying the
-//     current time would differ on every one of them, so change detection would
-//     degenerate into "always changed" and the server would push eight frames a
-//     second forever. A client animates the countdown from its own clock.
+//     "now" anywhere in Frame. While work is active the tick fires every 120ms;
+//     a current-time field would make every cosmetic pass look semantic. A
+//     client animates the countdown from its own clock.
 //
 // The documented contract is docs/webui-protocol.md. Change one, change both.
 type Frame struct {

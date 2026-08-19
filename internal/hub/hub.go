@@ -11,13 +11,11 @@
 // it. The e2e harness had exactly that loop hand-rolled inside it; this package
 // is that loop promoted, so there is one headless runtime rather than two.
 //
-// What the Hub adds over the loop is the frame stream. Update runs at least
-// every 120ms — the model ticks that fast for its countdowns and its spinner —
-// so a naive "push a frame per Update" would push eight frames a second at an
-// idle run forever. ui.Frame is deliberately built with no "now" in it so that
-// an idle run's frames are byte-identical; the Hub compares the marshalled
-// bytes and emits nothing when they match. Change detection and the exact bytes
-// an HTTP server writes therefore come out of the same step.
+// What the Hub adds over the loop is the frame stream. The model ticks at 120ms
+// only while a countdown or working animation is live. Those cosmetic ticks do
+// not build a Frame at all; semantic changes are marshalled once and identical
+// bytes are still suppressed as the final guard. Change detection and the exact
+// bytes an HTTP server writes therefore come out of the same step.
 package hub
 
 import (
@@ -87,6 +85,9 @@ type Hub struct {
 	// dirty says the model has moved since last was built. Building is deferred
 	// until someone actually wants a frame — see frame().
 	dirty bool
+	// frameBuilds is a test seam and a useful diagnostic counter: cosmetic ticks
+	// must not increment it merely to rediscover byte equality.
+	frameBuilds int
 
 	// subsMu guards the subscriber set alone. It is always taken *without* mu
 	// held, never nested inside it, so the two can never deadlock against each
@@ -190,13 +191,15 @@ func (h *Hub) loop() {
 				return
 			}
 			h.mu.Lock()
+			before := h.model
 			next, cmd := h.model.Update(msg)
 			h.model = next.(ui.Model)
-			// Marked, not built. Update runs at least every 120ms for the model's
-			// countdowns and its spinner, and building a Frame and marshalling it is
-			// real work — a transcript's worth of entries, every one of them copied
-			// — that an unwatched run has no reason to do eight times a second.
-			h.dirty = true
+			// Marked, not built. Building a Frame and marshalling it is real work —
+			// a transcript's worth of entries, every one copied — and cosmetic clock
+			// ticks are filtered before they can mark it.
+			if ui.FrameChangedByUpdate(before, h.model, msg) {
+				h.dirty = true
+			}
 			h.mu.Unlock()
 
 			h.publish()
@@ -206,9 +209,9 @@ func (h *Hub) loop() {
 }
 
 // publish hands the current frame to every subscriber, and does nothing at all
-// when the bytes have not changed. This is the whole of the idle-silence
-// property: the model ticks every 120ms and Frame carries no clock, so an idle
-// run marshals to the same bytes every time and nothing is sent.
+// when the bytes have not changed. Idle models schedule no clock at all; while
+// active, cosmetic ticks are filtered before this point and Frame carries no
+// clock as a second defence.
 //
 // With nobody subscribed it does not even build. That is the other half of the
 // same bargain: `acy run` drives its model through tea.Program, but the live
@@ -250,6 +253,7 @@ func (h *Hub) frame() (Update, bool) {
 	if !h.dirty {
 		return Update{Rev: h.rev, JSON: h.last}, false
 	}
+	h.frameBuilds++
 	blob, err := json.Marshal(h.model.Frame())
 	if err != nil {
 		// A frame that will not marshal is a bug in Frame, not a reason to stop

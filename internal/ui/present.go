@@ -220,7 +220,11 @@ func gateQueuedNote(behind int) string {
 // queueSummary is the queue panel's headline. It is the answer to "did that
 // Enter do anything?", which used to be "no" — and it names the moment the
 // messages leave, because "queued" alone does not say what releases them.
-func queueSummary(n int) string {
+
+func queueSummary(n int, held bool) string {
+	if held {
+		return fmt.Sprintf("⚠ %d queued · held unsent · /queue to review", n)
+	}
 	return fmt.Sprintf("⏳ %d queued · sends when this turn ends", n)
 }
 

@@ -4,6 +4,7 @@ import (
 	"strings"
 	"time"
 
+	"charm.land/bubbles/v2/cursor"
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/viewport"
@@ -57,9 +58,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	m.input.SetHeight(maxInputRows)
 
 	m, cmd := m.update(msg)
-	cmd = tea.Batch(cmd, m.syncComposerFocus())
+	cmd = tea.Batch(cmd, m.syncComposerFocus(), m.ensureTick())
 	m.layout()
 	return m, cmd
+}
+
+// ensureTick keeps one clock outstanding only while something visible actually
+// needs animation or deadline processing. Idle PLAN/COMPLETE sessions schedule
+// no model tick at all.
+func (m *Model) ensureTick() tea.Cmd {
+	if m.tickScheduled || !m.needsTick() {
+		return nil
+	}
+	m.tickScheduled = true
+	return tickCmd()
+}
+
+func (m Model) needsTick() bool {
+	return m.processing || len(m.pending) > 0 || m.ask != nil
 }
 
 // syncComposerFocus reconciles the composer's focus with whatever surface
@@ -275,6 +291,9 @@ func (m Model) update(msg tea.Msg) (Model, tea.Cmd) {
 		m.flushQueue()
 		m.rebuild()
 		cmds = append(cmds, waitEvent(m.drv.Events(), m.gen))
+		if msg.ev.IsTurnEnd() {
+			cmds = append(cmds, resolveBranchCmd(m.branchResolver))
+		}
 
 	case resumeMsg:
 		cmds = append(cmds, m.applyResume(msg))
@@ -306,6 +325,9 @@ func (m Model) update(msg tea.Msg) (Model, tea.Cmd) {
 		return m, nil
 
 	case gateMsg:
+		// Idle models schedule no clock, so refresh the deadline base at the
+		// moment work arrives rather than reusing the last animation tick.
+		m.now = time.Now()
 		m.enqueue(msg.p)
 		m.rebuild()
 		cmds = append(cmds, waitGate(m.gateReqs))
@@ -315,6 +337,7 @@ func (m Model) update(msg tea.Msg) (Model, tea.Cmd) {
 		return m, nil
 
 	case askMsg:
+		m.now = time.Now()
 		// One socket, several different waits: a question blocks on a human, a
 		// dispatch blocks on a whole local child process running a task, the
 		// fleet tools block on a remote engineer or on the fleet's own event
@@ -375,14 +398,14 @@ func (m Model) update(msg tea.Msg) (Model, tea.Cmd) {
 		// no more questions will arrive; nothing to re-arm
 		return m, nil
 
-	case branchTickMsg:
-		return m, tea.Batch(branchTickCmd(), resolveBranchCmd(m.branchResolver))
-
 	case branchMsg:
-		m.branch = msg.branch
+		if msg.branch != "" {
+			m.branch = msg.branch
+		}
 		return m, nil
 
 	case tickMsg:
+		m.tickScheduled = false
 		m.now = time.Time(msg)
 		m.spinFrame++ // animates the footer/header spinner; View() re-renders each tick
 		m.expireDue()
@@ -397,7 +420,7 @@ func (m Model) update(msg tea.Msg) (Model, tea.Cmd) {
 		if flushed || len(m.pending) > 0 || m.ask != nil {
 			m.rebuild()
 		}
-		return m, tickCmd()
+		return m, nil
 	}
 
 	// Route remaining messages to the sub-components. A bracketed paste that was
@@ -414,6 +437,32 @@ func (m Model) update(msg tea.Msg) (Model, tea.Cmd) {
 	cmds = append(cmds, cmd)
 
 	return m, tea.Batch(cmds...)
+}
+
+// FrameChangedByUpdate lets the headless runtime avoid building the complete
+// frame for a purely cosmetic spinner/countdown tick. Absolute deadlines are
+// already in Frame; m.now and spinFrame deliberately are not. A tick that
+// expires a gate/question or flushes input changes one of these cheap signals
+// and therefore still publishes normally.
+func FrameChangedByUpdate(before, after Model, msg tea.Msg) bool {
+	if _, ok := msg.(cursor.BlinkMsg); ok {
+		// Cursor visibility belongs to the terminal renderer. Frame exposes only
+		// whether the composer is active, so a web client has nothing to rebuild.
+		return false
+	}
+	if _, ok := msg.(tickMsg); !ok {
+		return true
+	}
+	return before.seq != after.seq ||
+		before.phase != after.phase ||
+		before.status != after.status ||
+		before.processing != after.processing ||
+		before.planReady != after.planReady ||
+		before.paused != after.paused ||
+		before.ended != after.ended ||
+		len(before.pending) != len(after.pending) ||
+		len(before.queued) != len(after.queued) ||
+		(before.ask == nil) != (after.ask == nil)
 }
 
 // handleGateKey processes controls while one or more permission gates are

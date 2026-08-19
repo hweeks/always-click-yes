@@ -77,6 +77,8 @@ type Launcher func(ctx context.Context, spec LaunchSpec) (Agent, error)
 var ParentSystemPrompt = strings.Join([]string{
 	"You are the lead on a supervised run. You have Read, Grep and Glob: you can understand this",
 	"codebase, and you cannot change it.",
+	"Every user turn begins with an <acy-runtime> block. Its phase is authoritative: never infer the",
+	"supervisor phase from earlier conversation, and never claim a different phase than that block names.",
 	"",
 	"Work happens by delegation. " + mcp.Qualified(mcp.ToolDispatch) + " hands one task to a fresh",
 	"worker session with the full toolset and blocks until they report back. They begin with no memory of",
@@ -132,6 +134,8 @@ func ArchSystemPromptFor(stackMode string, jira *config.JiraConfig) string {
 	lines := []string{
 		"You are the architect of a fleet run. You have Read, Grep and Glob: you can understand this",
 		"codebase, and you cannot change it.",
+		"Every user turn begins with an <acy-runtime> block. Its phase is authoritative: never infer the",
+		"supervisor phase from earlier conversation, and never claim a different phase than that block names.",
 		"",
 		"Work happens by delegation to remote engineers. " + mcp.Qualified(mcp.ToolLaunchEngineer) + " starts a full",
 		"engineer instance on a fleet host: it plans its own subtasks in its own worktree and ends by opening a",
@@ -290,6 +294,50 @@ func (m *Model) beginTurn() {
 	m.status = "working…"
 }
 
+type turnPurpose string
+
+const (
+	turnUser   turnPurpose = "user"
+	turnQueue  turnPurpose = "queued-followup"
+	turnArm    turnPurpose = "arm-kickoff"
+	turnResume turnPurpose = "resume"
+)
+
+// sendTurn is the single parent-turn boundary. The UI owns the phase machine,
+// so every backend receives that phase explicitly instead of trying to infer it
+// from a static startup prompt or from old conversation text.
+func (m *Model) sendTurn(text string, purpose turnPurpose) error {
+	directive := "The run is not armed. Inspect and discuss freely, but do not begin delegated work; present a finished plan and wait for Ctrl+G."
+	switch m.phase {
+	case PhaseAutoRun:
+		directive = "The run is armed. Continue the approved work; do not ask for planning approval or claim the run is in plan mode."
+	case PhaseComplete:
+		directive = "The prior run is complete. Review only; new work must return to PLAN before it can be armed again."
+	}
+	wire := fmt.Sprintf("<acy-runtime phase=%q purpose=%q>\n%s\n</acy-runtime>\n\n%s",
+		m.phase.String(), purpose, directive, text)
+	alog.Printf("send: phase=%s purpose=%s gen=%d", m.phase, purpose, m.gen)
+	return m.drv.Send(wire)
+}
+
+// startFollowupPlan opens a fresh approval cycle in the same conversation. A
+// completed run is not still armed: the next request may use all the context for
+// review and planning, but execution needs a new Ctrl+G.
+func (m *Model) startFollowupPlan() {
+	if m.phase != PhaseComplete {
+		return
+	}
+	m.phase = PhasePlan
+	m.planReady = false
+	m.planBody = ""
+	m.finishOutcome = ""
+	m.finishSummary = ""
+	m.status = "planning follow-up"
+	m.appendEntry(entry{kind: eMeta, body: "↩ follow-up started in PLAN · present the plan, then Ctrl+G to arm again"})
+	alog.Printf("phase: PLAN (follow-up after COMPLETE, gen=%d)", m.gen)
+	m.persist()
+}
+
 // busy reports whether the session has something in flight that a new user turn
 // would land on top of: its own turn, a permission gate waiting to be answered
 // (the turn that raised it is still open), or a delegated task the parent is
@@ -319,8 +367,24 @@ func (m *Model) sendInput() {
 // Model by value every Update, so a self-pointer here is the strings.Builder
 // crash again.
 type queuedMsg struct {
-	id   int
-	text string
+	id     int
+	text   string
+	phase  Phase
+	gen    int
+	scoped bool
+}
+
+const (
+	maxQueuedMessages = 64
+	maxQueuedBytes    = 256 << 10
+)
+
+func (m Model) queuedBytes() int {
+	n := 0
+	for _, q := range m.queued {
+		n += len(q.text)
+	}
+	return n
 }
 
 // findQueuedIndex returns the index of the queued message carrying this id, or
@@ -359,6 +423,7 @@ func (m *Model) removeQueuedAt(i int) {
 func (m *Model) clearQueue() {
 	m.queued = nil
 	m.queueOpen = false
+	m.queueSendError = ""
 }
 
 // queuedTexts is the queue's message bodies, in order — what every reader
@@ -390,14 +455,33 @@ func (m *Model) submitText(text string) ActionResult {
 		return rejected("no session is running")
 	}
 	if m.busy() {
+		if len(m.queued) >= maxQueuedMessages || m.queuedBytes()+len(text) > maxQueuedBytes {
+			reason := "queue is full; your message is still in the composer"
+			m.appendEntry(entry{kind: eWarn, body: reason})
+			return rejected(reason)
+		}
+		phase := m.phase
+		if phase == PhaseComplete {
+			phase = PhasePlan
+		}
 		m.queueSeq++
-		m.queued = append(m.queued, queuedMsg{id: m.queueSeq, text: text})
+		m.queued = append(m.queued, queuedMsg{
+			id: m.queueSeq, text: text, phase: phase, gen: m.gen, scoped: true,
+		})
+		m.queueSendError = ""
 		m.appendEntry(entry{kind: eQueued, body: text})
 		return accepted("queued until the session falls idle")
 	}
+	if m.phase == PhaseComplete {
+		m.startFollowupPlan()
+	}
 	m.interrupted = false
 	m.turnText = ""
-	_ = m.drv.Send(text)
+	if err := m.sendTurn(text, turnUser); err != nil {
+		reason := "send failed; your message is still in the composer: " + err.Error()
+		m.appendEntry(entry{kind: eWarn, body: reason})
+		return rejected(reason)
+	}
 	m.beginTurn()
 	m.appendEntry(entry{kind: eYou, body: text})
 	return accepted("sent")
@@ -419,7 +503,11 @@ func (m *Model) queueEditAction(id int, text string) ActionResult {
 		m.removeQueuedAt(i)
 		return accepted("empty edit removed the queued message")
 	}
+	if m.queuedBytes()-len(m.queued[i].text)+len(text) > maxQueuedBytes {
+		return rejected("that edit would exceed the queue size limit")
+	}
 	m.queued[i].text = text
+	m.queueSendError = ""
 	return accepted("queued message updated")
 }
 
@@ -454,14 +542,49 @@ func (m *Model) flushQueue() bool {
 	if len(m.queued) == 0 || m.ended || m.drv == nil || m.busy() {
 		return false
 	}
+	// Finish can land after a follow-up was typed but before the turn result that
+	// releases it. Deliver that intent only after downgrading to a fresh PLAN;
+	// never carry queued text invisibly into a more permissive phase.
+	if m.phase == PhaseComplete && m.queueCanReplan() {
+		m.startFollowupPlan()
+		for i := range m.queued {
+			m.queued[i].phase = PhasePlan
+		}
+	}
+	for _, q := range m.queued {
+		if q.scoped && (q.gen != m.gen || q.phase != m.phase) {
+			m.noteHeldQueue("queued messages belong to a different run phase; they remain unsent")
+			return false
+		}
+	}
 	text := strings.Join(m.queuedTexts(), "\n\n")
 	m.interrupted = false
 	m.turnText = ""
-	_ = m.drv.Send(text)
+	if err := m.sendTurn(text, turnQueue); err != nil {
+		m.noteHeldQueue("send failed; queued messages remain unsent: " + err.Error())
+		return false
+	}
 	m.appendEntry(entry{kind: eYou, body: text})
 	m.beginTurn()
 	m.clearQueue()
 	return true
+}
+
+func (m Model) queueCanReplan() bool {
+	for _, q := range m.queued {
+		if q.scoped && q.gen != m.gen {
+			return false
+		}
+	}
+	return true
+}
+
+func (m *Model) noteHeldQueue(reason string) {
+	if reason == m.queueSendError {
+		return
+	}
+	m.queueSendError = reason
+	m.appendEntry(entry{kind: eWarn, body: "⚠ " + reason})
 }
 
 // reportUnsentQueue prints anything still queued back into the transcript when
@@ -581,11 +704,14 @@ func (m *Model) onDriverReady(msg driverReadyMsg) tea.Cmd {
 	// human explicitly asked to resume, is a different thing.
 	if msg.phase == PhaseAutoRun {
 		prompt := m.resumePrompt()
-		_ = m.drv.Send(prompt)
-		m.beginTurn()
-		m.appendEntry(entry{kind: eYou, body: prompt})
-		m.interruptedTasks = nil
-		m.resumedEngineers = nil
+		if err := m.sendTurn(prompt, turnResume); err != nil {
+			m.appendEntry(entry{kind: eWarn, body: "could not resume the armed turn: " + err.Error()})
+		} else {
+			m.beginTurn()
+			m.appendEntry(entry{kind: eYou, body: prompt})
+			m.interruptedTasks = nil
+			m.resumedEngineers = nil
+		}
 	}
 
 	m.persist()
@@ -600,26 +726,31 @@ func (m *Model) onDriverReady(msg driverReadyMsg) tea.Cmd {
 // session id but no driver. Now that the parent's tools are the same in both
 // phases there is nothing to relaunch: the phase is a fact about what acy will
 // allow, not about what process is running. Dispatch starts refusing to refuse.
-func (m *Model) arm() {
+func (m *Model) arm() error {
 	if m.drv == nil {
 		// Ctrl+G already checks this, but arming is the one action that must not
 		// half-happen: flipping the phase without sending the kickoff would leave
 		// a run that looks armed and is doing nothing.
 		m.appendEntry(entry{kind: eWarn, body: "cannot arm yet — no session is running"})
-		return
+		return fmt.Errorf("no session is running")
 	}
 	m.capturePlan()
+	prompt := kickoffPromptFor(m.fleet != nil)
+	previousPhase := m.phase
 	m.phase = PhaseAutoRun
+	if err := m.sendTurn(prompt, turnArm); err != nil {
+		m.phase = previousPhase
+		m.appendEntry(entry{kind: eWarn, body: "could not arm the run: " + err.Error()})
+		return err
+	}
 	m.planReady = false
 	m.interrupted = false
 	alog.Printf("phase: AUTO-RUN (armed in place, gen=%d)", m.gen)
 	m.appendEntry(entry{kind: eGood, body: "▶ armed — delegating from here; Esc stops a running task"})
-
-	prompt := kickoffPromptFor(m.fleet != nil)
-	_ = m.drv.Send(prompt)
 	m.beginTurn()
 	m.appendEntry(entry{kind: eYou, body: prompt})
 	m.persist()
+	return nil
 }
 
 // finish ends the run because the session called Finish. The session stays up:

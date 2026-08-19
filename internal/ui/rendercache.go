@@ -5,8 +5,8 @@ package ui
 // render cached under its seq is exact forever at a given width/maxLines), and
 // joined is the whole-transcript string rebuild() last handed to the viewport.
 // dirty says whether joined is still current; when it is, rebuild() does nothing
-// at all — no re-join, no SetContent — which is the point, since the 120ms tick
-// calls rebuild() constantly while nothing on screen has changed.
+// at all — no re-join, no SetContent — which matters while active countdown and
+// spinner ticks redraw surrounding chrome without changing the transcript.
 //
 // A map survives Model's every-Update copy safely: copying the struct copies the
 // map header, not its contents, so every copy of Model shares one underlying
@@ -31,10 +31,10 @@ type renderCache struct {
 // stale joined string.
 func (m *Model) markDirty() { m.rc.dirty = true }
 
-// rebuild re-renders the transcript at the current width, if anything changed
-// since the last call, and scrolls to bottom unconditionally — GotoBottom has to
-// run every time regardless of dirty, because a driver event can grow the
-// content off-screen even when this particular call is otherwise a no-op.
+// rebuild re-renders the transcript at the current width if anything changed.
+// New output follows only while the viewport was already at the bottom. Once a
+// user scrolls back, their offset is theirs until they explicitly return to the
+// newest output; a tick or unrelated redraw must never steal it.
 func (m *Model) rebuild() {
 	if !m.ready {
 		return
@@ -52,6 +52,7 @@ func (m *Model) rebuild() {
 		m.rc.renders = make(map[int]string, len(m.entries))
 	}
 	if m.rc.dirty {
+		follow := m.vp.AtBottom()
 		if len(m.rc.renders) > len(m.entries) {
 			// Bound memory after /clear or capReplay drop entries: without this the
 			// per-entry cache only grows, holding renders for seqs that can never
@@ -62,8 +63,10 @@ func (m *Model) rebuild() {
 		m.rc.dirty = false
 		m.rc.setContentCalls++
 		m.vp.SetContent(m.rc.joined)
+		if follow {
+			m.vp.GotoBottom()
+		}
 	}
-	m.vp.GotoBottom()
 }
 
 // pruneRenderCache drops cached renders for seqs no longer present in entries.

@@ -34,10 +34,9 @@ that fallback is precisely how you approve a tool nobody looked at.
 
 **Countdowns travel as an absolute deadline, and there is no `now` in a frame.**
 `deadlineUnixMs` says *when* a gate auto-approves; the client counts down against
-its own clock. Nothing in `Frame` carries the current time, because the UI ticks
-every 120 ms and a later milestone detects change by comparing frames — a
-timestamp anywhere in here would make every tick look like news and push eight
-frames a second forever.
+its own clock. Nothing in `Frame` carries the current time. The UI ticks every
+120 ms while a countdown or working animation is live, and a timestamp would
+make every cosmetic tick look like semantic news.
 
 ## Delivery: how a client gets its frames
 
@@ -49,10 +48,9 @@ Hub had to marshal it to know whether anything changed.
 
 Three properties a client can rely on:
 
-- **A frame is emitted only when the bytes change.** The model ticks every 120ms
-  and `Frame` carries no clock, so an idle run marshals to identical bytes and
-  the Hub sends nothing at all. This is the same property the `now`-free rule
-  above exists to make possible; it is enforced there and relied on here.
+- **A frame is emitted only when semantic state changes.** An idle model schedules
+  no tick. During active work, cosmetic 120 ms ticks are rejected before frame
+  construction; byte comparison remains the final guard before delivery.
 - **`rev` counts distinct frames, from 1.** It does not advance while a run sits
   idle. A client that missed frames sees `rev` jump, which is the only way it can
   tell — there is no replay.
@@ -248,6 +246,12 @@ had the token, which was printed to the process that launched acy.
 | `configPath` | string | the `.acy.json` this run's settings came from |
 | `cwd` | string | the project this run belongs to |
 | `branch` | string | the current git branch/SHA badge; `""` when disabled or unresolved |
+
+`COMPLETE` is a review boundary, not a permanently armed state. Submitting new
+text from it starts a fresh `PLAN` in the same conversation; that plan needs a
+new `arm` action before execution. Every model turn receives this phase as an
+authoritative runtime field, so it never has to infer the state from transcript
+history.
 | `finishOutcome` | string | `"completed"` or `"abandoned"`, once the session calls Finish; omitted before then |
 | `finishSummary` | string | the summary that came with `finishOutcome`; omitted before then |
 
@@ -411,6 +415,12 @@ That is the point of it being rendered here.
 out from under a client the moment the session falls idle, so a client cannot
 target "the message at position 2" and expect it to still be that message by
 the time its action arrives.
+
+The queue is bounded at 64 messages and 256 KiB. A rejected submit leaves the
+composer text untouched. Delivery is transactional: a driver write failure
+keeps every item in the queue, and text from an old driver generation is held
+unsent instead of leaking into a resumed session. If `Finish` races a queued
+follow-up, acy first returns to `PLAN` and only then delivers it.
 
 ### `Gate`
 
@@ -608,7 +618,7 @@ there is one implementation, so there is one wording.
 
 | `kind` | refused when |
 |---|---|
-| `submit` | `text` is blank; the session has ended; there is no driver. A `/command` is routed regardless of `ended` — `/quit` and `/tokens` are exactly what you still want then |
+| `submit` | `text` is blank; the session has ended; there is no driver; the bounded queue is full; or the driver write fails. Rejected text remains in the composer. A `/command` is routed regardless of `ended` — `/quit` and `/tokens` are exactly what you still want then |
 | `arm` | the phase is not `PLAN`; there is no `sessionId` yet (claude emits none until the first user message); there is no driver — a resume knows its id before its process exists, and arming into that gap would launch a second claude for the same session |
 | `interject` | a gate is pending; there is no driver; nothing is in flight |
 | `gateAllow` / `gateDeny` | no pending gate carries that `toolUseId` — unknown, or already resolved |
