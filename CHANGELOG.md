@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.9.0](https://github.com/hweeks/always-click-yes/compare/v1.8.0...v1.9.0) (2026-08-19)
+
+
+### Features
+
+* add a codex agent backend behind an Agent interface seam ([88c63b3](https://github.com/hweeks/always-click-yes/commit/88c63b332350070504f726b7051651d483124d85))
+* integrate Codex backend ([c2923c8](https://github.com/hweeks/always-click-yes/commit/c2923c8844945392e534eb4215f7a323285a571b))
+
 ## [1.8.0](https://github.com/hweeks/always-click-yes/compare/v1.7.0...v1.8.0) (2026-08-13)
 
 
