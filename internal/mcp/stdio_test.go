@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // handshake is the exact byte sequence claude 2.1.207 sends an MCP server, captured
@@ -363,6 +364,75 @@ func TestServeHandlerErrorBecomesToolError(t *testing.T) {
 	block, _ := content[0].(map[string]any)
 	if !strings.Contains(block["text"].(string), "no such tool") {
 		t.Errorf("error text = %v, want the handler's message", block["text"])
+	}
+}
+
+// Codex does not necessarily wait for one MCP tool result before issuing the
+// next call. In the live failure that motivated this test, AskUserQuestion was
+// waiting for a human while PresentPlan sat unread behind it until Codex's
+// five-minute tools/call timeout expired. A blocking call must not block the
+// read loop or an independent response.
+func TestServeAnswersLaterToolCallWhileEarlierCallIsBlocked(t *testing.T) {
+	input := strings.Join([]string{
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"AskUserQuestion","arguments":{}}}`,
+		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"PresentPlan","arguments":{"plan":"ready"}}}`,
+		"",
+	}, "\n")
+
+	releaseAsk := make(chan struct{})
+	writes := make(chan []byte, 2)
+	w := channelWriter{writes: writes}
+	done := make(chan error, 1)
+	go func() {
+		done <- Serve(strings.NewReader(input), w, RoleParent, func(name string, _ json.RawMessage, _ string) (string, error) {
+			if name == ToolAsk {
+				<-releaseAsk
+				return "answered", nil
+			}
+			return PlanRecorded, nil
+		})
+	}()
+
+	first := readResponse(t, writes)
+	if string(first.ID) != "2" {
+		t.Fatalf("first response id = %s, want 2: PresentPlan must answer while AskUserQuestion is blocked", first.ID)
+	}
+	close(releaseAsk)
+	second := readResponse(t, writes)
+	if string(second.ID) != "1" {
+		t.Errorf("second response id = %s, want 1", second.ID)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Serve: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Serve did not return after the blocked call was released")
+	}
+}
+
+type channelWriter struct {
+	writes chan<- []byte
+}
+
+func (w channelWriter) Write(p []byte) (int, error) {
+	w.writes <- append([]byte(nil), p...)
+	return len(p), nil
+}
+
+func readResponse(t *testing.T, writes <-chan []byte) response {
+	t.Helper()
+	select {
+	case line := <-writes:
+		var resp response
+		if err := json.Unmarshal(line, &resp); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		return resp
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for MCP response")
+		return response{}
 	}
 }
 

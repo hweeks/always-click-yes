@@ -475,10 +475,10 @@ func NewSupervisor(ctx context.Context, f Flags) (*Supervisor, error) {
 		}
 	}
 
-	// One child at a time. See orchestrator.New: acy's MCP server handles
-	// tools/call serially, so a second Dispatch is not even read off stdin until
-	// the first returns — and two children editing one working tree would
-	// corrupt each other regardless.
+	// One child at a time. The MCP server keeps reading calls while an Ask or
+	// Dispatch is blocked, so the orchestrator's own limit is what serializes
+	// actual child work. Two children editing one working tree would corrupt each
+	// other regardless.
 	orch := orchestrator.NewWithLimits(pieces.spawn, 1, orchestrator.Limits{
 		DefaultTaskBudgetUSD: f.TaskBudget,
 		RunBudgetUSD:         f.RunBudget,

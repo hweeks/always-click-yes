@@ -145,10 +145,10 @@ type Limits struct {
 }
 
 // New builds an Orchestrator. limit is how many children may run at once; it is
-// 1 in practice, because acy's own MCP server handles tools/call serially (a
-// second Dispatch is not even read off stdin until the first returns) and
-// because two children editing one working tree is a correctness hazard, not
-// merely a display one.
+// 1 in practice because two children editing one working tree is a correctness
+// hazard, not merely a display one. The MCP transport accepts concurrent calls
+// (a blocked question must not prevent PresentPlan from answering), so this
+// limit and the queue are the layer that serialize actual child work.
 func New(spawn Spawn, limit int) *Orchestrator {
 	return NewWithLimits(spawn, limit, Limits{})
 }
